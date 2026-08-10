@@ -1,0 +1,4 @@
+format = "$directory$character"
+
+[character]
+success_symbol = "[>](bold green)"

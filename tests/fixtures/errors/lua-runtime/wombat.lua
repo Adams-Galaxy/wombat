@@ -1,0 +1,1 @@
+error("deliberate fixture failure")
