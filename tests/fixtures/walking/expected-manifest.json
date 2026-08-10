@@ -1,14 +1,42 @@
 {
-  "format_version": 1,
-  "modules": [],
-  "dependencies": [],
+  "format_version": 3,
+  "wombat_version": "0.1.0",
+  "build_id": "sha256:817b93fef397f36a77c417038e8f826836553fe702c9a58c954e3dd665a9b045",
+  "modules": [
+    {
+      "name": "starship",
+      "config": {}
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "starship",
+      "declared_from": "wombat.lua"
+    }
+  ],
   "artifacts": [
     {
       "kind": "file",
-      "source": "starship.toml",
-      "target": "~/.config/starship.toml",
-      "owner": "<root>",
-      "declared_from": "wombat.lua"
+      "source": "dot_config/starship.toml",
+      "target": {
+        "anchor": "config",
+        "path": "starship.toml",
+        "display": "~/.config/starship.toml",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:7fa70e4dd3b4d8a0639bd8d6f7cbad7ee8681ed3711a3a0736cdd1bc2698f822",
+        "size": 80,
+        "executable": false
+      },
+      "owner": "starship",
+      "declared_from": "modules/dot_config/starship.lua"
     }
   ]
 }

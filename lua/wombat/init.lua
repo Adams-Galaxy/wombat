@@ -11,19 +11,24 @@ function wombat.using(name)
 end
 
 function wombat.install(source_path, options)
-    if type(options) ~= "table" then
-        error("install() requires an options table with an explicit `to` target", 2)
+    if type(source_path) ~= "string" then
+        error("install() requires a string source path", 2)
     end
-    if type(options.to) ~= "string" then
-        error("install() requires a string `to` target", 2)
+    if options ~= nil and type(options) ~= "table" then
+        error("install() options must be a table", 2)
     end
-    for key in pairs(options) do
-        if key ~= "to" then
-            error("install() does not support option `" .. tostring(key) .. "` in this build", 2)
+    if options ~= nil then
+        if options.to ~= nil and type(options.to) ~= "string" then
+            error("install() requires a string `to` target", 2)
+        end
+        for key in pairs(options) do
+            if key ~= "to" then
+                error("install() does not support option `" .. tostring(key) .. "` in this build", 2)
+            end
         end
     end
 
-    return native.install_file(source_path, options.to)
+    return native.install_file(source_path, options and options.to or nil)
 end
 
 wombat.module = {}

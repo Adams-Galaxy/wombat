@@ -99,7 +99,15 @@
         "label": "Wombat: Build Walking Fixture",
         "type": "process",
         "command": "cargo",
-        "args": ["run", "--", "build", "tests/fixtures/walking"],
+        "args": [
+          "run",
+          "--",
+          "--source",
+          "tests/fixtures/walking",
+          "build",
+          "--build-dir",
+          "${workspaceFolder:Wombat}/target/wombat-fixture-build"
+        ],
         "options": {
           "cwd": "${workspaceFolder:Wombat}"
         },
@@ -131,7 +139,13 @@
             "kind": "bin"
           }
         },
-        "args": ["build", "tests/fixtures/walking"],
+        "args": [
+          "--source",
+          "tests/fixtures/walking",
+          "build",
+          "--build-dir",
+          "${workspaceFolder:Wombat}/target/wombat-fixture-debug"
+        ],
         "cwd": "${workspaceFolder:Wombat}"
       }
     ]

@@ -7,6 +7,7 @@
 
 # === Rust ===
 /target/
+/build/
 **/*.rs.bk
 
 # === Lua ===

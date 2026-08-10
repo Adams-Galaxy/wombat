@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use wombat::{Manifest, build};
+use wombat::{BuildOptions, BuildOutcome, BuildStatus, Manifest, build, verify_build};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,6 +14,10 @@ fn fixture(name: &str) -> PathBuf {
 
 fn manifest_json(manifest: &Manifest) -> String {
     serde_json::to_string_pretty(manifest).unwrap()
+}
+
+fn build_at(root: &Path, build_dir: &Path) -> wombat::Result<BuildOutcome> {
+    build(BuildOptions::new(root, build_dir))
 }
 
 fn run_wombat(args: &[&str], current_dir: &Path) -> Output {
@@ -54,8 +58,13 @@ fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
 #[test]
 fn walking_fixture_matches_the_expected_manifest() {
     let root = fixture("walking");
+    let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
-    let actual = manifest_json(&build(&root).unwrap());
+    let actual = manifest_json(
+        &build_at(&root, &temporary.path().join("build"))
+            .unwrap()
+            .manifest,
+    );
 
     assert_eq!(actual, expected.trim_end());
 }
@@ -63,19 +72,34 @@ fn walking_fixture_matches_the_expected_manifest() {
 #[test]
 fn repeated_builds_are_byte_identical_and_non_mutating() {
     let root = fixture("walking");
+    let temporary = tempfile::tempdir().unwrap();
+    let build_dir = temporary.path().join("build");
     let before = snapshot_tree(&root);
-    let first = manifest_json(&build(&root).unwrap());
-    let second = manifest_json(&build(&root).unwrap());
+    let first_outcome = build_at(&root, &build_dir).unwrap();
+    let first = manifest_json(&first_outcome.manifest);
+    let second_outcome = build_at(&root, &build_dir).unwrap();
+    let second = manifest_json(&second_outcome.manifest);
     let after = snapshot_tree(&root);
 
     assert_eq!(first, second);
+    assert_eq!(first_outcome.status, BuildStatus::Created);
+    assert_eq!(second_outcome.status, BuildStatus::Unchanged);
     assert_eq!(before, after);
 }
 
 #[test]
 fn root_selection_order_does_not_change_the_manifest() {
-    let first = manifest_json(&build(&fixture("lifecycle-order-a")).unwrap());
-    let second = manifest_json(&build(&fixture("lifecycle-order-b")).unwrap());
+    let temporary = tempfile::tempdir().unwrap();
+    let first = manifest_json(
+        &build_at(&fixture("lifecycle-order-a"), &temporary.path().join("a"))
+            .unwrap()
+            .manifest,
+    );
+    let second = manifest_json(
+        &build_at(&fixture("lifecycle-order-b"), &temporary.path().join("b"))
+            .unwrap()
+            .manifest,
+    );
 
     assert_eq!(first, second);
     assert!(first.contains(r#""name": "helper""#));
@@ -85,33 +109,88 @@ fn root_selection_order_does_not_change_the_manifest() {
 }
 
 #[test]
-fn cli_build_accepts_an_explicit_root() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = fixture("walking");
-    let output = run_wombat(&["build", root.to_str().unwrap()], repository);
+fn path_fixture_matches_the_exact_manifest_v3() {
+    let root = fixture("paths");
+    let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let actual = manifest_json(
+        &build_at(&root, &temporary.path().join("build"))
+            .unwrap()
+            .manifest,
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
-    assert!(output.stderr.is_empty());
+
+    assert_eq!(actual, expected.trim_end());
 }
 
 #[test]
-fn cli_build_defaults_to_the_current_directory() {
+fn artifact_lua_is_opaque_and_control_helpers_are_isolated() {
+    let root = fixture("opaque-lua");
+    let temporary = tempfile::tempdir().unwrap();
+    let before = snapshot_tree(&root);
+    let manifest = build_at(&root, &temporary.path().join("build"))
+        .unwrap()
+        .manifest;
+    let after = snapshot_tree(&root);
+
+    assert_eq!(before, after);
+    assert_eq!(manifest.artifacts.len(), 2);
+    assert_eq!(manifest.artifacts[0].source, "dot_config/nvim/init.lua");
+    assert_eq!(
+        manifest.artifacts[1].source,
+        "dot_config/nvim/lua/plugins/example.lua"
+    );
+    assert!(
+        fs::read_to_string(root.join("dot_config/nvim/init.lua"))
+            .unwrap()
+            .contains("must remain opaque")
+    );
+}
+
+#[test]
+fn cli_build_accepts_an_explicit_source_and_build_directory() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = fixture("walking");
-    let output = run_wombat(&["build"], &root);
-    let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let build_dir = temporary.path().join("product");
+    let output = run_wombat(
+        &[
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "--build-dir",
+            build_dir.to_str().unwrap(),
+        ],
+        repository,
+    );
 
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("created sha256:"), "{stdout}");
+    assert!(stdout.contains(build_dir.to_str().unwrap()), "{stdout}");
+    assert!(output.stderr.is_empty());
+    assert!(verify_build(&build_dir).is_ok());
+}
+
+#[test]
+fn cli_build_does_not_default_to_the_current_directory() {
+    let root = fixture("walking");
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .arg("build")
+        .current_dir(&root)
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(".local/share/wombat"));
 }
 
 #[test]
@@ -121,6 +200,7 @@ fn cli_exposes_help_version_and_usage_errors() {
     let help = run_wombat(&["--help"], repository);
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("A Lua-powered dotfiles compiler"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("add"));
 
     let version = run_wombat(&["--version"], repository);
     assert!(version.status.success());
@@ -137,19 +217,34 @@ fn cli_exposes_help_version_and_usage_errors() {
 fn cli_build_failures_use_stderr_and_exit_one() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = fixture("errors/missing-source");
-    let output = run_wombat(&["build", root.to_str().unwrap()], repository);
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_wombat(
+        &[
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "-B",
+            temporary.path().join("build").to_str().unwrap(),
+        ],
+        repository,
+    );
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist or is not a file"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not exist or is not a regular file")
+    );
 }
 
 #[test]
 fn build_errors_are_precise() {
     let cases = [
-        ("errors/missing-source", "does not exist or is not a file"),
+        (
+            "errors/missing-source",
+            "does not exist or is not a regular file",
+        ),
         ("errors/malformed-target", "must begin with `~/`"),
-        ("errors/traversing-target", "must not be empty, traverse"),
+        ("errors/traversing-target", "without traversal"),
         (
             "errors/traversing-source",
             "relative path without traversal",
@@ -158,10 +253,7 @@ fn build_errors_are_precise() {
             "errors/unsupported-artifact",
             "does not support option `kind`",
         ),
-        (
-            "errors/missing-install-options",
-            "requires an options table",
-        ),
+        ("errors/missing-install-options", "cannot infer a target"),
         ("errors/lua-runtime", "deliberate fixture failure"),
         (
             "errors/conflicting-config",
@@ -195,7 +287,7 @@ fn build_errors_are_precise() {
         ("errors/invalid-config-cycle", "cyclic Lua tables"),
         ("errors/invalid-config-number", "must be finite"),
         ("errors/invalid-export", "unsupported Lua function value"),
-        ("errors/missing-module", "does-not-exist/init.lua"),
+        ("errors/missing-module", "does-not-exist.lua"),
         (
             "errors/invalid-module-name",
             "invalid module name `themes.kanagawa`",
@@ -203,7 +295,10 @@ fn build_errors_are_precise() {
     ];
 
     for (name, expected) in cases {
-        let error = build(&fixture(name)).unwrap_err().to_string();
+        let temporary = tempfile::tempdir().unwrap();
+        let error = build_at(&fixture(name), &temporary.path().join("build"))
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains(expected),
             "fixture {name:?} did not contain {expected:?}:\n{error}"
@@ -214,8 +309,9 @@ fn build_errors_are_precise() {
 #[test]
 fn missing_root_and_entrypoint_are_reported() {
     let missing_root = fixture("does-not-exist");
+    let temporary = tempfile::tempdir().unwrap();
     assert!(
-        build(&missing_root)
+        build_at(&missing_root, &temporary.path().join("missing"))
             .unwrap_err()
             .to_string()
             .contains("failed to access")
@@ -223,7 +319,7 @@ fn missing_root_and_entrypoint_are_reported() {
 
     let no_entrypoint = fixture("errors");
     assert!(
-        build(&no_entrypoint)
+        build_at(&no_entrypoint, &temporary.path().join("no-entrypoint"))
             .unwrap_err()
             .to_string()
             .contains("wombat.lua")

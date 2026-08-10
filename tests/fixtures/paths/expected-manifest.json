@@ -1,0 +1,155 @@
+{
+  "format_version": 3,
+  "wombat_version": "0.1.0",
+  "build_id": "sha256:e26c0fa3d931738da08c3cf55d1b4fc39a65815c4e1585a02a16a792ff537e03",
+  "modules": [
+    {
+      "name": "auto",
+      "config": {}
+    },
+    {
+      "name": "override",
+      "config": {}
+    },
+    {
+      "name": "shell",
+      "config": {}
+    },
+    {
+      "name": "starship",
+      "config": {}
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "auto",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "override",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "shell",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "starship",
+      "declared_from": "wombat.lua"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "file",
+      "source": "home/.profile",
+      "target": {
+        "anchor": "home",
+        "path": ".profile",
+        "display": "~/.profile",
+        "origin": {
+          "kind": "inferred",
+          "basis": "source_prefix",
+          "source_anchor": "home"
+        }
+      },
+      "content": {
+        "digest": "sha256:4463fdea2c519fec9823366244cf997b94e6c9a17ef97464611857b88900e279",
+        "size": 23,
+        "executable": false
+      },
+      "owner": "auto",
+      "declared_from": "modules/auto.lua"
+    },
+    {
+      "kind": "file",
+      "source": "home/.zshrc",
+      "target": {
+        "anchor": "home",
+        "path": ".zshrc",
+        "display": "~/.zshrc",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "home"
+        }
+      },
+      "content": {
+        "digest": "sha256:3408a0abe8ac42d8b577610b91b44cb258271e2e478c6d89a091334700354290",
+        "size": 17,
+        "executable": false
+      },
+      "owner": "shell",
+      "declared_from": "modules/home/shell.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/auto.toml",
+      "target": {
+        "anchor": "config",
+        "path": "auto.toml",
+        "display": "~/.config/auto.toml",
+        "origin": {
+          "kind": "inferred",
+          "basis": "source_prefix",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:ead1ed0af826fd702ee4caff1f422f588c4fe3f631339f89188929b3f191397d",
+        "size": 12,
+        "executable": false
+      },
+      "owner": "auto",
+      "declared_from": "modules/auto.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/starship-work.toml",
+      "target": {
+        "anchor": "config",
+        "path": "starship-alt.toml",
+        "display": "~/.config/starship-alt.toml",
+        "origin": {
+          "kind": "explicit",
+          "declared": "~/.config/starship-alt.toml"
+        }
+      },
+      "content": {
+        "digest": "sha256:eb4a5e7d8281d1ee05defe50cbe32c7e4633d4bd8269bca94471d1f53878ebb1",
+        "size": 22,
+        "executable": false
+      },
+      "owner": "override",
+      "declared_from": "modules/dot_config/override.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/starship.toml",
+      "target": {
+        "anchor": "config",
+        "path": "starship.toml",
+        "display": "~/.config/starship.toml",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:c6dfec7286accc8a674168a1f5a2dd47f4deacf4368eab227f999c1b519f302d",
+        "size": 16,
+        "executable": false
+      },
+      "owner": "starship",
+      "declared_from": "modules/dot_config/starship.lua"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 local w = require("wombat")
 
-assert(_VERSION == "Lua 5.5")
-
+w.use("auto")
+w.use("override")
+w.use("shell")
 w.use("starship")
