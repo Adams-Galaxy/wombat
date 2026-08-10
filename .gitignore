@@ -1,0 +1,20 @@
+# === macOS ===
+.DS_Store
+.AppleDouble
+.LSOverride
+
+._*
+
+# === Rust ===
+/target/
+**/*.rs.bk
+
+# === Lua ===
+*.luac
+
+# Local design notebook. Promote implementation-critical truths into committed
+# documentation, tests, or code before relying on them.
+/docs/development-docs/
+
+# Local agent context bubble and signpost into the development notebook.
+/AGENTS.md
