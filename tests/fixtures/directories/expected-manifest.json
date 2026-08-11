@@ -1,0 +1,131 @@
+{
+  "format_version": 6,
+  "wombat_version": "0.1.0",
+  "build_id": "sha256:057acc6d3f49f46bc1e3edbf0f4c9ea4d6a5f909e6289896c78ce3e769b2cb31",
+  "inputs": [],
+  "target": {
+    "os": {
+      "name": "macos",
+      "family": "unix"
+    },
+    "arch": "aarch64",
+    "origin": "host_default"
+  },
+  "observations": [],
+  "modules": [
+    {
+      "name": "config",
+      "config": {}
+    },
+    {
+      "name": "tools",
+      "config": {}
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "config",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "tools",
+      "declared_from": "wombat.lua"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "file",
+      "source": "dot_local/bin/tool",
+      "source_origin": {
+        "kind": "directory",
+        "declared": ".",
+        "root": "dot_local",
+        "relative": "bin/tool"
+      },
+      "production": {
+        "kind": "static"
+      },
+      "target": {
+        "anchor": "home",
+        "path": ".local/bin/tool",
+        "display": "~/.local/bin/tool",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_local"
+        }
+      },
+      "content": {
+        "digest": "sha256:1c369c296d51996d40e7f3bf85a6053ed75587f4d467f173d6292f133f697225",
+        "size": 22,
+        "executable": true
+      },
+      "owner": "tools",
+      "declared_from": "modules/dot_local/tools.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/app/.hidden",
+      "source_origin": {
+        "kind": "directory",
+        "declared": "app",
+        "root": "dot_config/app",
+        "relative": ".hidden"
+      },
+      "production": {
+        "kind": "static"
+      },
+      "target": {
+        "anchor": "config",
+        "path": "app/.hidden",
+        "display": "~/.config/app/.hidden",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:e084a3683ef795d1cdbf5e9b253f2ca1f783ae0d0d6e47e419acbbc4fc80bbfa",
+        "size": 7,
+        "executable": false
+      },
+      "owner": "config",
+      "declared_from": "modules/dot_config/config.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/app/nested/settings.toml",
+      "source_origin": {
+        "kind": "directory",
+        "declared": "app",
+        "root": "dot_config/app",
+        "relative": "nested/settings.toml"
+      },
+      "production": {
+        "kind": "static"
+      },
+      "target": {
+        "anchor": "config",
+        "path": "app/nested/settings.toml",
+        "display": "~/.config/app/nested/settings.toml",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:915d5e84ec62383edc7eaf2c5f8b9884c62eb0fc6f7dbf66d3854c7d65a8f0c7",
+        "size": 15,
+        "executable": false
+      },
+      "owner": "config",
+      "declared_from": "modules/dot_config/config.lua"
+    }
+  ]
+}

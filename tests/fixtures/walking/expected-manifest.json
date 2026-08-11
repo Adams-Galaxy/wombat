@@ -1,7 +1,17 @@
 {
-  "format_version": 3,
+  "format_version": 6,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:817b93fef397f36a77c417038e8f826836553fe702c9a58c954e3dd665a9b045",
+  "build_id": "sha256:30fcce93ef03a414cfd3ba6f81fa2792f09511127e7c147e4828730fde6321af",
+  "inputs": [],
+  "target": {
+    "os": {
+      "name": "macos",
+      "family": "unix"
+    },
+    "arch": "aarch64",
+    "origin": "host_default"
+  },
+  "observations": [],
   "modules": [
     {
       "name": "starship",
@@ -20,6 +30,13 @@
     {
       "kind": "file",
       "source": "dot_config/starship.toml",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "starship.toml"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "config",
         "path": "starship.toml",

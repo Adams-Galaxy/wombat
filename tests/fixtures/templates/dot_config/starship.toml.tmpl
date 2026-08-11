@@ -1,0 +1,8 @@
+{{#if prompt}}
+format = "{{ prompt }}"
+{{else}}
+format = "disabled"
+{{/if}}
+{{#each colors}}
+palette_{{ @key }} = "{{ this }}"
+{{/each}}

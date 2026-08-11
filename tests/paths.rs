@@ -58,6 +58,42 @@ fn legacy_dot_config_source_spelling_is_rejected() {
 }
 
 #[test]
+fn every_noncanonical_config_and_local_tree_spelling_is_rejected() {
+    for (legacy, canonical) in [
+        (".local/tool", "dot_local/"),
+        ("home/.config/app", "dot_config/"),
+        ("home/.local/tool", "dot_local/"),
+    ] {
+        let repository = Repository::new("return true\n");
+        repository.write(legacy, "state\n");
+
+        let error = repository.build().unwrap_err().to_string();
+        assert!(
+            error.contains("unsupported source tree"),
+            "{legacy}: {error}"
+        );
+        assert!(error.contains(canonical), "{legacy}: {error}");
+    }
+}
+
+#[test]
+fn directories_outside_canonical_artifact_trees_are_rejected_even_with_a_target() {
+    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"plain\")\n");
+    repository.write(
+        "modules/plain.lua",
+        "local w = require(\"wombat\")\nw.install(\"plain\", { to = \"~/.config/plain\" })\n",
+    );
+    fs::create_dir(repository.root.join("plain")).unwrap();
+    repository.write("plain/file", "plain\n");
+
+    let error = repository.build().unwrap_err().to_string();
+    assert!(
+        error.contains("outside canonical artifact trees"),
+        "{error}"
+    );
+}
+
+#[test]
 fn anchorless_install_requires_a_prefix_or_explicit_target() {
     let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"plain\")\n");
     repository.write(

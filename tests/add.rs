@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use wombat::{AddStatus, BuildOptions, BuildOutcome, add, build};
+use wombat::{AddMethod, AddStatus, BuildOptions, BuildOutcome, add, build};
 
 const EMPTY_AUTO: &str =
     "local w = require(\"wombat\")\n\n-- wombat:add begin\n-- wombat:add end\n";
@@ -94,7 +94,7 @@ fn adds_config_and_literal_home_files_then_builds_them() {
     let auto = fs::read_to_string(fixture.repository.join("modules/auto.lua")).unwrap();
     assert!(auto.contains("w.install(\"dot_config/starship.toml\")\nw.install(\"home/.zshrc\")"));
     let manifest = fixture.build().unwrap().manifest;
-    assert_eq!(manifest.format_version, 3);
+    assert_eq!(manifest.format_version, 6);
     assert_eq!(manifest.artifacts.len(), 2);
     assert_eq!(manifest.artifacts[0].target.display, "~/.zshrc");
     assert_eq!(
@@ -102,6 +102,144 @@ fn adds_config_and_literal_home_files_then_builds_them() {
         "~/.config/starship.toml"
     );
     assert_eq!(fs::read(&starship).unwrap(), b"format = '$all'\n");
+}
+
+#[test]
+fn uniquely_covered_files_bypass_auto_for_config_local_and_home() {
+    let fixture = AddFixture::selected_auto();
+    fs::write(
+        fixture.repository.join("wombat.lua"),
+        "local w = require(\"wombat\")\nw.use(\"trees\")\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repository.join("modules/trees.lua"),
+        "local w = require(\"wombat\")\nw.install(\"dot_config\")\nw.install(\"dot_local\")\nw.install(\"home\")\n",
+    )
+    .unwrap();
+    fs::remove_file(fixture.repository.join("modules/auto.lua")).unwrap();
+    for anchor in ["dot_config", "dot_local", "home"] {
+        fs::create_dir(fixture.repository.join(anchor)).unwrap();
+    }
+    let config = fixture.write_target(".config/app/config.toml", b"config\n");
+    let local = fixture.write_target(".local/bin/tool", b"tool\n");
+    let home = fixture.write_target(".profile", b"profile\n");
+
+    let outcomes = [
+        add(&fixture.repository, &fixture.home, &config).unwrap(),
+        add(&fixture.repository, &fixture.home, &local).unwrap(),
+        add(&fixture.repository, &fixture.home, &home).unwrap(),
+    ];
+
+    assert_eq!(outcomes[0].source, "dot_config/app/config.toml");
+    assert_eq!(outcomes[1].source, "dot_local/bin/tool");
+    assert_eq!(outcomes[2].source, "home/.profile");
+    for outcome in &outcomes {
+        assert_eq!(outcome.status, AddStatus::Added);
+        assert_eq!(
+            outcome.method,
+            AddMethod::Directory {
+                owner: "trees".to_string(),
+                declared_source: outcome.source.split('/').next().unwrap().to_string(),
+            }
+        );
+        assert!(outcome.display().contains("owned by module `trees`"));
+    }
+    assert!(!fixture.repository.join("modules/auto.lua").exists());
+    let manifest = fixture.build().unwrap().manifest;
+    assert_eq!(manifest.artifacts.len(), 3);
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.target.display == "~/.local/bin/tool")
+    );
+}
+
+#[test]
+fn covered_add_is_idempotent_and_refuses_different_contents() {
+    let fixture = AddFixture::selected_auto();
+    fs::write(
+        fixture.repository.join("wombat.lua"),
+        "local w = require(\"wombat\")\nw.use(\"config\")\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repository.join("modules/config.lua"),
+        "local w = require(\"wombat\")\nw.install(\"dot_config\")\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.repository.join("dot_config")).unwrap();
+    let target = fixture.write_target(".config/app.toml", b"same\n");
+
+    add(&fixture.repository, &fixture.home, &target).unwrap();
+    let repeated = add(&fixture.repository, &fixture.home, &target).unwrap();
+    assert_eq!(repeated.status, AddStatus::AlreadyPresent);
+    assert!(matches!(repeated.method, AddMethod::Directory { .. }));
+
+    fs::write(&target, b"different\n").unwrap();
+    let before = snapshot(&fixture.repository);
+    let error = add(&fixture.repository, &fixture.home, &target)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("different contents"), "{error}");
+    assert_eq!(before, snapshot(&fixture.repository));
+}
+
+#[test]
+fn add_refuses_ambiguous_empty_directory_coverage() {
+    let fixture = AddFixture::selected_auto();
+    fs::write(
+        fixture.repository.join("wombat.lua"),
+        "local w = require(\"wombat\")\nw.use(\"a\")\nw.use(\"b\")\n",
+    )
+    .unwrap();
+    for module in ["a", "b"] {
+        fs::write(
+            fixture.repository.join(format!("modules/{module}.lua")),
+            "local w = require(\"wombat\")\nw.install(\"dot_config\")\n",
+        )
+        .unwrap();
+    }
+    fs::create_dir(fixture.repository.join("dot_config")).unwrap();
+    let target = fixture.write_target(".config/new.toml", b"new\n");
+    let before = snapshot(&fixture.repository);
+
+    let error = add(&fixture.repository, &fixture.home, &target)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping prospective targets"), "{error}");
+    assert_eq!(before, snapshot(&fixture.repository));
+}
+
+#[test]
+fn add_checks_prospective_directory_leaves_against_existing_artifacts() {
+    let fixture = AddFixture::selected_auto();
+    fs::write(
+        fixture.repository.join("wombat.lua"),
+        "local w = require(\"wombat\")\nw.use(\"tree\")\nw.use(\"existing\")\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repository.join("modules/tree.lua"),
+        "local w = require(\"wombat\")\nw.install(\"dot_config\")\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repository.join("modules/existing.lua"),
+        "local w = require(\"wombat\")\nw.install(\"owned\", { to = \"~/.config/new/child\" })\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.repository.join("dot_config")).unwrap();
+    fs::write(fixture.repository.join("owned"), b"owned\n").unwrap();
+    let target = fixture.write_target(".config/new", b"new\n");
+    let before = snapshot(&fixture.repository);
+
+    let error = add(&fixture.repository, &fixture.home, &target)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlaps an artifact owned"), "{error}");
+    assert_eq!(before, snapshot(&fixture.repository));
 }
 
 #[test]

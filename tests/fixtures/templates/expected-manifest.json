@@ -1,0 +1,148 @@
+{
+  "format_version": 6,
+  "wombat_version": "0.1.0",
+  "build_id": "sha256:f6a9df42e1999299fe78bf923fa8018e2e19508ba1b55902b71f3e5e8feba8b2",
+  "inputs": [],
+  "target": {
+    "os": {
+      "name": "macos",
+      "family": "unix"
+    },
+    "arch": "aarch64",
+    "origin": "host_default"
+  },
+  "observations": [],
+  "modules": [
+    {
+      "name": "starship",
+      "config": {}
+    },
+    {
+      "name": "theme",
+      "config": {}
+    },
+    {
+      "name": "wezterm",
+      "config": {}
+    }
+  ],
+  "dependencies": [
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "starship",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "theme",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "use",
+      "from": "<root>",
+      "to": "wezterm",
+      "declared_from": "wombat.lua"
+    },
+    {
+      "kind": "using",
+      "from": "starship",
+      "to": "theme",
+      "declared_from": "modules/dot_config/starship.lua"
+    },
+    {
+      "kind": "using",
+      "from": "wezterm",
+      "to": "theme",
+      "declared_from": "modules/dot_config/wezterm.lua"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "file",
+      "source": "dot_config/starship.toml.tmpl",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "starship.toml.tmpl"
+      },
+      "production": {
+        "kind": "template",
+        "renderer": {
+          "name": "handlebars",
+          "contract_version": 1
+        },
+        "source_digest": "sha256:8819df0dcac05354047a13db4d42d1343218abb86c205f368c3ac63f4512002d",
+        "context": {
+          "colors": {
+            "accent": "#7e9cd8",
+            "background": "#1f1f28",
+            "foreground": "#dcd7ba"
+          },
+          "prompt": "wombat"
+        }
+      },
+      "target": {
+        "anchor": "config",
+        "path": "starship.toml",
+        "display": "~/.config/starship.toml",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:95c562a7539737d1542044b045485c6c141d07c1841d5c180e9d25553a11cc56",
+        "size": 107,
+        "executable": false
+      },
+      "owner": "starship",
+      "declared_from": "modules/dot_config/starship.lua"
+    },
+    {
+      "kind": "file",
+      "source": "dot_config/wezterm.lua.tmpl",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "wezterm.lua.tmpl"
+      },
+      "production": {
+        "kind": "template",
+        "renderer": {
+          "name": "handlebars",
+          "contract_version": 1
+        },
+        "source_digest": "sha256:577e4dfc0b86baad3501dc14fb024ecbd3944fd80101ab466a761c3cd1994807",
+        "context": {
+          "colors": {
+            "accent": "#7e9cd8",
+            "background": "#1f1f28",
+            "foreground": "#dcd7ba"
+          },
+          "variants": [
+            "dark",
+            "light"
+          ]
+        }
+      },
+      "target": {
+        "anchor": "config",
+        "path": "wezterm.lua",
+        "display": "~/.config/wezterm.lua",
+        "origin": {
+          "kind": "inferred",
+          "basis": "module_anchor",
+          "source_anchor": "dot_config"
+        }
+      },
+      "content": {
+        "digest": "sha256:c43c5ce9542c9300257ad91fe5a0447e871464abdf06830fd39b8ac690e29ddc",
+        "size": 150,
+        "executable": false
+      },
+      "owner": "wezterm",
+      "declared_from": "modules/dot_config/wezterm.lua"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+-- rendered without auto-escaping: {{ colors.accent }}
+local config = {}
+{{#each variants}}
+config["{{ this }}"] = true
+{{/each}}
+{{{{raw}}}}-- {{ this remains literal }}{{{{/raw}}}}
+return config

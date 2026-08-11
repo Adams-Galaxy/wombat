@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use crate::context::ResolvedTarget;
 use crate::frozen::FrozenValue;
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 3;
+use crate::source::{DirectoryLeaf, SourceFingerprint};
+
+pub const MANIFEST_FORMAT_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,9 +13,54 @@ pub struct Manifest {
     pub format_version: u32,
     pub wombat_version: String,
     pub build_id: String,
+    pub inputs: Vec<BuildInput>,
+    pub target: ResolvedTarget,
+    pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
     pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildInputKind {
+    Flag,
+    Choice,
+    String,
+    Integer,
+    Target,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildInputOrigin {
+    Default,
+    CommandLine,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildInput {
+    pub name: String,
+    pub kind: BuildInputKind,
+    pub value: FrozenValue,
+    pub origin: BuildInputOrigin,
+    pub declared_from: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationSubject {
+    Host,
+    Target,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub subject: ObservationSubject,
+    pub path: String,
+    pub value: FrozenValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,15 +86,35 @@ pub enum DependencyKind {
     Using,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
     pub kind: ArtifactKind,
     pub source: String,
+    pub source_origin: SourceOrigin,
+    pub production: Production,
     pub target: TargetPath,
     pub content: FileContent,
     pub owner: String,
     pub declared_from: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Production {
+    Static,
+    Template {
+        renderer: RendererIdentity,
+        source_digest: String,
+        context: FrozenValue,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RendererIdentity {
+    pub name: String,
+    pub contract_version: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -59,24 +127,78 @@ pub struct FileContent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EvaluatedManifest {
+    pub inputs: Vec<BuildInput>,
+    pub target: ResolvedTarget,
+    pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
     pub artifacts: Vec<EvaluatedArtifact>,
+    pub directories: Vec<EvaluatedDirectory>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EvaluatedArtifact {
     pub kind: ArtifactKind,
     pub source: String,
+    pub source_origin: SourceOrigin,
+    pub production: EvaluatedProduction,
     pub target: TargetPath,
+    pub fingerprint: SourceFingerprint,
     pub owner: String,
     pub declared_from: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum EvaluatedProduction {
+    Static,
+    Template { context: FrozenValue },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluatedDirectory {
+    pub declared_source: String,
+    pub root: String,
+    pub target_root: EvaluatedTargetRoot,
+    pub owner: String,
+    pub declared_from: String,
+    pub snapshot: Vec<DirectoryLeaf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluatedTargetRoot {
+    pub anchor: TargetAnchor,
+    pub path: String,
+    pub origin: EvaluatedTargetOrigin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EvaluatedTargetOrigin {
+    Explicit {
+        declared: String,
+    },
+    Inferred {
+        basis: InferenceBasis,
+        source_anchor: SourceAnchor,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     File,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SourceOrigin {
+    Direct {
+        declared: String,
+    },
+    Directory {
+        declared: String,
+        root: String,
+        relative: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -111,6 +233,10 @@ pub enum TargetOrigin {
         basis: InferenceBasis,
         source_anchor: SourceAnchor,
     },
+    DirectoryExplicit {
+        declared: String,
+        relative: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -125,4 +251,5 @@ pub enum InferenceBasis {
 pub enum SourceAnchor {
     Home,
     DotConfig,
+    DotLocal,
 }

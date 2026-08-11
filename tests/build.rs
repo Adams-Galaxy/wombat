@@ -3,7 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use wombat::{BuildOptions, BuildOutcome, BuildStatus, Manifest, build, verify_build};
+use wombat::{
+    Architecture, BuildOptions, BuildOutcome, BuildStatus, HostContext, Manifest,
+    OperatingSystemName, TargetPlatform, build, verify_build,
+};
+
+fn fixture_host() -> HostContext {
+    HostContext::fixture(TargetPlatform::minimal(
+        OperatingSystemName::Macos,
+        Architecture::Aarch64,
+    ))
+}
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -17,7 +27,7 @@ fn manifest_json(manifest: &Manifest) -> String {
 }
 
 fn build_at(root: &Path, build_dir: &Path) -> wombat::Result<BuildOutcome> {
-    build(BuildOptions::new(root, build_dir))
+    build(BuildOptions::new(root, build_dir).with_host(fixture_host()))
 }
 
 fn run_wombat(args: &[&str], current_dir: &Path) -> Output {
@@ -109,7 +119,7 @@ fn root_selection_order_does_not_change_the_manifest() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v3() {
+fn path_fixture_matches_the_exact_manifest_v6() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -120,6 +130,25 @@ fn path_fixture_matches_the_exact_manifest_v3() {
     );
 
     assert_eq!(actual, expected.trim_end());
+}
+
+#[test]
+fn directory_fixture_matches_manifest_v6_and_materialised_tree() {
+    let root = fixture("directories");
+    let temporary = tempfile::tempdir().unwrap();
+    let build_dir = temporary.path().join("build");
+    let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
+    let outcome = build_at(&root, &build_dir).unwrap();
+
+    assert_eq!(manifest_json(&outcome.manifest), expected.trim_end());
+    assert_eq!(
+        fs::read(build_dir.join("tree/config/app/.hidden")).unwrap(),
+        b"hidden\n"
+    );
+    assert_eq!(
+        fs::read(build_dir.join("tree/home/.local/bin/tool")).unwrap(),
+        b"#!/bin/sh\necho wombat\n"
+    );
 }
 
 #[test]
@@ -200,7 +229,18 @@ fn cli_exposes_help_version_and_usage_errors() {
     let help = run_wombat(&["--help"], repository);
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("A Lua-powered dotfiles compiler"));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("add"));
+    let help = String::from_utf8_lossy(&help.stdout);
+    for command in ["add", "build", "diff", "apply", "deploy"] {
+        assert!(help.contains(command), "{help}");
+    }
+
+    let apply_help = run_wombat(&["apply", "--help"], repository);
+    let apply_help = String::from_utf8_lossy(&apply_help.stdout);
+    assert!(
+        apply_help.contains("ask, fail, skip, overwrite"),
+        "{apply_help}"
+    );
+    assert!(apply_help.contains("--target-home"), "{apply_help}");
 
     let version = run_wombat(&["--version"], repository);
     assert!(version.status.success());
@@ -211,6 +251,69 @@ fn cli_exposes_help_version_and_usage_errors() {
 
     let invalid = run_wombat(&["not-a-command"], repository);
     assert_eq!(invalid.status.code(), Some(2));
+}
+
+#[test]
+fn cli_color_policy_covers_help_success_and_errors_without_polluting_plain_output() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let always_help = run_wombat(&["--color", "always", "--help"], repository);
+    assert!(always_help.status.success());
+    assert!(
+        always_help
+            .stdout
+            .windows(2)
+            .any(|window| window == b"\x1b[")
+    );
+
+    let never_help = run_wombat(&["--color", "never", "--help"], repository);
+    assert!(never_help.status.success());
+    assert!(
+        !never_help
+            .stdout
+            .windows(2)
+            .any(|window| window == b"\x1b[")
+    );
+
+    let root = fixture("walking");
+    let temporary = tempfile::tempdir().unwrap();
+    let build_dir = temporary.path().join("colored");
+    let colored = run_wombat(
+        &[
+            "--color",
+            "always",
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "-B",
+            build_dir.to_str().unwrap(),
+        ],
+        repository,
+    );
+    assert!(colored.status.success());
+    assert!(colored.stdout.windows(2).any(|window| window == b"\x1b["));
+
+    let error = run_wombat(
+        &[
+            "--color",
+            "always",
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "-B",
+            "/",
+        ],
+        repository,
+    );
+    assert_eq!(error.status.code(), Some(1));
+    assert!(error.stderr.windows(2).any(|window| window == b"\x1b["));
+
+    let no_color = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args(["--color", "auto", "--help"])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(no_color.status.success());
+    assert!(!no_color.stdout.windows(2).any(|window| window == b"\x1b["));
 }
 
 #[test]

@@ -1,19 +1,27 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
 
+use crate::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
 use crate::frozen::FrozenValue;
+use crate::inputs::{self, InputSpec};
 use crate::manifest::{
-    ArtifactKind, Dependency, DependencyKind, EvaluatedArtifact, EvaluatedManifest, InferenceBasis,
-    ManifestModule, SourceAnchor,
+    ArtifactKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact, EvaluatedDirectory,
+    EvaluatedManifest, EvaluatedProduction, InferenceBasis, ManifestModule, Observation,
+    ObservationSubject, SourceAnchor, SourceOrigin,
 };
 use crate::path::{
-    infer_target, parse_explicit_target, prefixed_source, reject_legacy_config_tree,
-    validate_relative_path,
+    expand_target_root, infer_target, infer_target_root, parse_explicit_target,
+    parse_explicit_target_root, prefixed_source, reject_noncanonical_artifact_trees,
+    validate_declared_source,
+};
+use crate::source::{
+    SourceFingerprint, join_portable, snapshot_directory, validate_source_components,
 };
 use crate::{Result, WombatError};
 
@@ -88,7 +96,20 @@ struct RuntimeState {
     modules: BTreeMap<String, ModuleRecord>,
     dependencies: BTreeSet<Dependency>,
     artifacts: Vec<EvaluatedArtifact>,
+    directories: Vec<EvaluatedDirectory>,
     stack: Vec<String>,
+    host: HostContext,
+    target: ResolvedTarget,
+    target_override: Option<Location>,
+    target_first_read: Option<Location>,
+    root_policy_started: bool,
+    project_arguments: Vec<OsString>,
+    input_specs: BTreeMap<u64, InputSpec>,
+    next_input_spec: u64,
+    inputs_declared: bool,
+    inputs: Vec<BuildInput>,
+    observations: BTreeMap<(ObservationSubject, String), Observation>,
+    project_help: Option<String>,
 }
 
 impl RuntimeState {
@@ -111,33 +132,98 @@ impl RuntimeState {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct EvaluationOptions {
+    pub project_arguments: Vec<OsString>,
+    pub host: HostContext,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum EvaluationOutcome {
+    Manifest(Box<EvaluatedManifest>),
+    ProjectHelp(String),
+}
+
 pub(crate) fn evaluate(root: &Path) -> Result<EvaluatedManifest> {
+    let outcome = evaluate_with(
+        root,
+        EvaluationOptions {
+            project_arguments: Vec::new(),
+            host: HostContext::observe()?,
+        },
+    )?;
+    match outcome {
+        EvaluationOutcome::Manifest(manifest) => Ok(*manifest),
+        EvaluationOutcome::ProjectHelp(_) => Err(WombatError::configuration(
+            "project help was requested during build evaluation",
+        )),
+    }
+}
+
+pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<EvaluationOutcome> {
     let root = fs::canonicalize(root).map_err(|source| WombatError::io(root, source))?;
-    reject_legacy_config_tree(&root)?;
+    reject_noncanonical_artifact_trees(&root)?;
     let entrypoint = root.join("wombat.lua");
     let source = read_utf8(&entrypoint)?;
 
+    let target = options.host.resolved_target();
     let lua = Lua::new();
     let state = Rc::new(RefCell::new(RuntimeState {
         root: root.clone(),
         modules: BTreeMap::new(),
         dependencies: BTreeSet::new(),
         artifacts: Vec::new(),
+        directories: Vec::new(),
         stack: Vec::new(),
+        host: options.host,
+        target,
+        target_override: None,
+        target_first_read: None,
+        root_policy_started: false,
+        project_arguments: options.project_arguments,
+        input_specs: BTreeMap::new(),
+        next_input_spec: 1,
+        inputs_declared: false,
+        inputs: Vec::new(),
+        observations: BTreeMap::new(),
+        project_help: None,
     }));
 
     configure_package_path(&lua, &root)?;
     register_preloaded_modules(&lua, Rc::clone(&state))?;
 
-    lua.load(&source)
+    let execution = lua
+        .load(&source)
         .set_name(entrypoint.to_string_lossy())
-        .exec()?;
+        .exec();
+
+    if let Err(error) = execution {
+        let state = state.borrow();
+        if let Some(help) = &state.project_help {
+            return Ok(EvaluationOutcome::ProjectHelp(help.clone()));
+        }
+        return Err(error.into());
+    }
+
+    {
+        let state = state.borrow();
+        if !state.inputs_declared && !state.project_arguments.is_empty() {
+            return Err(WombatError::configuration(
+                "project build arguments were provided, but this repository does not declare w.inputs()",
+            ));
+        }
+        if let Some(help) = &state.project_help {
+            return Ok(EvaluationOutcome::ProjectHelp(help.clone()));
+        }
+    }
 
     evaluate_selected_modules(&lua, &state)?;
     validate_dependency_cycles(&state.borrow())?;
     validate_artifact_conflicts(&state.borrow().artifacts)?;
 
-    Ok(build_manifest(&state.borrow()))
+    Ok(EvaluationOutcome::Manifest(Box::new(build_manifest(
+        &state.borrow(),
+    ))))
 }
 
 fn configure_package_path(lua: &Lua, root: &Path) -> Result<()> {
@@ -170,6 +256,53 @@ fn register_preloaded_modules(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Re
 fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<Table> {
     let native = lua.create_table()?;
 
+    let spec_state = Rc::clone(&state);
+    native.set(
+        "input_spec",
+        lua.create_function(move |lua, (kind, options): (String, Value)| {
+            let location = caller_location(lua, &spec_state);
+            register_input_spec(&spec_state, &kind, options, location)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let inputs_state = Rc::clone(&state);
+    native.set(
+        "resolve_inputs",
+        lua.create_function(move |lua, schema: Table| {
+            let location = caller_location(lua, &inputs_state);
+            resolve_inputs(lua, &inputs_state, schema, location).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let host_state = Rc::clone(&state);
+    native.set(
+        "host_context",
+        lua.create_function(move |lua, ()| {
+            create_context_proxy(
+                lua,
+                Rc::clone(&host_state),
+                ObservationSubject::Host,
+                String::new(),
+                false,
+            )
+        })?,
+    )?;
+
+    let target_state = Rc::clone(&state);
+    native.set(
+        "target_context",
+        lua.create_function(move |lua, ()| {
+            create_context_proxy(
+                lua,
+                Rc::clone(&target_state),
+                ObservationSubject::Target,
+                String::new(),
+                true,
+            )
+        })?,
+    )?;
+
     let use_state = Rc::clone(&state);
     native.set(
         "use_module",
@@ -197,17 +330,331 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
     )?;
 
     native.set(
-        "install_file",
+        "install_path",
         lua.create_function(
-            move |lua, (source_path, target): (String, Option<String>)| {
+            move |lua, (source_path, target, kind, context): (String, Option<String>, String, Value)| {
                 let location = caller_location(lua, &state);
-                register_artifact(&state, &source_path, target.as_deref(), location)
+                register_artifact(&state, &source_path, target.as_deref(), &kind, context, location)
                     .map_err(mlua::Error::external)
             },
         )?,
     )?;
 
     Ok(native)
+}
+
+fn register_input_spec(
+    state: &Rc<RefCell<RuntimeState>>,
+    kind: &str,
+    options: Value,
+    location: Location,
+) -> Result<u64> {
+    let mut state = state.borrow_mut();
+    if state.active_module().is_some() {
+        return Err(WombatError::configuration(format!(
+            "Wombat modules cannot declare project build inputs at {}",
+            location.display()
+        )));
+    }
+    if state.inputs_declared || state.root_policy_started {
+        return Err(WombatError::configuration(format!(
+            "input constructors must run before w.inputs(), use(), using(), or install() at {}",
+            location.display()
+        )));
+    }
+    let order = state.next_input_spec;
+    state.next_input_spec = state
+        .next_input_spec
+        .checked_add(1)
+        .ok_or_else(|| WombatError::configuration("too many project input declarations"))?;
+    let spec = InputSpec::parse(
+        order,
+        kind,
+        FrozenValue::from_lua(options)?,
+        location.display(),
+    )?;
+    state.input_specs.insert(order, spec);
+    Ok(order)
+}
+
+fn resolve_inputs(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    schema: Table,
+    location: Location,
+) -> Result<Table> {
+    let pairs = schema
+        .pairs::<Value, Value>()
+        .collect::<mlua::Result<Vec<_>>>()?;
+    let mut entries = Vec::with_capacity(pairs.len());
+    for (name, descriptor) in pairs {
+        let Value::String(name) = name else {
+            return Err(WombatError::configuration(
+                "w.inputs() schema keys must be strings",
+            ));
+        };
+        let Value::Integer(descriptor) = descriptor else {
+            return Err(WombatError::configuration(
+                "w.inputs() values must be created by w.input constructors",
+            ));
+        };
+        entries.push((
+            name.to_str()?.to_string(),
+            u64::try_from(descriptor)
+                .map_err(|_| WombatError::configuration("invalid Wombat input descriptor"))?,
+        ));
+    }
+
+    let resolved = {
+        let mut state = state.borrow_mut();
+        if state.active_module().is_some() {
+            return Err(WombatError::configuration(format!(
+                "w.inputs() belongs to root policy and cannot run in a module at {}",
+                location.display()
+            )));
+        }
+        if state.inputs_declared {
+            return Err(WombatError::configuration(format!(
+                "w.inputs() may be declared only once; repeated at {}",
+                location.display()
+            )));
+        }
+        if state.root_policy_started {
+            return Err(WombatError::configuration(format!(
+                "w.inputs() must run before use(), using(), install(), or target-dependent policy at {}",
+                location.display()
+            )));
+        }
+        let resolved = inputs::resolve(
+            entries,
+            &state.input_specs,
+            &state.project_arguments,
+            &state.host,
+        )?;
+        state.inputs_declared = true;
+        state.inputs = resolved.manifest.clone();
+        state.project_help = resolved.help.clone();
+        resolved
+    };
+    if resolved.help.is_some() {
+        return Err(WombatError::ProjectHelpRequested);
+    }
+    create_values_proxy(lua, resolved.values)
+}
+
+fn create_values_proxy(lua: &Lua, values: BTreeMap<String, FrozenValue>) -> Result<Table> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.set(
+        "__index",
+        lua.create_function(move |lua, (_table, key): (Table, String)| {
+            values
+                .get(&key)
+                .map_or(Ok(Value::Nil), |value| value.to_lua(lua))
+        })?,
+    )?;
+    metatable.set(
+        "__newindex",
+        lua.create_function(|_, (_table, key, _value): (Table, Value, Value)| {
+            Err::<(), _>(mlua::Error::external(WombatError::configuration(format!(
+                "resolved build inputs are immutable; cannot assign `{key:?}`"
+            ))))
+        })?,
+    )?;
+    metatable.set("__metatable", false)?;
+    proxy.set_metatable(Some(metatable))?;
+    Ok(proxy)
+}
+
+fn create_context_proxy(
+    lua: &Lua,
+    state: Rc<RefCell<RuntimeState>>,
+    subject: ObservationSubject,
+    path: String,
+    callable_target: bool,
+) -> mlua::Result<Table> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    let index_state = Rc::clone(&state);
+    metatable.set(
+        "__index",
+        lua.create_function(move |lua, (_table, key): (Table, String)| {
+            let location = caller_location(lua, &index_state);
+            let child_path = if path.is_empty() {
+                key
+            } else {
+                format!("{path}.{key}")
+            };
+            context_access(lua, &index_state, subject, &child_path, location)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+    metatable.set(
+        "__newindex",
+        lua.create_function(|_, (_table, key, _value): (Table, Value, Value)| {
+            Err::<(), _>(mlua::Error::external(WombatError::configuration(format!(
+                "Wombat context is immutable; cannot assign `{key:?}`"
+            ))))
+        })?,
+    )?;
+    if callable_target {
+        let call_state = Rc::clone(&state);
+        metatable.set(
+            "__call",
+            lua.create_function(move |lua, (_table, value): (Table, Value)| {
+                let location = caller_location(lua, &call_state);
+                set_target(&call_state, value, location)?;
+                Ok(_table)
+            })?,
+        )?;
+    }
+    metatable.set("__metatable", false)?;
+    proxy.set_metatable(Some(metatable))?;
+    Ok(proxy)
+}
+
+fn context_access(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    subject: ObservationSubject,
+    path: &str,
+    location: Location,
+) -> Result<Value> {
+    let (value, missing) = {
+        let mut state = state.borrow_mut();
+        if subject == ObservationSubject::Target && state.target_first_read.is_none() {
+            state.target_first_read = Some(location);
+        }
+        let root = match subject {
+            ObservationSubject::Host => state.host.to_frozen(),
+            ObservationSubject::Target => effective_target(&state).to_frozen(),
+        };
+        let found = frozen_at_path(&root, path).cloned();
+        let missing = found.is_none();
+        let value = found.unwrap_or(FrozenValue::Null);
+        if !matches!(value, FrozenValue::Map(_)) && !is_foundational_target(subject, path) {
+            state
+                .observations
+                .entry((subject, path.to_string()))
+                .or_insert_with(|| Observation {
+                    subject,
+                    path: path.to_string(),
+                    value: value.clone(),
+                });
+        }
+        (value, missing)
+    };
+    if missing {
+        return Ok(Value::Nil);
+    }
+    if matches!(value, FrozenValue::Map(_)) {
+        create_context_proxy(lua, Rc::clone(state), subject, path.to_string(), false)
+            .map(Value::Table)
+            .map_err(WombatError::from)
+    } else {
+        readonly_frozen(lua, value).map_err(WombatError::from)
+    }
+}
+
+fn readonly_frozen(lua: &Lua, value: FrozenValue) -> mlua::Result<Value> {
+    match value {
+        FrozenValue::Array(values) => {
+            let proxy = lua.create_table()?;
+            let metatable = lua.create_table()?;
+            let length = values.len();
+            metatable.set(
+                "__index",
+                lua.create_function(move |lua, (_table, index): (Table, i64)| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| index.checked_sub(1))
+                        .and_then(|index| values.get(index).cloned())
+                        .map_or(Ok(Value::Nil), |value| readonly_frozen(lua, value))
+                })?,
+            )?;
+            metatable.set("__len", lua.create_function(move |_, _: Table| Ok(length))?)?;
+            metatable.set(
+                "__newindex",
+                lua.create_function(|_, (_table, _key, _value): (Table, Value, Value)| {
+                    Err::<(), _>(mlua::Error::external(WombatError::configuration(
+                        "Wombat context arrays are immutable",
+                    )))
+                })?,
+            )?;
+            metatable.set("__metatable", false)?;
+            proxy.set_metatable(Some(metatable))?;
+            Ok(Value::Table(proxy))
+        }
+        other => other.to_lua(lua),
+    }
+}
+
+fn frozen_at_path<'a>(root: &'a FrozenValue, path: &str) -> Option<&'a FrozenValue> {
+    path.split('.')
+        .try_fold(root, |value, component| match value {
+            FrozenValue::Map(map) => map.get(component),
+            _ => None,
+        })
+}
+
+fn is_foundational_target(subject: ObservationSubject, path: &str) -> bool {
+    subject == ObservationSubject::Target && matches!(path, "os.name" | "arch")
+}
+
+fn effective_target(state: &RuntimeState) -> TargetPlatform {
+    let target = &state.target.platform;
+    if target.os.name == state.host.platform.os.name
+        && target.arch == state.host.platform.arch
+        && target.os.version.is_none()
+        && target.os.kernel.is_none()
+        && target.os.distribution.is_none()
+    {
+        state.host.platform.clone()
+    } else {
+        target.clone()
+    }
+}
+
+fn set_target(
+    state: &Rc<RefCell<RuntimeState>>,
+    value: Value,
+    location: Location,
+) -> mlua::Result<()> {
+    let frozen = FrozenValue::from_lua(value).map_err(mlua::Error::external)?;
+    let mut state = state.borrow_mut();
+    if state.active_module().is_some() || state.root_policy_started {
+        return Err(mlua::Error::external(WombatError::configuration(format!(
+            "w.target() must run in root policy before module selection at {}",
+            location.display()
+        ))));
+    }
+    if let Some(prior) = &state.target_override {
+        return Err(mlua::Error::external(WombatError::configuration(format!(
+            "w.target() may override the target only once; first at {}, repeated at {}",
+            prior.display(),
+            location.display()
+        ))));
+    }
+    if let Some(prior) = &state.target_first_read {
+        return Err(mlua::Error::external(WombatError::configuration(format!(
+            "w.target() cannot override a target after it was read; first read at {}, override at {}",
+            prior.display(),
+            location.display()
+        ))));
+    }
+    let platform = match frozen {
+        FrozenValue::String(value) => {
+            TargetPlatform::parse_compact(&value).map_err(mlua::Error::external)?
+        }
+        value => TargetPlatform::from_frozen(&value).map_err(mlua::Error::external)?,
+    };
+    state.target = ResolvedTarget {
+        platform,
+        origin: TargetOrigin::RootOverride,
+        declared_from: Some(location.display()),
+    };
+    state.target_override = Some(location);
+    Ok(())
 }
 
 fn register_selection(
@@ -221,6 +668,9 @@ fn register_selection(
     let mut state = state.borrow_mut();
     let from = state.active_module().unwrap_or(ROOT_MODULE).to_string();
     let is_module_selection = state.active_module().is_some();
+    if !is_module_selection {
+        state.root_policy_started = true;
+    }
     let explicit_config = if config.is_nil() {
         None
     } else {
@@ -334,56 +784,151 @@ fn register_artifact(
     state: &Rc<RefCell<RuntimeState>>,
     source_path: &str,
     explicit_target: Option<&str>,
+    requested_kind: &str,
+    context: Value,
     location: Location,
 ) -> Result<()> {
-    validate_relative_path(source_path, "static artifact source")?;
+    validate_declared_source(source_path)?;
+    if !matches!(requested_kind, "auto" | "file" | "template") {
+        return Err(WombatError::configuration(format!(
+            "unsupported artifact production kind `{requested_kind}`"
+        )));
+    }
 
     let mut state = state.borrow_mut();
+    let repository_root = state.root.clone();
     let (source_base, module_anchor) = state.active_location();
     let prefixed = if module_anchor.is_none() {
         prefixed_source(source_path)?
     } else {
         None
     };
-    let (inferred_anchor, inferred_path, inference_basis) = match (module_anchor, prefixed) {
-        (Some(anchor), _) => (
-            Some(anchor),
-            source_path,
-            Some(InferenceBasis::ModuleAnchor),
-        ),
-        (None, Some((anchor, relative))) => {
-            (Some(anchor), relative, Some(InferenceBasis::SourcePrefix))
-        }
-        (None, None) => (None, source_path, None),
+    let inference = match (module_anchor, prefixed) {
+        (Some(anchor), _) => Some((
+            anchor,
+            if source_path == "." { "" } else { source_path },
+            InferenceBasis::ModuleAnchor,
+        )),
+        (None, Some((anchor, relative))) => Some((anchor, relative, InferenceBasis::SourcePrefix)),
+        (None, None) => None,
     };
-    let target = match explicit_target {
-        Some(target) => parse_explicit_target(target)?,
-        None => {
-            let anchor = inferred_anchor.ok_or_else(|| {
-                WombatError::configuration(format!(
-                    "cannot infer a target for source `{source_path}` from an anchorless module; use a `dot_config/` or `home/` source prefix, or provide `to`"
-                ))
-            })?;
-            infer_target(
-                anchor,
-                inferred_path,
-                inference_basis.expect("an inferred anchor has an inference basis"),
-            )?
-        }
-    };
-
-    let absolute_source = source_base.join(source_path);
-    validate_regular_source(&state.root, &source_base, &absolute_source)?;
 
     let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
-    let source = display_path(&state.root, &absolute_source);
-    state.artifacts.push(EvaluatedArtifact {
-        kind: ArtifactKind::File,
-        source,
-        target,
-        owner,
-        declared_from: location.file,
-    });
+    let absolute_source = if source_path == "." {
+        source_base
+    } else {
+        source_base.join(source_path)
+    };
+    let metadata = match fs::symlink_metadata(&absolute_source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(WombatError::configuration(format!(
+                "static artifact source `{}` does not exist or is not a regular file or directory",
+                display_path(&repository_root, &absolute_source)
+            )));
+        }
+        Err(error) => return Err(WombatError::io(&absolute_source, error)),
+    };
+    validate_source_components(&repository_root, &absolute_source)?;
+    if metadata.file_type().is_file() {
+        let production = match requested_kind {
+            "auto" | "file" => EvaluatedProduction::Static,
+            "template" => {
+                let context = FrozenValue::from_lua(context)?;
+                if !matches!(context, FrozenValue::Map(_)) {
+                    return Err(WombatError::configuration(
+                        "template `with` context must be a string-keyed map",
+                    ));
+                }
+                EvaluatedProduction::Template { context }
+            }
+            other => {
+                return Err(WombatError::configuration(format!(
+                    "unsupported artifact production kind `{other}`"
+                )));
+            }
+        };
+        let target = match explicit_target {
+            Some(target) => parse_explicit_target(target)?,
+            None => {
+                let (anchor, mut relative, basis) = inference.ok_or_else(|| {
+                    WombatError::configuration(format!(
+                        "cannot infer a target for source `{source_path}` from an anchorless module; use a `dot_config/`, `dot_local/`, or `home/` source prefix, or provide `to`"
+                    ))
+                })?;
+                if matches!(production, EvaluatedProduction::Template { .. }) {
+                    relative = relative.strip_suffix(".tmpl").unwrap_or(relative);
+                }
+                infer_target(anchor, relative, basis)?
+            }
+        };
+        state.artifacts.push(EvaluatedArtifact {
+            kind: ArtifactKind::File,
+            source: display_path(&repository_root, &absolute_source),
+            source_origin: SourceOrigin::Direct {
+                declared: source_path.to_string(),
+            },
+            production,
+            target,
+            fingerprint: SourceFingerprint::from_metadata(&metadata),
+            owner,
+            declared_from: location.file,
+        });
+    } else if metadata.file_type().is_dir() {
+        if requested_kind == "template" {
+            return Err(WombatError::configuration(format!(
+                "template source `{}` must be a regular file, not a directory",
+                display_path(&repository_root, &absolute_source)
+            )));
+        }
+        if requested_kind == "file" {
+            return Err(WombatError::configuration(format!(
+                "static file source `{}` must be a regular file, not a directory",
+                display_path(&repository_root, &absolute_source)
+            )));
+        }
+        let (anchor, relative_root, basis) = inference.ok_or_else(|| {
+            WombatError::configuration(format!(
+                "directory source `{source_path}` is outside canonical artifact trees; use `home/`, `dot_config/`, or `dot_local/`"
+            ))
+        })?;
+        let target_root = match explicit_target {
+            Some(target) => parse_explicit_target_root(target)?,
+            None => infer_target_root(anchor, relative_root, basis)?,
+        };
+        let snapshot = snapshot_directory(&repository_root, &absolute_source)?;
+        let resolved_root = display_path(&repository_root, &absolute_source);
+        for leaf in &snapshot {
+            let source = join_portable(&absolute_source, &leaf.relative);
+            state.artifacts.push(EvaluatedArtifact {
+                kind: ArtifactKind::File,
+                source: display_path(&repository_root, &source),
+                source_origin: SourceOrigin::Directory {
+                    declared: source_path.to_string(),
+                    root: resolved_root.clone(),
+                    relative: leaf.relative.clone(),
+                },
+                production: EvaluatedProduction::Static,
+                target: expand_target_root(&target_root, &leaf.relative)?,
+                fingerprint: leaf.fingerprint.clone(),
+                owner: owner.clone(),
+                declared_from: location.file.clone(),
+            });
+        }
+        state.directories.push(EvaluatedDirectory {
+            declared_source: source_path.to_string(),
+            root: resolved_root,
+            target_root,
+            owner,
+            declared_from: location.file,
+            snapshot,
+        });
+    } else {
+        return Err(WombatError::configuration(format!(
+            "static artifact source `{}` is not a regular file or directory",
+            display_path(&repository_root, &absolute_source)
+        )));
+    }
     Ok(())
 }
 
@@ -501,6 +1046,13 @@ fn resolve_module(root: &Path, name: &str) -> Result<ModuleLocation> {
             root.join("home"),
             Some(SourceAnchor::Home),
         ),
+        (
+            root.join("modules")
+                .join("dot_local")
+                .join(format!("{name}.lua")),
+            root.join("dot_local"),
+            Some(SourceAnchor::DotLocal),
+        ),
     ];
     let matches = candidates
         .iter()
@@ -602,11 +1154,22 @@ fn build_manifest(state: &RuntimeState) -> EvaluatedManifest {
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_from.cmp(&right.declared_from))
     });
+    let mut directories = state.directories.clone();
+    directories.sort_by(|left, right| {
+        left.root
+            .cmp(&right.root)
+            .then_with(|| left.owner.cmp(&right.owner))
+            .then_with(|| left.declared_from.cmp(&right.declared_from))
+    });
 
     EvaluatedManifest {
+        inputs: state.inputs.clone(),
+        target: state.target.clone(),
+        observations: state.observations.values().cloned().collect(),
         modules,
         dependencies,
         artifacts,
+        directories,
     }
 }
 
@@ -618,43 +1181,6 @@ fn validate_module_name(name: &str) -> Result<()> {
     {
         return Err(WombatError::configuration(format!(
             "invalid module name `{name}`; expected ASCII letters, numbers, `_`, or `-`"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_regular_source(root: &Path, base: &Path, source: &Path) -> Result<()> {
-    source
-        .strip_prefix(base)
-        .expect("validated relative sources remain under their base");
-    let relative = source
-        .strip_prefix(root)
-        .expect("artifact source bases remain under the repository");
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        let metadata = match fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(WombatError::configuration(format!(
-                    "static artifact source `{}` does not exist or is not a regular file",
-                    display_path(root, source)
-                )));
-            }
-            Err(error) => return Err(WombatError::io(&current, error)),
-        };
-        if metadata.file_type().is_symlink() {
-            return Err(WombatError::configuration(format!(
-                "static artifact source `{}` must not contain symbolic links",
-                display_path(root, source)
-            )));
-        }
-    }
-    let metadata = fs::symlink_metadata(source).map_err(|error| WombatError::io(source, error))?;
-    if !metadata.file_type().is_file() {
-        return Err(WombatError::configuration(format!(
-            "static artifact source `{}` does not exist or is not a regular file",
-            display_path(root, source)
         )));
     }
     Ok(())
@@ -726,9 +1252,22 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
     let declarations = artifacts
         .iter()
         .map(|artifact| {
+            let source = match &artifact.source_origin {
+                SourceOrigin::Direct { declared } => {
+                    format!("`{}` (direct source `{declared}`)", artifact.source)
+                }
+                SourceOrigin::Directory {
+                    declared,
+                    root,
+                    relative,
+                } => format!(
+                    "`{}` (leaf `{relative}` expanded from directory `{declared}` at `{root}`)",
+                    artifact.source
+                ),
+            };
             format!(
-                "{} from `{}` declared at {}",
-                artifact.owner, artifact.source, artifact.declared_from
+                "{} from {source} declared at {}",
+                artifact.owner, artifact.declared_from
             )
         })
         .collect::<Vec<_>>()
@@ -739,16 +1278,23 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
 }
 
 fn caller_location(lua: &Lua, state: &Rc<RefCell<RuntimeState>>) -> Location {
-    let raw = lua.inspect_stack(2, |debug| {
-        let source = debug
-            .source()
-            .source
-            .map_or_else(|| "<unknown>".to_string(), |source| source.into_owned());
-        let line = debug
-            .current_line()
-            .and_then(|line| i64::try_from(line).ok())
-            .unwrap_or(0);
-        (source, line)
+    let raw = (1..=6).find_map(|level| {
+        lua.inspect_stack(level, |debug| {
+            let source = debug.source().source?.into_owned();
+            if source == "<wombat>/init.lua"
+                || source == "=[C]"
+                || source == "[C]"
+                || source == "<unknown>"
+            {
+                return None;
+            }
+            let line = debug
+                .current_line()
+                .and_then(|line| i64::try_from(line).ok())
+                .unwrap_or(0);
+            Some((source, line))
+        })
+        .flatten()
     });
     let (source, line) = raw.unwrap_or_else(|| ("<unknown>".to_string(), 0));
     let source = source.strip_prefix('@').unwrap_or(&source);

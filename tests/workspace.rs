@@ -255,6 +255,50 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
     );
 }
 
+#[test]
+fn verifier_rejects_v5_unknown_v6_fields_and_internally_inconsistent_provenance() {
+    let repository = Repository::new();
+    repository.build().unwrap();
+
+    let legacy = repository.temporary.path().join("legacy");
+    copy_product(&repository.build_dir, &legacy);
+    let legacy_manifest = legacy.join("manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&legacy_manifest).unwrap()).unwrap();
+    json["format_version"] = serde_json::Value::from(5);
+    fs::write(&legacy_manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    let error = verify_build(&legacy).unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported manifest format version 5"),
+        "{error}"
+    );
+
+    let unknown = repository.temporary.path().join("unknown-v6-field");
+    copy_product(&repository.build_dir, &unknown);
+    let unknown_manifest = unknown.join("manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&unknown_manifest).unwrap()).unwrap();
+    json["target"]["unknown"] = serde_json::Value::Bool(true);
+    fs::write(&unknown_manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    let error = verify_build(&unknown).unwrap_err().to_string();
+    assert!(error.contains("unknown field `unknown`"), "{error}");
+
+    let provenance = repository.temporary.path().join("provenance");
+    copy_product(&repository.build_dir, &provenance);
+    let provenance_manifest = provenance.join("manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&provenance_manifest).unwrap()).unwrap();
+    json["artifacts"][0]["source_origin"]["declared"] =
+        serde_json::Value::String("different.toml".to_string());
+    fs::write(
+        &provenance_manifest,
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    let error = verify_build(&provenance).unwrap_err().to_string();
+    assert!(error.contains("does not match declared source"), "{error}");
+}
+
 #[cfg(unix)]
 #[test]
 fn verifier_rejects_symlinks_non_utf8_entries_and_wrong_modes() {
@@ -407,6 +451,7 @@ fn workspace_refuses_unsafe_ownership_and_source_mismatch() {
         repository.root.clone(),
         repository.temporary.path().to_path_buf(),
         repository.root.join("dot_config/build"),
+        repository.root.join("dot_local/build"),
         repository.root.join("modules/build"),
     ] {
         let error = build(BuildOptions::new(&repository.root, unsafe_path))

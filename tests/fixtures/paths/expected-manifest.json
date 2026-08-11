@@ -1,7 +1,17 @@
 {
-  "format_version": 3,
+  "format_version": 6,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:e26c0fa3d931738da08c3cf55d1b4fc39a65815c4e1585a02a16a792ff537e03",
+  "build_id": "sha256:382efff7597ed5f11ba4cbaac3f2e6fbc1b0a0b08bc13c517a829680fbf3815b",
+  "inputs": [],
+  "target": {
+    "os": {
+      "name": "macos",
+      "family": "unix"
+    },
+    "arch": "aarch64",
+    "origin": "host_default"
+  },
+  "observations": [],
   "modules": [
     {
       "name": "auto",
@@ -50,6 +60,13 @@
     {
       "kind": "file",
       "source": "home/.profile",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "home/.profile"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "home",
         "path": ".profile",
@@ -71,6 +88,13 @@
     {
       "kind": "file",
       "source": "home/.zshrc",
+      "source_origin": {
+        "kind": "direct",
+        "declared": ".zshrc"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "home",
         "path": ".zshrc",
@@ -92,6 +116,13 @@
     {
       "kind": "file",
       "source": "dot_config/auto.toml",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "dot_config/auto.toml"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "config",
         "path": "auto.toml",
@@ -113,6 +144,13 @@
     {
       "kind": "file",
       "source": "dot_config/starship-work.toml",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "starship-work.toml"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "config",
         "path": "starship-alt.toml",
@@ -133,6 +171,13 @@
     {
       "kind": "file",
       "source": "dot_config/starship.toml",
+      "source_origin": {
+        "kind": "direct",
+        "declared": "starship.toml"
+      },
+      "production": {
+        "kind": "static"
+      },
       "target": {
         "anchor": "config",
         "path": "starship.toml",

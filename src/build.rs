@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
@@ -9,21 +10,31 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
 
+use crate::context::HostContext;
 use crate::manifest::{
-    Artifact, EvaluatedArtifact, FileContent, MANIFEST_FORMAT_VERSION, Manifest, TargetAnchor,
+    Artifact, EvaluatedArtifact, EvaluatedDirectory, EvaluatedProduction, FileContent,
+    MANIFEST_FORMAT_VERSION, Manifest, Production, RendererIdentity, SourceOrigin, TargetAnchor,
     TargetOrigin,
 };
-use crate::path::{display_target, parse_explicit_target, validate_relative_path};
-use crate::runtime::evaluate;
+use crate::path::{
+    display_target, expand_target_root, infer_target, parse_explicit_target,
+    parse_explicit_target_root, validate_declared_source, validate_relative_path,
+};
+use crate::runtime::{EvaluationOptions, EvaluationOutcome, evaluate_with};
+use crate::source::{SourceFingerprint, fingerprint_regular_file, snapshot_directory};
 use crate::{Result, WombatError};
 
 const WORKSPACE_FORMAT_VERSION: u32 = 1;
 const WOMBAT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TEMPLATE_RENDERER_NAME: &str = "handlebars";
+const TEMPLATE_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildOptions {
     pub source_root: PathBuf,
     pub build_dir: PathBuf,
+    pub project_arguments: Vec<OsString>,
+    pub host: Option<HostContext>,
 }
 
 impl BuildOptions {
@@ -31,7 +42,22 @@ impl BuildOptions {
         Self {
             source_root: source_root.into(),
             build_dir: build_dir.into(),
+            project_arguments: Vec::new(),
+            host: None,
         }
+    }
+
+    pub fn with_project_arguments(
+        mut self,
+        arguments: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Self {
+        self.project_arguments = arguments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_host(mut self, host: HostContext) -> Self {
+        self.host = Some(host);
+        self
     }
 }
 
@@ -69,6 +95,23 @@ pub struct VerifiedBuild {
     pub manifest: Manifest,
 }
 
+#[derive(Debug)]
+pub struct OpenedBuild {
+    pub requested_build_dir: PathBuf,
+    pub product_dir: PathBuf,
+    pub manifest: Manifest,
+    _lock: Option<File>,
+    _snapshot: Option<tempfile::TempDir>,
+}
+
+impl Drop for OpenedBuild {
+    fn drop(&mut self) {
+        if let Some(lock) = &self._lock {
+            let _ = File::unlock(lock);
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkspaceMarker {
@@ -80,6 +123,9 @@ struct WorkspaceMarker {
 struct IdentityPayload<'a> {
     format_version: u32,
     wombat_version: &'a str,
+    inputs: &'a [crate::manifest::BuildInput],
+    target: &'a crate::context::ResolvedTarget,
+    observations: &'a [crate::manifest::Observation],
     modules: &'a [crate::manifest::ManifestModule],
     dependencies: &'a [crate::manifest::Dependency],
     artifacts: &'a [Artifact],
@@ -87,7 +133,7 @@ struct IdentityPayload<'a> {
 
 enum CurrentProduct {
     Missing,
-    Valid(Manifest),
+    Valid(Box<Manifest>),
     Invalid,
 }
 
@@ -115,36 +161,86 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
         .open(&lock_path)
         .map_err(|error| WombatError::io(&lock_path, error))?;
     acquire_exclusive(&lock, &build_dir)?;
-    ensure_workspace_marker(&build_dir, &source_root)?;
-    recover_publication(&build_dir)?;
+    let result = (|| {
+        ensure_workspace_marker(&build_dir, &source_root)?;
+        recover_publication(&build_dir)?;
 
-    let desired = evaluate(&source_root)?;
-    let staging_root = internal.join("staging");
-    ensure_plain_directory(&staging_root)?;
-    clear_directory_contents(&staging_root)?;
-    let staging = Builder::new()
-        .prefix("build-")
-        .tempdir_in(&staging_root)
-        .map_err(|error| WombatError::io(&staging_root, error))?;
-    let manifest = materialise(&source_root, staging.path(), desired)?;
-    let staged = verify_product(staging.path())?;
-    debug_assert_eq!(staged, manifest);
+        let host = options.host.map_or_else(HostContext::observe, Ok)?;
+        let desired = match evaluate_with(
+            &source_root,
+            EvaluationOptions {
+                project_arguments: options.project_arguments,
+                host,
+            },
+        )? {
+            EvaluationOutcome::Manifest(manifest) => *manifest,
+            EvaluationOutcome::ProjectHelp(_) => {
+                return Err(WombatError::configuration(
+                    "project help was requested where a build was expected",
+                ));
+            }
+        };
+        let staging_root = internal.join("staging");
+        ensure_plain_directory(&staging_root)?;
+        clear_directory_contents(&staging_root)?;
+        let staging = Builder::new()
+            .prefix("build-")
+            .tempdir_in(&staging_root)
+            .map_err(|error| WombatError::io(&staging_root, error))?;
+        let manifest = materialise(&source_root, staging.path(), desired)?;
+        let staged = verify_product(staging.path())?;
+        debug_assert_eq!(staged, manifest);
 
-    let current = inspect_product(&build_dir);
-    if let CurrentProduct::Valid(existing) = &current
-        && existing.build_id == manifest.build_id
-    {
-        return Ok(outcome(BuildStatus::Unchanged, build_dir, existing.clone()));
+        let current = inspect_product(&build_dir);
+        if let CurrentProduct::Valid(existing) = &current
+            && existing.build_id == manifest.build_id
+        {
+            return Ok(outcome(
+                BuildStatus::Unchanged,
+                build_dir.clone(),
+                existing.as_ref().clone(),
+            ));
+        }
+        let status = match current {
+            CurrentProduct::Missing => BuildStatus::Created,
+            CurrentProduct::Valid(_) => BuildStatus::Updated,
+            CurrentProduct::Invalid => BuildStatus::Repaired,
+        };
+
+        publish(&build_dir, staging.path())?;
+        let published = verify_product(&build_dir)?;
+        Ok(outcome(status, build_dir.clone(), published))
+    })();
+
+    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
+    match result {
+        Err(error) => {
+            let _ = unlock;
+            Err(error)
+        }
+        Ok(outcome) => {
+            unlock?;
+            Ok(outcome)
+        }
     }
-    let status = match current {
-        CurrentProduct::Missing => BuildStatus::Created,
-        CurrentProduct::Valid(_) => BuildStatus::Updated,
-        CurrentProduct::Invalid => BuildStatus::Repaired,
-    };
+}
 
-    publish(&build_dir, staging.path())?;
-    let published = verify_product(&build_dir)?;
-    Ok(outcome(status, build_dir, published))
+pub fn project_help(source_root: &Path, host: Option<HostContext>) -> Result<String> {
+    let source_root =
+        fs::canonicalize(source_root).map_err(|error| WombatError::io(source_root, error))?;
+    let host = host.map_or_else(HostContext::observe, Ok)?;
+    match evaluate_with(
+        &source_root,
+        EvaluationOptions {
+            project_arguments: vec![OsString::from("--help")],
+            host,
+        },
+    )? {
+        EvaluationOutcome::ProjectHelp(help) => Ok(help),
+        EvaluationOutcome::Manifest(_) => Err(WombatError::configuration(
+            "repository did not produce project help",
+        )),
+    }
 }
 
 pub fn verify_build(build_dir: &Path) -> Result<VerifiedBuild> {
@@ -165,11 +261,113 @@ pub fn verify_build(build_dir: &Path) -> Result<VerifiedBuild> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(WombatError::io(&lock_path, error)),
     };
-    let manifest = verify_product(&build_dir)?;
+    let result = verify_product(&build_dir);
+    if let Some(lock) = &_lock {
+        File::unlock(lock).map_err(|error| WombatError::io(&lock_path, error))?;
+    }
+    let manifest = result?;
     Ok(VerifiedBuild {
         build_dir,
         manifest,
     })
+}
+
+pub fn open_build(build_dir: &Path) -> Result<OpenedBuild> {
+    let requested_build_dir =
+        fs::canonicalize(build_dir).map_err(|error| WombatError::io(build_dir, error))?;
+    let lock_path = requested_build_dir.join(".wombat/lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(_) => {
+            ensure_plain_file(&lock_path)?;
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|error| WombatError::io(&lock_path, error))?;
+            acquire_shared(&lock, &requested_build_dir)?;
+            let manifest = match verify_product(&requested_build_dir) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    let _ = File::unlock(&lock);
+                    return Err(error);
+                }
+            };
+            Ok(OpenedBuild {
+                requested_build_dir: requested_build_dir.clone(),
+                product_dir: requested_build_dir,
+                manifest,
+                _lock: Some(lock),
+                _snapshot: None,
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let before = verify_product(&requested_build_dir)?;
+            let snapshot = tempfile::tempdir().map_err(|error| {
+                WombatError::io(std::env::temp_dir().join("wombat-build-snapshot"), error)
+            })?;
+            copy_functional_product(&requested_build_dir, snapshot.path())?;
+            let manifest = verify_product(snapshot.path())?;
+            let after = verify_product(&requested_build_dir)?;
+            if before.build_id != manifest.build_id || after.build_id != manifest.build_id {
+                return Err(WombatError::configuration(format!(
+                    "relocated build product `{}` changed while it was being opened",
+                    requested_build_dir.display()
+                )));
+            }
+            Ok(OpenedBuild {
+                requested_build_dir,
+                product_dir: snapshot.path().to_path_buf(),
+                manifest,
+                _lock: None,
+                _snapshot: Some(snapshot),
+            })
+        }
+        Err(error) => Err(WombatError::io(&lock_path, error)),
+    }
+}
+
+fn copy_functional_product(source: &Path, destination: &Path) -> Result<()> {
+    let manifest = source.join("manifest.json");
+    ensure_plain_file(&manifest)?;
+    fs::copy(&manifest, destination.join("manifest.json"))
+        .map_err(|error| WombatError::io(&manifest, error))?;
+    copy_product_directory(&source.join("tree"), &destination.join("tree"))
+}
+
+fn copy_product_directory(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| WombatError::io(source, error))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(WombatError::configuration(format!(
+            "build product directory `{}` must be a non-symlink directory",
+            source.display()
+        )));
+    }
+    fs::create_dir(destination).map_err(|error| WombatError::io(destination, error))?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| WombatError::io(source, error))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| WombatError::io(source, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)
+            .map_err(|error| WombatError::io(&source_path, error))?;
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            copy_product_directory(&source_path, &destination_path)?;
+        } else if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            fs::copy(&source_path, &destination_path)
+                .map_err(|error| WombatError::io(&source_path, error))?;
+            fs::set_permissions(&destination_path, metadata.permissions())
+                .map_err(|error| WombatError::io(&destination_path, error))?;
+        } else {
+            return Err(WombatError::configuration(format!(
+                "build product entry `{}` must be a regular file or directory",
+                source_path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn outcome(status: BuildStatus, build_dir: PathBuf, manifest: Manifest) -> BuildOutcome {
@@ -314,7 +512,7 @@ fn validate_build_location(source_root: &Path, build_dir: &Path) -> Result<()> {
     }
     if let Ok(relative) = build_dir.strip_prefix(source_root)
         && let Some(Component::Normal(first)) = relative.components().next()
-        && ["modules", "lua", "home", "dot_config"]
+        && ["modules", "lua", "home", "dot_config", "dot_local"]
             .iter()
             .any(|reserved| first == *reserved)
     {
@@ -388,6 +586,21 @@ fn materialise(
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
 ) -> Result<Manifest> {
+    materialise_with_hook(source_root, product_root, desired, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaterialisationPoint {
+    AfterArtifact(usize),
+    BeforeFinalValidation,
+}
+
+fn materialise_with_hook(
+    source_root: &Path,
+    product_root: &Path,
+    desired: crate::manifest::EvaluatedManifest,
+    mut hook: impl FnMut(MaterialisationPoint),
+) -> Result<Manifest> {
     let tree = product_root.join("tree");
     fs::create_dir(&tree).map_err(|error| WombatError::io(&tree, error))?;
     for anchor in ["home", "config"] {
@@ -396,13 +609,19 @@ fn materialise(
     }
 
     let mut artifacts = Vec::with_capacity(desired.artifacts.len());
-    for artifact in desired.artifacts {
+    for (index, artifact) in desired.artifacts.iter().enumerate() {
         artifacts.push(materialise_artifact(source_root, &tree, artifact)?);
+        hook(MaterialisationPoint::AfterArtifact(index));
     }
+    hook(MaterialisationPoint::BeforeFinalValidation);
+    revalidate_sources(source_root, &desired.artifacts, &desired.directories)?;
     let mut manifest = Manifest {
         format_version: MANIFEST_FORMAT_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
         build_id: String::new(),
+        inputs: desired.inputs,
+        target: desired.target,
+        observations: desired.observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
         artifacts,
@@ -415,7 +634,7 @@ fn materialise(
 fn materialise_artifact(
     source_root: &Path,
     tree: &Path,
-    artifact: EvaluatedArtifact,
+    artifact: &EvaluatedArtifact,
 ) -> Result<Artifact> {
     let source_path = source_root.join(&artifact.source);
     reject_source_symlinks(source_root, &source_path)?;
@@ -426,24 +645,289 @@ fn materialise_artifact(
     let destination = tree.join(anchor).join(&artifact.target.path);
     let parent = destination.parent().expect("file artifacts have a parent");
     fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
-    let content = copy_and_hash(&source_path, &destination)?;
+    let (production, content) = match &artifact.production {
+        EvaluatedProduction::Static => (
+            Production::Static,
+            copy_and_hash(&source_path, &destination, &artifact.fingerprint)?,
+        ),
+        EvaluatedProduction::Template { context } => {
+            let (source_digest, content) = render_and_hash(
+                &source_path,
+                &artifact.source,
+                &destination,
+                &artifact.fingerprint,
+                context,
+            )?;
+            (
+                Production::Template {
+                    renderer: RendererIdentity {
+                        name: TEMPLATE_RENDERER_NAME.to_string(),
+                        contract_version: TEMPLATE_CONTRACT_VERSION,
+                    },
+                    source_digest,
+                    context: context.clone(),
+                },
+                content,
+            )
+        }
+    };
     Ok(Artifact {
         kind: artifact.kind,
-        source: artifact.source,
-        target: artifact.target,
+        source: artifact.source.clone(),
+        source_origin: artifact.source_origin.clone(),
+        production,
+        target: artifact.target.clone(),
         content,
-        owner: artifact.owner,
-        declared_from: artifact.declared_from,
+        owner: artifact.owner.clone(),
+        declared_from: artifact.declared_from.clone(),
     })
 }
 
-fn copy_and_hash(source: &Path, destination: &Path) -> Result<FileContent> {
-    copy_and_hash_with_hook(source, destination, || {})
+fn render_and_hash(
+    source: &Path,
+    source_name: &str,
+    destination: &Path,
+    expected: &SourceFingerprint,
+    context: &crate::frozen::FrozenValue,
+) -> Result<(String, FileContent)> {
+    let mut input = File::open(source).map_err(|error| WombatError::io(source, error))?;
+    let before = input
+        .metadata()
+        .map_err(|error| WombatError::io(source, error))?;
+    if !before.file_type().is_file() || SourceFingerprint::from_metadata(&before) != *expected {
+        return Err(source_changed(source));
+    }
+    let mut bytes = Vec::new();
+    input
+        .read_to_end(&mut bytes)
+        .map_err(|error| WombatError::io(source, error))?;
+    let after = input
+        .metadata()
+        .map_err(|error| WombatError::io(source, error))?;
+    let path_after =
+        fs::symlink_metadata(source).map_err(|error| WombatError::io(source, error))?;
+    if SourceFingerprint::from_metadata(&after) != *expected
+        || SourceFingerprint::from_metadata(&path_after) != *expected
+    {
+        return Err(source_changed(source));
+    }
+    let template_source = std::str::from_utf8(&bytes).map_err(|error| {
+        WombatError::configuration(format!(
+            "template source `{source_name}` is not valid UTF-8: {error}"
+        ))
+    })?;
+    let source_digest = digest_string(Sha256::digest(&bytes));
+
+    let mut renderer = handlebars::Handlebars::new();
+    renderer.set_strict_mode(true);
+    renderer.set_recursive_lookup(false);
+    renderer.register_escape_fn(handlebars::no_escape);
+    for helper in [
+        "lookup", "log", "eq", "ne", "gt", "gte", "lt", "lte", "and", "or", "not", "len",
+    ] {
+        renderer.unregister_helper(helper);
+    }
+    renderer.register_helper("if", Box::new(StrictConditionalHelper::new("if", true)));
+    renderer.register_helper(
+        "unless",
+        Box::new(StrictConditionalHelper::new("unless", false)),
+    );
+    let template = handlebars::Template::compile(template_source)
+        .map_err(|error| template_compile_error(source_name, error))?;
+    validate_handlebars_contract(source_name, &template)?;
+    renderer.register_template(source_name, template);
+    let rendered = renderer
+        .render(source_name, context)
+        .map_err(|error| template_render_error(source_name, error))?;
+    let rendered = rendered.as_bytes();
+
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(destination)
+        .map_err(|error| WombatError::io(destination, error))?;
+    output
+        .write_all(rendered)
+        .map_err(|error| WombatError::io(destination, error))?;
+    let executable = executable_intent(&before);
+    set_normalized_permissions(&output, executable, destination)?;
+    output
+        .sync_all()
+        .map_err(|error| WombatError::io(destination, error))?;
+    Ok((
+        source_digest,
+        FileContent {
+            digest: digest_string(Sha256::digest(rendered)),
+            size: u64::try_from(rendered.len())
+                .map_err(|_| WombatError::configuration("artifact size exceeds u64"))?,
+            executable,
+        },
+    ))
+}
+
+fn template_compile_error(source_name: &str, error: handlebars::TemplateError) -> WombatError {
+    WombatError::configuration(format!(
+        "failed to compile template `{source_name}`: {error}"
+    ))
+}
+
+fn template_render_error(source_name: &str, error: handlebars::RenderError) -> WombatError {
+    WombatError::configuration(format!(
+        "failed to render template `{source_name}`: {error}"
+    ))
+}
+
+struct StrictConditionalHelper {
+    name: &'static str,
+    positive: bool,
+}
+
+impl StrictConditionalHelper {
+    fn new(name: &'static str, positive: bool) -> Self {
+        Self { name, positive }
+    }
+}
+
+impl handlebars::HelperDef for StrictConditionalHelper {
+    fn call<'reg: 'rc, 'rc>(
+        &self,
+        helper: &handlebars::Helper<'rc>,
+        renderer: &'reg handlebars::Handlebars<'reg>,
+        context: &'rc handlebars::Context,
+        render_context: &mut handlebars::RenderContext<'reg, 'rc>,
+        output: &mut dyn handlebars::Output,
+    ) -> handlebars::HelperResult {
+        let value = helper
+            .param(0)
+            .ok_or(handlebars::RenderErrorReason::ParamNotFoundForIndex(
+                self.name, 0,
+            ))?;
+        if value.is_value_missing() {
+            return Err(handlebars::RenderError::strict_error(value.relative_path()));
+        }
+        let truthy = handlebars_truthy(value.value());
+        let template = if truthy == self.positive {
+            helper.template()
+        } else {
+            helper.inverse()
+        };
+        template.map_or(Ok(()), |template| {
+            handlebars::Renderable::render(template, renderer, context, render_context, output)
+        })
+    }
+}
+
+fn handlebars_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => value.as_f64().is_some_and(f64::is_normal),
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(value) => !value.is_empty(),
+        serde_json::Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn validate_handlebars_contract(source_name: &str, template: &handlebars::Template) -> Result<()> {
+    use handlebars::template::TemplateElement;
+
+    for (index, element) in template.elements.iter().enumerate() {
+        let location = template
+            .mapping
+            .get(index)
+            .map_or(String::new(), |mapping| {
+                format!(" at line {}, column {}", mapping.0, mapping.1)
+            });
+        match element {
+            TemplateElement::RawString(_) | TemplateElement::Comment(_) => {}
+            TemplateElement::Expression(helper) | TemplateElement::HtmlExpression(helper) => {
+                if !helper.params.is_empty() || !helper.hash.is_empty() {
+                    return Err(unsupported_handlebars_feature(
+                        source_name,
+                        &location,
+                        "inline helpers",
+                    ));
+                }
+            }
+            TemplateElement::HelperBlock(helper) => {
+                let name = helper.name.as_name().unwrap_or("<dynamic>");
+                if !matches!(name, "if" | "unless" | "each" | "with" | "raw") {
+                    return Err(unsupported_handlebars_feature(
+                        source_name,
+                        &location,
+                        &format!("helper `{name}`"),
+                    ));
+                }
+                if !helper.hash.is_empty()
+                    || helper
+                        .params
+                        .iter()
+                        .any(handlebars_parameter_has_subexpression)
+                {
+                    return Err(unsupported_handlebars_feature(
+                        source_name,
+                        &location,
+                        "helper hash arguments and subexpressions",
+                    ));
+                }
+                if matches!(name, "each" | "with") && helper.inverse.is_some() {
+                    return Err(unsupported_handlebars_feature(
+                        source_name,
+                        &location,
+                        "else blocks on `each` or `with`",
+                    ));
+                }
+                if let Some(body) = &helper.template {
+                    validate_handlebars_contract(source_name, body)?;
+                }
+                if let Some(inverse) = &helper.inverse {
+                    validate_handlebars_contract(source_name, inverse)?;
+                }
+            }
+            TemplateElement::DecoratorExpression(_)
+            | TemplateElement::DecoratorBlock(_)
+            | TemplateElement::PartialExpression(_)
+            | TemplateElement::PartialBlock(_) => {
+                return Err(unsupported_handlebars_feature(
+                    source_name,
+                    &location,
+                    "decorators and partials",
+                ));
+            }
+            _ => {
+                return Err(unsupported_handlebars_feature(
+                    source_name,
+                    &location,
+                    "this template construct",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handlebars_parameter_has_subexpression(parameter: &handlebars::template::Parameter) -> bool {
+    matches!(parameter, handlebars::template::Parameter::Subexpression(_))
+}
+
+fn unsupported_handlebars_feature(source_name: &str, location: &str, feature: &str) -> WombatError {
+    WombatError::configuration(format!(
+        "template `{source_name}` uses unsupported Handlebars {feature}{location}; resolve policy and transformations in Lua"
+    ))
+}
+
+fn copy_and_hash(
+    source: &Path,
+    destination: &Path,
+    expected: &SourceFingerprint,
+) -> Result<FileContent> {
+    copy_and_hash_with_hook(source, destination, expected, || {})
 }
 
 fn copy_and_hash_with_hook(
     source: &Path,
     destination: &Path,
+    expected: &SourceFingerprint,
     after_copy: impl FnOnce(),
 ) -> Result<FileContent> {
     let mut input = File::open(source).map_err(|error| WombatError::io(source, error))?;
@@ -455,6 +939,9 @@ fn copy_and_hash_with_hook(
             "static artifact source `{}` is not a regular file",
             source.display()
         )));
+    }
+    if SourceFingerprint::from_metadata(&before) != *expected {
+        return Err(source_changed(source));
     }
     let executable = executable_intent(&before);
     let mut output = OpenOptions::new()
@@ -486,11 +973,10 @@ fn copy_and_hash_with_hook(
         .map_err(|error| WombatError::io(source, error))?;
     let path_after =
         fs::symlink_metadata(source).map_err(|error| WombatError::io(source, error))?;
-    if !same_source(&before, &after) || !same_source(&before, &path_after) {
-        return Err(WombatError::configuration(format!(
-            "static artifact source `{}` changed during materialisation",
-            source.display()
-        )));
+    if SourceFingerprint::from_metadata(&after) != *expected
+        || SourceFingerprint::from_metadata(&path_after) != *expected
+    {
+        return Err(source_changed(source));
     }
     set_normalized_permissions(&output, executable, destination)?;
     output
@@ -501,6 +987,36 @@ fn copy_and_hash_with_hook(
         size,
         executable,
     })
+}
+
+fn source_changed(source: &Path) -> WombatError {
+    WombatError::configuration(format!(
+        "artifact source `{}` changed during materialisation",
+        source.display()
+    ))
+}
+
+fn revalidate_sources(
+    source_root: &Path,
+    artifacts: &[EvaluatedArtifact],
+    directories: &[EvaluatedDirectory],
+) -> Result<()> {
+    for artifact in artifacts {
+        let source = source_root.join(&artifact.source);
+        if fingerprint_regular_file(&source)? != artifact.fingerprint {
+            return Err(source_changed(&source));
+        }
+    }
+    for directory in directories {
+        let source = source_root.join(&directory.root);
+        if snapshot_directory(source_root, &source)? != directory.snapshot {
+            return Err(WombatError::configuration(format!(
+                "static directory source `{}` changed during materialisation",
+                source.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -530,24 +1046,6 @@ fn set_normalized_permissions(_file: &File, _executable: bool, _path: &Path) -> 
     Ok(())
 }
 
-#[cfg(unix)]
-fn same_source(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.len() == right.len()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
-        && left.mode() == right.mode()
-}
-
-#[cfg(not(unix))]
-fn same_source(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.len() == right.len()
-        && left.modified().ok() == right.modified().ok()
-        && left.permissions().readonly() == right.permissions().readonly()
-}
-
 fn reject_source_symlinks(root: &Path, source: &Path) -> Result<()> {
     let relative = source.strip_prefix(root).map_err(|_| {
         WombatError::configuration(format!(
@@ -574,6 +1072,9 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
     let payload = IdentityPayload {
         format_version: manifest.format_version,
         wombat_version: &manifest.wombat_version,
+        inputs: &manifest.inputs,
+        target: &manifest.target,
+        observations: &manifest.observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
         artifacts: &manifest.artifacts,
@@ -638,7 +1139,7 @@ fn verify_product(root: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-fn validate_manifest(manifest: &Manifest) -> Result<()> {
+pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.format_version != MANIFEST_FORMAT_VERSION {
         return Err(WombatError::configuration(format!(
             "unsupported manifest format version {}; expected {MANIFEST_FORMAT_VERSION}",
@@ -650,6 +1151,98 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "build was produced by Wombat {}, but this is Wombat {WOMBAT_VERSION}",
             manifest.wombat_version
         )));
+    }
+    crate::context::TargetPlatform::from_frozen(&manifest.target.platform.to_frozen())?;
+    match (&manifest.target.origin, &manifest.target.declared_from) {
+        (crate::context::TargetOrigin::HostDefault, None)
+        | (crate::context::TargetOrigin::RootOverride, Some(_)) => {}
+        _ => {
+            return Err(WombatError::configuration(
+                "manifest target origin and declaration location are inconsistent",
+            ));
+        }
+    }
+    if !manifest
+        .inputs
+        .windows(2)
+        .all(|pair| pair[0].name < pair[1].name)
+    {
+        return Err(WombatError::configuration(
+            "manifest build inputs are not uniquely sorted",
+        ));
+    }
+    for input in &manifest.inputs {
+        let mut name = input.name.bytes();
+        if !name
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            || !name.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(WombatError::configuration(format!(
+                "manifest build input name `{}` is invalid",
+                input.name
+            )));
+        }
+        validate_relative_path(
+            input.declared_from.split(':').next().unwrap_or(""),
+            "manifest input declaration path",
+        )?;
+        match input.kind {
+            crate::manifest::BuildInputKind::Flag
+                if !matches!(input.value, crate::frozen::FrozenValue::Boolean(_)) =>
+            {
+                return Err(WombatError::configuration(
+                    "manifest flag input is not boolean",
+                ));
+            }
+            crate::manifest::BuildInputKind::Choice
+            | crate::manifest::BuildInputKind::String
+            | crate::manifest::BuildInputKind::Target
+                if !matches!(input.value, crate::frozen::FrozenValue::String(_)) =>
+            {
+                return Err(WombatError::configuration(
+                    "manifest textual input is not a string",
+                ));
+            }
+            crate::manifest::BuildInputKind::Integer
+                if !matches!(input.value, crate::frozen::FrozenValue::Integer(_)) =>
+            {
+                return Err(WombatError::configuration(
+                    "manifest integer input is not an integer",
+                ));
+            }
+            _ => {}
+        }
+        if input.kind == crate::manifest::BuildInputKind::Target
+            && let crate::frozen::FrozenValue::String(value) = &input.value
+        {
+            let parsed = crate::context::TargetPlatform::parse_compact(value)?;
+            if parsed.compact() != *value {
+                return Err(WombatError::configuration(
+                    "manifest target input is not canonical",
+                ));
+            }
+        }
+    }
+    if !manifest.observations.windows(2).all(|pair| {
+        (pair[0].subject, pair[0].path.as_str()) < (pair[1].subject, pair[1].path.as_str())
+    }) {
+        return Err(WombatError::configuration(
+            "manifest observations are not uniquely sorted",
+        ));
+    }
+    if manifest.observations.iter().any(|observation| {
+        observation.path.is_empty()
+            || observation.path.split('.').any(|component| {
+                component.is_empty()
+                    || !component
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+    }) {
+        return Err(WombatError::configuration(
+            "manifest contains an invalid observation path",
+        ));
     }
     if !manifest
         .modules
@@ -685,7 +1278,86 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
     for artifact in &manifest.artifacts {
         validate_relative_path(&artifact.source, "manifest artifact source")?;
+        validate_relative_path(&artifact.declared_from, "manifest declaration path")?;
         validate_relative_path(&artifact.target.path, "manifest target path")?;
+        match &artifact.source_origin {
+            SourceOrigin::Direct { declared } => {
+                validate_declared_source(declared)?;
+                if declared == "." {
+                    return Err(WombatError::configuration(
+                        "manifest direct artifact source must identify a file",
+                    ));
+                }
+                let expected_source =
+                    resolve_declared_manifest_source(declared, &artifact.declared_from);
+                if artifact.source != expected_source {
+                    return Err(WombatError::configuration(format!(
+                        "manifest direct source `{}` does not match declared source `{expected_source}`",
+                        artifact.source
+                    )));
+                }
+            }
+            SourceOrigin::Directory {
+                declared,
+                root,
+                relative,
+            } => {
+                validate_declared_source(declared)?;
+                validate_relative_path(root, "manifest directory source root")?;
+                validate_relative_path(relative, "manifest directory relative path")?;
+                let expected_root =
+                    resolve_declared_manifest_source(declared, &artifact.declared_from);
+                if root != &expected_root {
+                    return Err(WombatError::configuration(format!(
+                        "manifest directory root `{root}` does not match declared root `{expected_root}`"
+                    )));
+                }
+                let expected_source = format!("{root}/{relative}");
+                if artifact.source != expected_source {
+                    return Err(WombatError::configuration(format!(
+                        "manifest directory source `{}` does not match `{expected_source}`",
+                        artifact.source
+                    )));
+                }
+                if !matches!(artifact.production, Production::Static) {
+                    return Err(WombatError::configuration(
+                        "manifest directory-expanded artifacts must use static production",
+                    ));
+                }
+            }
+        }
+        match &artifact.production {
+            Production::Static => {}
+            Production::Template {
+                renderer,
+                source_digest,
+                context,
+            } => {
+                if renderer.name != TEMPLATE_RENDERER_NAME
+                    || renderer.contract_version != TEMPLATE_CONTRACT_VERSION
+                {
+                    return Err(WombatError::configuration(format!(
+                        "unsupported template renderer contract `{}-v{}`",
+                        renderer.name, renderer.contract_version
+                    )));
+                }
+                if source_digest.len() != 71
+                    || !source_digest.starts_with("sha256:")
+                    || !source_digest[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(WombatError::configuration(
+                        "manifest template source digest is not a SHA-256 identity",
+                    ));
+                }
+                if !matches!(context, crate::frozen::FrozenValue::Map(_)) {
+                    return Err(WombatError::configuration(
+                        "manifest template context must be a map",
+                    ));
+                }
+            }
+        }
         let expected_display = display_target(artifact.target.anchor, &artifact.target.path);
         if artifact.target.display != expected_display {
             return Err(WombatError::configuration(format!(
@@ -705,17 +1377,91 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
                     )));
                 }
             }
-            TargetOrigin::Inferred { source_anchor, .. } => {
-                if source_anchor.target_anchor() != artifact.target.anchor {
+            TargetOrigin::Inferred {
+                basis,
+                source_anchor,
+            } => {
+                let expected = manifest_declaration_anchor(&artifact.declared_from).map_or_else(
+                    || {
+                        crate::manifest::SourceAnchor::ALL
+                            .into_iter()
+                            .find(|anchor| {
+                                artifact.source == anchor.source_prefix()
+                                    || artifact
+                                        .source
+                                        .starts_with(&format!("{}/", anchor.source_prefix()))
+                            })
+                            .map(|anchor| (crate::manifest::InferenceBasis::SourcePrefix, anchor))
+                    },
+                    |anchor| Some((crate::manifest::InferenceBasis::ModuleAnchor, anchor)),
+                );
+                if expected != Some((*basis, *source_anchor)) {
                     return Err(WombatError::configuration(format!(
-                        "manifest inferred target `{}` has an incompatible source anchor",
+                        "manifest inferred target `{}` has inconsistent inference provenance",
                         artifact.target.display
+                    )));
+                }
+                let prefix = format!("{}/", source_anchor.source_prefix());
+                let relative = artifact.source.strip_prefix(&prefix).ok_or_else(|| {
+                    WombatError::configuration(format!(
+                        "manifest inferred source `{}` is outside its {:?} source anchor",
+                        artifact.source, source_anchor
+                    ))
+                })?;
+                let relative = if matches!(artifact.production, Production::Template { .. }) {
+                    relative.strip_suffix(".tmpl").unwrap_or(relative)
+                } else {
+                    relative
+                };
+                let parsed = infer_target(*source_anchor, relative, *basis)?;
+                if parsed.anchor != artifact.target.anchor
+                    || parsed.path != artifact.target.path
+                    || parsed.display != artifact.target.display
+                {
+                    return Err(WombatError::configuration(format!(
+                        "manifest inferred target `{}` does not match its concrete source",
+                        artifact.target.display
+                    )));
+                }
+            }
+            TargetOrigin::DirectoryExplicit { declared, relative } => {
+                let root = parse_explicit_target_root(declared)?;
+                let parsed = expand_target_root(&root, relative)?;
+                if parsed.anchor != artifact.target.anchor
+                    || parsed.path != artifact.target.path
+                    || parsed.display != artifact.target.display
+                {
+                    return Err(WombatError::configuration(format!(
+                        "manifest directory target `{declared}` plus `{relative}` does not match its resolved target"
                     )));
                 }
             }
         }
     }
     Ok(())
+}
+
+fn resolve_declared_manifest_source(declared: &str, declared_from: &str) -> String {
+    let prefix = manifest_declaration_anchor(declared_from)
+        .map(crate::manifest::SourceAnchor::source_prefix);
+    match (prefix, declared) {
+        (Some(prefix), ".") => prefix.to_string(),
+        (Some(prefix), _) => format!("{prefix}/{declared}"),
+        (None, ".") => ".".to_string(),
+        (None, _) => declared.to_string(),
+    }
+}
+
+fn manifest_declaration_anchor(declared_from: &str) -> Option<crate::manifest::SourceAnchor> {
+    if declared_from.starts_with("modules/dot_config/") {
+        Some(crate::manifest::SourceAnchor::DotConfig)
+    } else if declared_from.starts_with("modules/dot_local/") {
+        Some(crate::manifest::SourceAnchor::DotLocal)
+    } else if declared_from.starts_with("modules/home/") {
+        Some(crate::manifest::SourceAnchor::Home)
+    } else {
+        None
+    }
 }
 
 fn verify_tree(tree: &Path, manifest: &Manifest) -> Result<()> {
@@ -891,7 +1637,7 @@ fn inspect_product(root: &Path) -> CurrentProduct {
         CurrentProduct::Missing
     } else {
         match verify_product(root) {
-            Ok(manifest) => CurrentProduct::Valid(manifest),
+            Ok(manifest) => CurrentProduct::Valid(Box::new(manifest)),
             Err(_) => CurrentProduct::Invalid,
         }
     }
@@ -1072,6 +1818,7 @@ fn digest_string(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::evaluate;
 
     fn repository(root: &Path) {
         fs::create_dir_all(root.join("modules/dot_config")).unwrap();
@@ -1095,14 +1842,130 @@ mod tests {
         let source = temporary.path().join("source");
         let destination = temporary.path().join("destination");
         fs::write(&source, "before\n").unwrap();
+        let expected = fingerprint_regular_file(&source).unwrap();
 
-        let error = copy_and_hash_with_hook(&source, &destination, || {
+        let error = copy_and_hash_with_hook(&source, &destination, &expected, || {
             fs::write(&source, "changed while materialising\n").unwrap();
         })
         .unwrap_err()
         .to_string();
 
         assert!(error.contains("changed during materialisation"), "{error}");
+    }
+
+    #[test]
+    fn template_source_mutation_before_final_validation_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("repository");
+        let staged = temporary.path().join("staged");
+        fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+        fs::create_dir_all(source.join("dot_config")).unwrap();
+        fs::create_dir(&staged).unwrap();
+        fs::write(
+            source.join("wombat.lua"),
+            "local w = require('wombat')\nw.use('app')\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("modules/dot_config/app.lua"),
+            "local w = require('wombat')\nw.install('app.tmpl', { with = { value = 'before' } })\n",
+        )
+        .unwrap();
+        let template = source.join("dot_config/app.tmpl");
+        fs::write(&template, "{{ value }}\n").unwrap();
+        let desired = evaluate(&source).unwrap();
+
+        let error = materialise_with_hook(&source, &staged, desired, |point| {
+            if point == MaterialisationPoint::BeforeFinalValidation {
+                fs::write(&template, "changed {{ value }}\n").unwrap();
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed during materialisation"), "{error}");
+    }
+
+    #[test]
+    fn final_directory_rewalk_rejects_every_membership_and_metadata_change() {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Content,
+            Add,
+            Remove,
+            Rename,
+            Type,
+            #[cfg(unix)]
+            Mode,
+        }
+
+        let mutations = [
+            Mutation::Content,
+            Mutation::Add,
+            Mutation::Remove,
+            Mutation::Rename,
+            Mutation::Type,
+            #[cfg(unix)]
+            Mutation::Mode,
+        ];
+        for mutation in mutations {
+            let temporary = tempfile::tempdir().unwrap();
+            let source = temporary.path().join("repository");
+            let current = temporary.path().join("current");
+            fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+            fs::create_dir_all(source.join("dot_config/tree")).unwrap();
+            fs::write(
+                source.join("wombat.lua"),
+                "local w = require(\"wombat\")\nw.use(\"tree\")\n",
+            )
+            .unwrap();
+            fs::write(
+                source.join("modules/dot_config/tree.lua"),
+                "local w = require(\"wombat\")\nw.install(\"tree\")\n",
+            )
+            .unwrap();
+            let leaf = source.join("dot_config/tree/file");
+            fs::write(&leaf, "before\n").unwrap();
+            let previous = build(BuildOptions::new(&source, &current)).unwrap();
+            let desired = evaluate(&source).unwrap();
+            let staged = temporary.path().join("staged");
+            fs::create_dir(&staged).unwrap();
+
+            let error = materialise_with_hook(&source, &staged, desired, |point| {
+                if point != MaterialisationPoint::BeforeFinalValidation {
+                    return;
+                }
+                match mutation {
+                    Mutation::Content => fs::write(&leaf, "changed\n").unwrap(),
+                    Mutation::Add => {
+                        fs::write(source.join("dot_config/tree/added"), "added\n").unwrap();
+                    }
+                    Mutation::Remove => fs::remove_file(&leaf).unwrap(),
+                    Mutation::Rename => {
+                        fs::rename(&leaf, source.join("dot_config/tree/renamed")).unwrap();
+                    }
+                    Mutation::Type => {
+                        fs::remove_file(&leaf).unwrap();
+                        fs::create_dir(&leaf).unwrap();
+                    }
+                    #[cfg(unix)]
+                    Mutation::Mode => {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&leaf, fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                }
+            })
+            .unwrap_err()
+            .to_string();
+
+            assert!(
+                error.contains("changed during materialisation")
+                    || error.contains("No such file")
+                    || error.contains("not a regular file"),
+                "{mutation:?}: {error}"
+            );
+            let verified = verify_build(&current).unwrap();
+            assert_eq!(verified.manifest.build_id, previous.build_id);
+        }
     }
 
     #[test]

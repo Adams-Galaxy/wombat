@@ -6,9 +6,10 @@ use std::path::{Component, Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
-use crate::manifest::InferenceBasis;
+use crate::manifest::{EvaluatedDirectory, InferenceBasis, SourceOrigin, TargetPath};
 use crate::path::{
-    infer_target, prefixed_source, reject_legacy_config_tree, validate_relative_path,
+    expand_target_root, infer_target, prefixed_source, reject_noncanonical_artifact_trees,
+    validate_relative_path,
 };
 use crate::runtime::evaluate;
 use crate::{Result, WombatError};
@@ -28,21 +29,36 @@ pub enum AddStatus {
 pub struct AddOutcome {
     pub status: AddStatus,
     pub source: String,
+    pub method: AddMethod,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddMethod {
+    GeneratedAuto,
+    Directory {
+        owner: String,
+        declared_source: String,
+    },
 }
 
 impl AddOutcome {
     pub fn display(&self) -> String {
-        match self.status {
-            AddStatus::Added => format!("added `{}` through module `auto`", self.source),
-            AddStatus::DeclarationAdded => {
-                format!(
-                    "declared existing source `{}` through module `auto`",
-                    self.source
-                )
+        let action = match self.status {
+            AddStatus::Added => "added",
+            AddStatus::DeclarationAdded => "declared existing source",
+            AddStatus::AlreadyPresent => "already added",
+        };
+        match &self.method {
+            AddMethod::GeneratedAuto => {
+                format!("{action} `{}` through module `auto`", self.source)
             }
-            AddStatus::AlreadyPresent => {
-                format!("already added `{}` through module `auto`", self.source)
-            }
+            AddMethod::Directory {
+                owner,
+                declared_source,
+            } => format!(
+                "{action} `{}` through directory `{declared_source}` owned by module `{owner}`",
+                self.source
+            ),
         }
     }
 }
@@ -62,7 +78,7 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
     }
 
     let root = fs::canonicalize(root).map_err(|error| WombatError::io(root, error))?;
-    reject_legacy_config_tree(&root)?;
+    reject_noncanonical_artifact_trees(&root)?;
     let home =
         fs::canonicalize(target_home).map_err(|error| WombatError::io(target_home, error))?;
 
@@ -93,54 +109,19 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
     let source_path = root.join(source.replace('/', std::path::MAIN_SEPARATOR_STR));
     validate_destination_path(&root, &source_path)?;
 
-    let auto_path = root.join(AUTO_MODULE);
-    let auto_metadata = fs::symlink_metadata(&auto_path).map_err(|_| {
-        WombatError::configuration(format!(
-            "`{AUTO_MODULE}` is required before `wombat add`; create the standard generated module and select it with `w.use(\"auto\")`"
-        ))
-    })?;
-    if auto_metadata.file_type().is_symlink() || !auto_metadata.file_type().is_file() {
-        return Err(WombatError::configuration(format!(
-            "`{AUTO_MODULE}` must be a regular non-symlink file"
-        )));
-    }
-    let auto_source =
-        fs::read_to_string(&auto_path).map_err(|error| WombatError::io(&auto_path, error))?;
-    let mut generated = parse_generated_region(&auto_source).map_err(|message| {
-        WombatError::configuration(format!(
-            "cannot update `{AUTO_MODULE}`: {message}; proposed declaration: {}",
-            generated_line(&source)
-        ))
-    })?;
-
     let manifest = evaluate(&root)?;
-    if !manifest.modules.iter().any(|module| module.name == "auto") {
-        return Err(WombatError::configuration(
-            "module `auto` is not selected; add `w.use(\"auto\")` to root policy before using `wombat add`",
-        ));
-    }
     let (source_anchor, target_relative) = prefixed_source(&source)?
         .expect("generated add sources always contain a recognized anchor prefix");
     let prospective_target =
         infer_target(source_anchor, target_relative, InferenceBasis::SourcePrefix)?;
-    let declaration_exists = generated.contains(&source);
-    for artifact in &manifest.artifacts {
-        if targets_overlap(&artifact.target, &prospective_target)
-            && !(declaration_exists
-                && artifact.owner == "auto"
-                && artifact.source == source
-                && artifact.target.key() == prospective_target.key())
-        {
-            return Err(WombatError::configuration(format!(
-                "cannot add `{}` because target `{}` overlaps an artifact owned by `{}` from `{}` declared at {}",
-                target.display(),
-                prospective_target.display,
-                artifact.owner,
-                artifact.source,
-                artifact.declared_from
-            )));
-        }
-    }
+    let coverages = directory_coverages(&manifest.directories, &source)?;
+    validate_prospective_outputs(
+        &target,
+        &source,
+        &manifest.artifacts,
+        &coverages,
+        &prospective_target,
+    )?;
 
     let target_bytes = fs::read(&target).map_err(|error| WombatError::io(&target, error))?;
     let source_exists = source_path
@@ -163,11 +144,98 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
         }
     }
 
+    let matching = coverages
+        .iter()
+        .filter(|coverage| coverage.target.key() == prospective_target.key())
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        let declarations = matching
+            .iter()
+            .map(|coverage| {
+                format!(
+                    "`{}` owned by `{}` at {}",
+                    coverage.directory.declared_source,
+                    coverage.directory.owner,
+                    coverage.directory.declared_from
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(WombatError::configuration(format!(
+            "cannot add `{}` because multiple directory declarations map `{source}` to `{}`: {declarations}",
+            target.display(),
+            prospective_target.display
+        )));
+    }
+    if let Some(coverage) = matching.first() {
+        let method = AddMethod::Directory {
+            owner: coverage.directory.owner.clone(),
+            declared_source: coverage.directory.declared_source.clone(),
+        };
+        if source_exists {
+            return Ok(AddOutcome {
+                status: AddStatus::AlreadyPresent,
+                source,
+                method,
+            });
+        }
+        persist_addition(&root, &source_path, Some(target_bytes.as_slice()), None)?;
+        return Ok(AddOutcome {
+            status: AddStatus::Added,
+            source,
+            method,
+        });
+    }
+
+    let auto_path = root.join(AUTO_MODULE);
+    let auto_metadata = fs::symlink_metadata(&auto_path).map_err(|_| {
+        WombatError::configuration(format!(
+            "`{AUTO_MODULE}` is required before `wombat add`; create the standard generated module and select it with `w.use(\"auto\")`"
+        ))
+    })?;
+    if auto_metadata.file_type().is_symlink() || !auto_metadata.file_type().is_file() {
+        return Err(WombatError::configuration(format!(
+            "`{AUTO_MODULE}` must be a regular non-symlink file"
+        )));
+    }
+    let auto_source =
+        fs::read_to_string(&auto_path).map_err(|error| WombatError::io(&auto_path, error))?;
+    let mut generated = parse_generated_region(&auto_source).map_err(|message| {
+        WombatError::configuration(format!(
+            "cannot update `{AUTO_MODULE}`: {message}; proposed declaration: {}",
+            generated_line(&source)
+        ))
+    })?;
+    if !manifest.modules.iter().any(|module| module.name == "auto") {
+        return Err(WombatError::configuration(
+            "module `auto` is not selected; add `w.use(\"auto\")` to root policy before using `wombat add`",
+        ));
+    }
+    let declaration_exists = generated.contains(&source);
+    for artifact in &manifest.artifacts {
+        if targets_overlap(&artifact.target, &prospective_target)
+            && !(declaration_exists
+                && artifact.owner == "auto"
+                && artifact.source == source
+                && artifact.target.key() == prospective_target.key())
+        {
+            return Err(WombatError::configuration(format!(
+                "cannot add `{}` because target `{}` overlaps an artifact owned by `{}` from `{}` declared at {}",
+                target.display(),
+                prospective_target.display,
+                artifact.owner,
+                artifact.source,
+                artifact.declared_from
+            )));
+        }
+    }
+
     let declaration_added = generated.insert(source.clone());
     if source_exists && !declaration_added {
         return Ok(AddOutcome {
             status: AddStatus::AlreadyPresent,
             source,
+            method: AddMethod::GeneratedAuto,
         });
     }
 
@@ -177,9 +245,11 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
         &root,
         &source_path,
         (!source_exists).then_some(target_bytes.as_slice()),
-        &auto_path,
-        declaration_added.then_some(updated_auto.as_bytes()),
-        &auto_metadata,
+        Some((
+            &auto_path,
+            declaration_added.then_some(updated_auto.as_bytes()),
+            &auto_metadata,
+        )),
     )?;
 
     Ok(AddOutcome {
@@ -189,7 +259,82 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
             AddStatus::Added
         },
         source,
+        method: AddMethod::GeneratedAuto,
     })
+}
+
+struct DirectoryCoverage<'a> {
+    directory: &'a EvaluatedDirectory,
+    target: TargetPath,
+}
+
+fn directory_coverages<'a>(
+    directories: &'a [EvaluatedDirectory],
+    source: &str,
+) -> Result<Vec<DirectoryCoverage<'a>>> {
+    let mut coverages = Vec::new();
+    for directory in directories {
+        let Some(relative) = source
+            .strip_prefix(&directory.root)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        else {
+            continue;
+        };
+        coverages.push(DirectoryCoverage {
+            directory,
+            target: expand_target_root(&directory.target_root, relative)?,
+        });
+    }
+    Ok(coverages)
+}
+
+fn validate_prospective_outputs(
+    requested_file: &Path,
+    source: &str,
+    artifacts: &[crate::manifest::EvaluatedArtifact],
+    coverages: &[DirectoryCoverage<'_>],
+    fallback: &TargetPath,
+) -> Result<()> {
+    let outputs = coverages
+        .iter()
+        .map(|coverage| &coverage.target)
+        .collect::<Vec<_>>();
+    for (index, left) in outputs.iter().enumerate() {
+        if left.key() != fallback.key() && targets_overlap(left, fallback) {
+            return Err(WombatError::configuration(format!(
+                "cannot add `{}` because covering target `{}` overlaps requested target `{}`",
+                requested_file.display(),
+                left.display,
+                fallback.display
+            )));
+        }
+        if outputs[index + 1..]
+            .iter()
+            .any(|right| targets_overlap(left, right))
+        {
+            return Err(WombatError::configuration(format!(
+                "cannot add `{}` because covering declarations produce overlapping prospective targets including `{}`",
+                requested_file.display(),
+                left.display
+            )));
+        }
+        for artifact in artifacts {
+            let is_existing_same_leaf = artifact.source == source
+                && artifact.target.key() == left.key()
+                && matches!(artifact.source_origin, SourceOrigin::Directory { .. });
+            if targets_overlap(&artifact.target, left) && !is_existing_same_leaf {
+                return Err(WombatError::configuration(format!(
+                    "cannot add `{}` because target `{}` overlaps an artifact owned by `{}` from `{}` declared at {}",
+                    requested_file.display(),
+                    left.display,
+                    artifact.owner,
+                    artifact.source,
+                    artifact.declared_from
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn targets_overlap(
@@ -227,6 +372,12 @@ fn source_path_for_home_file(relative: &Path) -> Result<String> {
     }
     if let Some(config_relative) = normalized.strip_prefix(".config/") {
         Ok(format!("dot_config/{config_relative}"))
+    } else if normalized == ".local" {
+        Err(WombatError::configuration(
+            "the target local-data anchor cannot be added as a file",
+        ))
+    } else if let Some(local_relative) = normalized.strip_prefix(".local/") {
+        Ok(format!("dot_local/{local_relative}"))
     } else {
         Ok(format!("home/{normalized}"))
     }
@@ -392,9 +543,7 @@ fn persist_addition(
     root: &Path,
     source_path: &Path,
     source_bytes: Option<&[u8]>,
-    auto_path: &Path,
-    auto_bytes: Option<&[u8]>,
-    auto_metadata: &fs::Metadata,
+    auto_update: Option<(&Path, Option<&[u8]>, &fs::Metadata)>,
 ) -> Result<()> {
     let created_directories = create_missing_parents(root, source_path.parent().unwrap_or(root))?;
     let mut source_was_created = false;
@@ -402,12 +551,13 @@ fn persist_addition(
         let source_temp = source_bytes
             .map(|bytes| prepare_temp(source_path.parent().unwrap_or(root), bytes))
             .transpose()?;
-        let auto_temp = auto_bytes
-            .map(|bytes| prepare_temp(auto_path.parent().unwrap_or(root), bytes))
+        let auto_temp = auto_update
+            .and_then(|(path, bytes, _)| bytes.map(|bytes| (path, bytes)))
+            .map(|(path, bytes)| prepare_temp(path.parent().unwrap_or(root), bytes))
             .transpose()?;
-        if let Some(temp) = &auto_temp {
+        if let (Some(temp), Some((_, _, metadata))) = (&auto_temp, auto_update) {
             temp.as_file()
-                .set_permissions(auto_metadata.permissions())
+                .set_permissions(metadata.permissions())
                 .map_err(|error| WombatError::io(temp.path(), error))?;
         }
 
@@ -417,8 +567,9 @@ fn persist_addition(
             source_was_created = true;
         }
         if let Some(temp) = auto_temp {
-            temp.persist(auto_path)
-                .map_err(|error| WombatError::io(auto_path, error.error))?;
+            let path = auto_update.expect("an auto temp requires an update").0;
+            temp.persist(path)
+                .map_err(|error| WombatError::io(path, error.error))?;
         }
         Ok(())
     })();
