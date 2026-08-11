@@ -5,8 +5,8 @@ use crate::frozen::FrozenValue;
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 10;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 1;
+pub const MANIFEST_FORMAT_VERSION: u32 = 11;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 2;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -73,6 +73,9 @@ pub struct Manifest {
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
+    pub artifact_policy: ArtifactPolicy,
+    pub artifact_notices: Vec<ArtifactNotice>,
+    pub artifact_selections: Vec<ArtifactSelection>,
     pub artifacts: Vec<Artifact>,
 }
 
@@ -95,7 +98,80 @@ pub struct BuildPlan {
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
+    pub artifact_policy: ArtifactPolicy,
+    pub artifact_notices: Vec<ArtifactNotice>,
+    pub artifact_selections: Vec<ArtifactSelection>,
     pub artifacts: Vec<PlannedArtifact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnallocatedPolicy {
+    Ignore,
+    Warn,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactPolicy {
+    pub unallocated: UnallocatedPolicy,
+}
+
+impl Default for ArtifactPolicy {
+    fn default() -> Self {
+        Self {
+            unallocated: UnallocatedPolicy::Warn,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactNotice {
+    pub kind: ArtifactNoticeKind,
+    pub owner: String,
+    pub selector: String,
+    pub skipped: Vec<String>,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactNoticeKind {
+    UnallocatedSkipped,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSelection {
+    pub owner: String,
+    pub declared: String,
+    pub expanded: String,
+    pub physical: String,
+    pub source_base: String,
+    pub source_base_logical: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_base_target: Option<String>,
+    pub source_base_hidden: bool,
+    pub hidden: bool,
+    pub kind: ArtifactSelectionKind,
+    pub static_root: String,
+    pub exclusions: Vec<String>,
+    pub allow_empty: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit_target: Option<String>,
+    pub matches: Vec<String>,
+    pub skipped_unallocated: Vec<String>,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSelectionKind {
+    Exact,
+    Directory,
+    Glob,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -287,6 +363,20 @@ pub struct ManifestModule {
     pub name: String,
     pub source: String,
     pub config: FrozenValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_base: Option<ModuleSourceBase>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleSourceBase {
+    pub declared: String,
+    pub expanded: String,
+    pub physical: String,
+    pub logical: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -311,6 +401,8 @@ pub struct Artifact {
     pub kind: ArtifactKind,
     pub source: String,
     pub source_origin: SourceOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_projection: Option<SourceProjection>,
     pub production: Production,
     pub target: TargetPath,
     pub content: FileContent,
@@ -342,6 +434,8 @@ pub enum Production {
 pub struct PlannedArtifact {
     pub source: String,
     pub source_origin: SourceOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_projection: Option<SourceProjection>,
     pub production: PlannedProduction,
     pub target: TargetPath,
     pub owner: String,
@@ -427,7 +521,6 @@ pub struct TaskCachePolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskTargetRoot {
-    pub anchor: TargetAnchor,
     pub path: String,
     pub origin: EvaluatedTargetOrigin,
 }
@@ -470,6 +563,9 @@ pub(crate) struct EvaluatedManifest {
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<EvaluatedTask>,
+    pub artifact_policy: ArtifactPolicy,
+    pub artifact_notices: Vec<ArtifactNotice>,
+    pub artifact_selections: Vec<ArtifactSelection>,
     pub artifacts: Vec<EvaluatedArtifact>,
     pub directories: Vec<EvaluatedDirectory>,
 }
@@ -479,6 +575,7 @@ pub(crate) struct EvaluatedArtifact {
     pub kind: ArtifactKind,
     pub source: String,
     pub source_origin: SourceOrigin,
+    pub source_projection: Option<SourceProjection>,
     pub production: EvaluatedProduction,
     pub target: TargetPath,
     pub fingerprint: Option<SourceFingerprint>,
@@ -514,7 +611,12 @@ pub(crate) struct EvaluatedTask {
 pub(crate) struct EvaluatedDirectory {
     pub declared_source: String,
     pub root: String,
-    pub target_root: EvaluatedTargetRoot,
+    pub physical_selector: String,
+    pub static_root: String,
+    pub hidden: bool,
+    pub glob: bool,
+    pub exclusions: Vec<String>,
+    pub target_root: Option<EvaluatedTargetRoot>,
     pub owner: String,
     pub declared_at: SourceTrace,
     pub snapshot: Vec<DirectoryLeaf>,
@@ -522,7 +624,6 @@ pub(crate) struct EvaluatedDirectory {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EvaluatedTargetRoot {
-    pub anchor: TargetAnchor,
     pub path: String,
     pub origin: EvaluatedTargetOrigin,
 }
@@ -530,13 +631,8 @@ pub(crate) struct EvaluatedTargetRoot {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvaluatedTargetOrigin {
-    Explicit {
-        declared: String,
-    },
-    Inferred {
-        basis: InferenceBasis,
-        source_anchor: SourceAnchor,
-    },
+    Explicit { declared: String },
+    Inferred { source: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -550,11 +646,15 @@ pub enum ArtifactKind {
 pub enum SourceOrigin {
     Direct {
         declared: String,
+        expanded: String,
     },
     Directory {
         declared: String,
+        expanded: String,
         root: String,
         relative: String,
+        exclusions: Vec<String>,
+        allow_empty: bool,
     },
     Generated {
         name: String,
@@ -567,53 +667,47 @@ pub enum SourceOrigin {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TargetPath {
-    pub anchor: TargetAnchor,
-    pub path: String,
-    pub display: String,
-    pub origin: TargetOrigin,
+pub struct SourceProjection {
+    pub physical: String,
+    pub logical: String,
+    pub allocated: bool,
+    pub hidden: bool,
+    pub components: Vec<SourceComponent>,
 }
 
-impl TargetPath {
-    pub(crate) fn key(&self) -> (TargetAnchor, &str) {
-        (self.anchor, &self.path)
-    }
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceComponent {
+    pub physical: String,
+    pub logical: String,
+    pub attributes: Vec<SourceAttribute>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TargetAnchor {
-    Home,
-    Config,
+pub enum SourceAttribute {
+    Dot,
+    Unallocated,
+    Literal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetPath {
+    pub path: String,
+    pub origin: TargetOrigin,
+}
+
+impl TargetPath {
+    pub(crate) fn key(&self) -> &str {
+        &self.path
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TargetOrigin {
-    Explicit {
-        declared: String,
-    },
-    Inferred {
-        basis: InferenceBasis,
-        source_anchor: SourceAnchor,
-    },
-    DirectoryExplicit {
-        declared: String,
-        relative: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InferenceBasis {
-    ModuleAnchor,
-    SourcePrefix,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceAnchor {
-    Home,
-    DotConfig,
-    DotLocal,
+    Explicit { declared: String },
+    Inferred { source: String },
+    DirectoryExplicit { declared: String, relative: String },
 }

@@ -1,12 +1,12 @@
 {
-  "format_version": 10,
+  "format_version": 11,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:b6bf34b9d420ca52d9b79706ff3f4d1939084407c5650b5d080ff41e416a4339",
-  "plan_id": "sha256:efa4e2e19c9b9fed918c5e75eddcf6d810853cef26b5d8f84927fe66ed0baddd",
+  "build_id": "sha256:a82d9b9d9d175d3390264f56a5aa440609755c754ffadcd0a0738c62b87f7d97",
+  "plan_id": "sha256:67bde044e984ab9aa0a0ce4ad501f074e8e4d849347070f173a5979a57478851",
   "sources": [
     {
       "path": "modules/dot_config/starship.lua",
-      "digest": "sha256:aae94e2d3854d1203bbae6f6bfea9c9e4b882cf327d9a921c8cd6c554d5becad"
+      "digest": "sha256:f6bd20d09623a051f1a19e08899eaea77c9b05af6e0f5a60a7215383b301e326"
     },
     {
       "path": "wombat.lua",
@@ -27,7 +27,15 @@
     {
       "name": "starship",
       "source": "modules/dot_config/starship.lua",
-      "config": {}
+      "config": {},
+      "source_base": {
+        "declared": ".config",
+        "expanded": ".config",
+        "physical": "src/dot_config",
+        "logical": ".config",
+        "target": ".config",
+        "hidden": false
+      }
     }
   ],
   "dependencies": [
@@ -51,25 +59,68 @@
   "requirements": [],
   "preparations": [],
   "tasks": [],
+  "artifact_policy": {
+    "unallocated": "warn"
+  },
+  "artifact_notices": [],
+  "artifact_selections": [
+    {
+      "owner": "starship",
+      "declared": "starship.toml",
+      "expanded": "starship.toml",
+      "physical": "starship.toml",
+      "source_base": "src/dot_config",
+      "source_base_logical": ".config",
+      "source_base_target": ".config",
+      "source_base_hidden": false,
+      "hidden": false,
+      "kind": "exact",
+      "static_root": "starship.toml",
+      "exclusions": [],
+      "allow_empty": false,
+      "matches": [
+        "starship.toml"
+      ],
+      "skipped_unallocated": [],
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 4
+        },
+        "callers": []
+      }
+    }
+  ],
   "artifacts": [
     {
       "kind": "file",
-      "source": "dot_config/starship.toml",
+      "source": "src/dot_config/starship.toml",
       "source_origin": {
         "kind": "direct",
-        "declared": "starship.toml"
+        "declared": "starship.toml",
+        "expanded": "starship.toml"
+      },
+      "source_projection": {
+        "physical": "src/dot_config/starship.toml",
+        "logical": "starship.toml",
+        "allocated": true,
+        "hidden": false,
+        "components": [
+          {
+            "physical": "starship.toml",
+            "logical": "starship.toml",
+            "attributes": []
+          }
+        ]
       },
       "production": {
         "kind": "static"
       },
       "target": {
-        "anchor": "config",
-        "path": "starship.toml",
-        "display": "~/.config/starship.toml",
+        "path": ".config/starship.toml",
         "origin": {
           "kind": "inferred",
-          "basis": "module_anchor",
-          "source_anchor": "dot_config"
+          "source": "src/dot_config/starship.toml"
         }
       },
       "content": {
@@ -81,7 +132,7 @@
       "declared_at": {
         "primary": {
           "source": "modules/dot_config/starship.lua",
-          "line": 3
+          "line": 4
         },
         "callers": []
       }

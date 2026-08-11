@@ -1,3 +1,3 @@
 local w = require("wombat")
 
-w.install("source.txt")
+w.install("@source.txt")

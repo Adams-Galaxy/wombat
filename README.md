@@ -10,9 +10,9 @@ inspectable construction plan and materialises a deterministic, self-contained b
 without changing a target. `setup` acquires a repository and carries one exact
 product through requirement bootstrap and guarded deployment. `diff`, `apply`,
 and `deploy` then inspect or
-guardedly reconcile that exact product with a target home. `inspect`, `explain`,
+guardedly reconcile that exact product with a deployment root. `inspect`, `explain`,
 and `compare` make exact completed products understandable without evaluating
-Lua. `add` is an explicit authoring command that copies one existing home file
+Lua. `add` is an explicit authoring command that copies one existing target file
 or regular-file directory tree into Wombat source state.
 
 ## Repository shape
@@ -22,55 +22,63 @@ Wombat keeps executable policy physically separate from deployable files:
 ```text
 wombat.lua
 modules/
+  editor.lua
+  tools.lua
+src/
   dot_config/
-    starship.lua
+    starship.toml.tmpl
   dot_local/
-    tools.lua
-dot_config/
-  starship.toml
-dot_local/
-  bin/
-    tool
+    bin/
+      tool
 ```
 
-An anchored module can declare the common path without a destination:
+Module directories organize code only. A module establishes its source and
+target base explicitly, then declares the common path without a destination:
 
 ```lua
 local w = require("wombat")
 
+w.module.from(".config")
 w.install("starship.toml")
 ```
 
-The manifest resolves that declaration to `~/.config/starship.toml`, including
-its typed target anchor, inference provenance, final content digest, size, and
-executable intent. Files beneath `dot_config/` are always opaque artifact
-bytes, including Neovim and other Lua files.
+The manifest resolves that declaration from `src/dot_config/starship.toml` to
+`.config/starship.toml` beneath the deployment root, including typed projection
+provenance, final content digest, size, and executable intent. Deployable Lua,
+including Neovim configuration, remains opaque artifact data beneath `src/`.
 
 `w.install()` also accepts a directory. Wombat recursively expands its regular
-file leaves in deterministic order, including hidden files, while rejecting
-symlinks and special entries:
+file leaves in deterministic order while rejecting visible symlinks and special
+entries. Literal-dot source entries are invisible unless selected explicitly
+with `w.hidden()`:
 
 ```lua
--- modules/dot_config/nvim.lua
+-- modules/nvim.lua
 local w = require("wombat")
 
-w.install("nvim") -- dot_config/nvim/** -> ~/.config/nvim/**
+w.module.from(".config")
+w.install("nvim") -- src/dot_config/nvim/** -> .config/nvim/**
 ```
 
-The three canonical artifact roots are `home/`, `dot_config/`, and
-`dot_local/`; the last maps to `~/.local/`. Empty directories and directory
-roots are not artifacts, and no source-tree ignore rules are applied.
+No target directory is special. The whole `src/` grammar is generic:
+`dot_` turns a component's leading marker into `.`, `unalloc_` severs target
+inference, `literal_` escapes metadata-looking names, and `@` is shorthand for
+`unalloc_`. Exact selectors, directories, and deterministic globs support
+`exclude` and set selectors support `allow_empty`. Every selected file remains
+an independently owned artifact.
 
 ## Templates
 
-A terminal `.tmpl` suffix makes the ordinary installation path a template and
-is removed from an inferred destination:
+A terminal physical `.tmpl` suffix makes a source a template, but ordinary
+exact declarations use the target name. Wombat resolves the suffix and removes
+it from the inferred destination:
 
 ```lua
 local w = require("wombat")
 local theme = w.using("theme")
 
-w.install("starship.toml.tmpl", {
+w.module.from(".config")
+w.install("starship.toml", {
     with = {
         colors = theme.colors,
         shell = "zsh",
@@ -102,8 +110,11 @@ The first block emits complete lines when selected. The second deliberately
 trims whitespace on both sides of `value`; careless trimming can join lines in
 the generated file.
 
-`w.install.file("literal.tmpl")` installs a `.tmpl` file literally, while
-`w.install.template("input", { to = "~/.config/output", with = context })`
+If both `starship.toml` and `starship.toml.tmpl` exist, the relaxed exact lookup
+is ambiguous and fails rather than choosing precedence. An explicit `.tmpl`
+spelling disambiguates. `w.install.file("literal.tmpl")` installs a `.tmpl`
+file literally, while
+`w.install.template("input", { to = ".config/output", with = context })`
 marks an unconventional name explicitly. Template directories, implicit
 runtime context, includes, and callbacks are not supported.
 
@@ -148,8 +159,9 @@ path is used unchanged.
 build/
 ├── manifest.json
 ├── tree/
-│   ├── home/
-│   └── config/
+│   ├── .config/
+│   ├── .local/
+│   └── any-other-target-path
 └── .wombat/
     ├── plan/
     ├── tasks/
@@ -206,8 +218,9 @@ wombat init
 wombat init ./dotfiles
 ```
 
-Initialization creates `wombat.lua`, a selected `modules/auto.lua` generated
-region, and a new `.gitignore` for the default build workspace. It permits
+Initialization creates `wombat.lua`, `wombat.toml`, `src/`, a selected
+`modules/auto.lua` generated region, and a new `.gitignore` for the default
+build workspace. It permits
 unrelated files, is idempotent for the exact scaffold, and refuses to overwrite
 handwritten policy or traverse reserved symlinks. It does not initialize Git,
 build, deploy, or change the configured repository.
@@ -273,7 +286,7 @@ end
 
 Only facts actually consulted during evaluation enter manifest provenance.
 Resolved inputs, the concrete target, consulted observations, and typed Lua
-source provenance are stored in manifest v10 and participate in build identity.
+source provenance are stored in manifest v11 and participate in build identity.
 Every Wombat-owned root, module, and repository `require()` load contributes its
 repository-relative path and digest. Consequently a comment or declaration
 line movement can produce a new exact build identity even when artifact bytes
@@ -388,7 +401,7 @@ the exact product it just built:
 wombat deploy -B build/server -- --target linux/x86_64 --theme kanagawa
 ```
 
-All three commands accept `-B/--build-dir` and `--target-home`. A relative build
+All three commands accept `-B/--build-dir` and `--target-root`. A relative build
 directory remains relative to the configured Wombat source; an absolute build
 product can be diffed or applied without its source repository.
 
@@ -410,11 +423,12 @@ does not claim whole-build rollback. Reconciliation state is private and lives
 under `$XDG_STATE_HOME/wombat/targets/`, falling back to
 `$HOME/.local/state/wombat/targets/`.
 
-Deployment is currently supported on macOS and Linux. `TargetConfig` always
-means the literal `<target-home>/.config`, independent of `XDG_CONFIG_HOME`.
+Deployment is currently supported on macOS and Linux. A manifest path such as
+`.config/app.toml` always means the literal `<target-root>/.config/app.toml`,
+independent of `XDG_CONFIG_HOME`.
 
 An implicit deployment to the current home refuses a product whose target OS
-does not match the observed host. Passing an explicit `--target-home` is the
+does not match the observed host. Passing an explicit `--target-root` is the
 deliberate escape route for testing or alternate roots; an architecture
 mismatch is warned about but does not currently block deployment.
 
@@ -452,10 +466,12 @@ cargo run -- --source /path/to/dotfiles add ~/.config/starship.toml
 cargo run -- --source /path/to/dotfiles add ~/.config/nvim
 ```
 
-This copies its bytes to `dot_config/starship.toml` and adds an ordinary,
-inspectable `w.install("dot_config/starship.toml")` declaration to the generated
-region. Existing source files with different contents are refused; re-add and
-force workflows are deliberately deferred.
+The observed home is the default authoring root; use `add --target-root PATH`
+for any other root. The selected item must be a strict descendant. This copies
+its bytes to `src/dot_config/starship.toml` and adds an ordinary, inspectable
+`w.install(".config/starship.toml")` declaration to the generated region.
+Existing source files with different contents are refused; re-add and force
+workflows are deliberately deferred.
 
 If an already-selected directory declaration uniquely covers the new source
 and maps it to the requested target, `add` copies only the file and reports the

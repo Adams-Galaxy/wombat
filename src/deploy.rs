@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 
 use crate::build::{OpenedBuild, open_build};
 use crate::context::HostContext;
-use crate::manifest::{Artifact, Production, TargetAnchor};
+use crate::manifest::{Artifact, Production};
 use crate::reconcile::{
     ActualArtifact, ReconciliationAction, ReconciliationPlan, inspect_actual, plan_reconciliation,
     target_key,
@@ -20,20 +20,20 @@ use crate::{Result, WombatError};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeploymentOptions {
     pub build_dir: PathBuf,
-    pub target_home: PathBuf,
+    pub target_root: PathBuf,
     pub state_root: Option<PathBuf>,
-    pub target_home_explicit: bool,
+    pub target_root_explicit: bool,
     pub patch: bool,
     pub host: Option<HostContext>,
 }
 
 impl DeploymentOptions {
-    pub fn new(build_dir: impl Into<PathBuf>, target_home: impl Into<PathBuf>) -> Self {
+    pub fn new(build_dir: impl Into<PathBuf>, target_root: impl Into<PathBuf>) -> Self {
         Self {
             build_dir: build_dir.into(),
-            target_home: target_home.into(),
+            target_root: target_root.into(),
             state_root: None,
-            target_home_explicit: true,
+            target_root_explicit: true,
             patch: false,
             host: None,
         }
@@ -44,8 +44,8 @@ impl DeploymentOptions {
         self
     }
 
-    pub fn with_target_home_explicit(mut self, explicit: bool) -> Self {
-        self.target_home_explicit = explicit;
+    pub fn with_target_root_explicit(mut self, explicit: bool) -> Self {
+        self.target_root_explicit = explicit;
         self
     }
 
@@ -144,7 +144,7 @@ impl PreparedApply {
         render_item(
             &mut output,
             &self.opened,
-            &self.plan.target_home,
+            &self.plan.target_root,
             item,
             true,
         )?;
@@ -164,9 +164,9 @@ pub fn diff(options: &DeploymentOptions) -> Result<DiffOutcome> {
     require_deployment_platform()?;
     let opened = open_build(&options.build_dir)?;
     let state_root = resolve_state_root(options.state_root.as_deref())?;
-    let state_guard = TargetStateGuard::open(&state_root, &options.target_home, LockMode::Shared)?;
+    let state_guard = TargetStateGuard::open(&state_root, &options.target_root, LockMode::Shared)?;
     let previous = state_guard.load()?;
-    let plan = plan_reconciliation(&options.target_home, &opened.manifest, &previous)?;
+    let plan = plan_reconciliation(&options.target_root, &opened.manifest, &previous)?;
     let output = render_diff(&opened, &plan, options.patch)?;
     Ok(DiffOutcome { plan, output })
 }
@@ -176,12 +176,12 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     let opened = open_build(&options.build_dir)?;
     let host = options.host.clone().map_or_else(HostContext::observe, Ok)?;
     let warnings =
-        validate_target_compatibility(&opened.manifest, &host, options.target_home_explicit)?;
+        validate_target_compatibility(&opened.manifest, &host, options.target_root_explicit)?;
     let state_root = resolve_state_root(options.state_root.as_deref())?;
     let state_guard =
-        TargetStateGuard::open(&state_root, &options.target_home, LockMode::Exclusive)?;
+        TargetStateGuard::open(&state_root, &options.target_root, LockMode::Exclusive)?;
     let previous = state_guard.load()?;
-    let plan = plan_reconciliation(&options.target_home, &opened.manifest, &previous)?;
+    let plan = plan_reconciliation(&options.target_root, &opened.manifest, &previous)?;
     Ok(PreparedApply {
         opened,
         state_guard,
@@ -263,7 +263,7 @@ fn execute(
     }
 
     for item in &plan.items {
-        let current = inspect_actual(&plan.target_home, &item.path)?;
+        let current = inspect_actual(&plan.target_root, &item.path)?;
         if current != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed after deployment planning; no files were modified",
@@ -292,7 +292,7 @@ fn execute(
             skipped.push(item.target.clone());
             continue;
         }
-        let current = inspect_actual(&plan.target_home, &item.path)?;
+        let current = inspect_actual(&plan.target_root, &item.path)?;
         if current != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed during deployment",
@@ -306,7 +306,7 @@ fn execute(
             ReconciliationAction::Create => {
                 write_desired(
                     &opened,
-                    &plan.target_home,
+                    &plan.target_root,
                     item.desired.as_ref().unwrap(),
                     &item.path,
                     false,
@@ -321,7 +321,7 @@ fn execute(
             ReconciliationAction::Update => {
                 write_desired(
                     &opened,
-                    &plan.target_home,
+                    &plan.target_root,
                     item.desired.as_ref().unwrap(),
                     &item.path,
                     true,
@@ -334,7 +334,7 @@ fn execute(
             }
             ReconciliationAction::Conflict if overwrite => {
                 if let Some(desired) = &item.desired {
-                    write_desired(&opened, &plan.target_home, desired, &item.path, true)?;
+                    write_desired(&opened, &plan.target_root, desired, &item.path, true)?;
                     if matches!(item.actual, ActualArtifact::Absent) {
                         created += 1;
                     } else {
@@ -364,10 +364,10 @@ fn execute(
     let complete_build_id = skipped.is_empty().then(|| plan.build_id.clone());
     state_guard.write(&TargetState {
         format_version: crate::state::TARGET_STATE_FORMAT_VERSION,
-        target_home: plan
-            .target_home
+        target_root: plan
+            .target_root
             .to_str()
-            .expect("canonical target home was validated as UTF-8")
+            .expect("canonical target root was validated as UTF-8")
             .to_string(),
         complete_build_id,
         artifacts,
@@ -395,7 +395,7 @@ fn execute(
 
 fn write_desired(
     opened: &OpenedBuild,
-    target_home: &Path,
+    target_root: &Path,
     artifact: &Artifact,
     target: &Path,
     replace: bool,
@@ -458,7 +458,7 @@ fn write_desired(
         })?;
     }
     sync_directory(parent)?;
-    let actual = inspect_actual(target_home, target)?;
+    let actual = inspect_actual(target_root, target)?;
     if !crate::reconcile::actual_matches(&actual, artifact) {
         return Err(WombatError::configuration(format!(
             "deployed target `{}` did not verify",
@@ -521,15 +521,7 @@ fn ensure_safe_parents(parent: &Path) -> Result<()> {
 }
 
 fn product_path(opened: &OpenedBuild, artifact: &Artifact) -> PathBuf {
-    let anchor = match artifact.target.anchor {
-        TargetAnchor::Home => "home",
-        TargetAnchor::Config => "config",
-    };
-    opened
-        .product_dir
-        .join("tree")
-        .join(anchor)
-        .join(&artifact.target.path)
+    opened.product_dir.join("tree").join(&artifact.target.path)
 }
 
 fn set_mode(file: &File, path: &Path, artifact: &Artifact) -> Result<()> {
@@ -567,7 +559,7 @@ fn render_diff(
                 item.action,
                 ReconciliationAction::Update | ReconciliationAction::Conflict
             );
-        render_item(&mut output, opened, &plan.target_home, item, include_patch)?;
+        render_item(&mut output, opened, &plan.target_root, item, include_patch)?;
     }
     if output.is_empty() {
         output.push_str("No differences.\n");
@@ -588,7 +580,7 @@ fn render_diff(
 fn render_item(
     output: &mut String,
     opened: &OpenedBuild,
-    target_home: &Path,
+    target_root: &Path,
     item: &crate::reconcile::ReconciliationItem,
     include_patch: bool,
 ) -> Result<()> {
@@ -612,7 +604,7 @@ fn render_item(
         writeln!(output, "  conflict: {reason}").expect("writing to a string cannot fail");
     }
     if include_patch {
-        append_content_diff(output, opened, target_home, item)?;
+        append_content_diff(output, opened, target_root, item)?;
     }
     Ok(())
 }
@@ -633,13 +625,13 @@ const fn action_word(action: ReconciliationAction) -> &'static str {
 fn validate_target_compatibility(
     manifest: &crate::manifest::Manifest,
     host: &HostContext,
-    target_home_explicit: bool,
+    target_root_explicit: bool,
 ) -> Result<Vec<String>> {
     let target_os = manifest.target.platform.os.name;
     let host_os = host.platform.os.name;
-    if !target_home_explicit && target_os != host_os {
+    if !target_root_explicit && target_os != host_os {
         return Err(WombatError::configuration(format!(
-            "build target OS `{}` ({:?}) does not match host OS `{}`; refusing implicit live-home deployment before mutation; pass --target-home deliberately for an alternate root",
+            "build target OS `{}` ({:?}) does not match host OS `{}`; refusing implicit live-root deployment before mutation; pass --target-root deliberately for an alternate root",
             target_os.as_str(),
             manifest.target.origin,
             host_os.as_str()
@@ -659,12 +651,12 @@ fn validate_target_compatibility(
 fn append_content_diff(
     output: &mut String,
     opened: &OpenedBuild,
-    target_home: &Path,
+    target_root: &Path,
     item: &crate::reconcile::ReconciliationItem,
 ) -> Result<()> {
     let old = if matches!(item.actual, ActualArtifact::File { .. }) {
         let bytes = fs::read(&item.path).map_err(|error| WombatError::io(&item.path, error))?;
-        let after = inspect_actual(target_home, &item.path)?;
+        let after = inspect_actual(target_root, &item.path)?;
         if after != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed while its diff was rendered",

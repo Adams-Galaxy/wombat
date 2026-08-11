@@ -1,4 +1,5 @@
 local w = require("wombat")
+w.module.from(".config")
 
 w.use("helper")
 

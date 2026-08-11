@@ -1,5 +1,6 @@
 local w = require("wombat")
 
+w.module.from(".local")
 w.install("wombat-tools")
 w.build.need.command("rg")
 w.generate("wombat-build.txt", {

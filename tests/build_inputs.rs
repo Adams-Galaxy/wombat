@@ -26,6 +26,8 @@ impl Repository {
     }
 
     fn write(&self, relative: &str, contents: &str) {
+        let (relative, from) = fixture_path(relative);
+        let contents = fixture_module(contents, from);
         let path = self.root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
@@ -43,6 +45,41 @@ impl Repository {
                 .with_host(host),
         )
     }
+}
+
+fn fixture_path(relative: &str) -> (String, Option<&'static str>) {
+    for (prefix, replacement, from) in [
+        ("modules/dot_config/", "modules/", Some(".config")),
+        ("modules/dot_local/", "modules/", Some(".local")),
+        ("modules/home/", "modules/", Some(".")),
+        ("dot_config/", "src/dot_config/", None),
+        ("dot_local/", "src/dot_local/", None),
+    ] {
+        if let Some(rest) = relative.strip_prefix(prefix) {
+            return (format!("{replacement}{rest}"), from);
+        }
+    }
+    (relative.to_string(), None)
+}
+
+fn fixture_module(contents: &str, from: Option<&str>) -> String {
+    let Some(from) = from else {
+        return contents.to_string();
+    };
+    if !contents.contains("install")
+        && !contents.contains("generate")
+        && !contents.contains("build.task")
+    {
+        return contents.to_string();
+    };
+    let at = contents
+        .find('\n')
+        .map_or(contents.len(), |index| index + 1);
+    format!(
+        "{}w.module.from({from:?})\n{}",
+        &contents[..at],
+        &contents[at..]
+    )
 }
 
 fn mac_host(hostname: &str) -> HostContext {
@@ -138,7 +175,7 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
         .build("build/default", &[], mac_host("wombat-mac"))
         .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 10);
+    assert_eq!(outcome.manifest.format_version, 11);
     assert_eq!(outcome.manifest.target.origin, TargetOrigin::RootOverride);
     assert_eq!(
         outcome
@@ -187,13 +224,13 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
             .any(|(_, path)| *path == "username" || *path == "home")
     );
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/default/tree/config/app")).unwrap(),
+        fs::read_to_string(repository.root.join("build/default/tree/.config/app")).unwrap(),
         "theme=dark\nlabel=wombat-mac\ncolumns=120\nos=macos\narch=aarch64\nmodern=true\ndistro=none\n"
     );
     assert!(
         repository
             .root
-            .join("build/default/tree/config/yazi.toml")
+            .join("build/default/tree/.config/yazi.toml")
             .is_file()
     );
 }
@@ -231,13 +268,13 @@ fn cli_values_select_a_cross_target_variant_and_disable_an_artifact() {
             .all(|input| input.origin == BuildInputOrigin::CommandLine)
     );
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/linux/tree/config/app")).unwrap(),
+        fs::read_to_string(repository.root.join("build/linux/tree/.config/app")).unwrap(),
         "theme=light\nlabel=server\ncolumns=80\nos=linux\narch=x86_64\nmodern=false\ndistro=none\n"
     );
     assert!(
         !repository
             .root
-            .join("build/linux/tree/config/yazi.toml")
+            .join("build/linux/tree/.config/yazi.toml")
             .exists()
     );
 }
@@ -254,7 +291,7 @@ fn rich_linux_distribution_and_kernel_context_are_available_and_tracked() {
     repository.write("dot_config/app.tmpl", "{{distro}} {{version}} {{kernel}}\n");
     let outcome = repository.build("build", &[], linux_host()).unwrap();
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/app")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/app")).unwrap(),
         "fedora 42 6.14.0\n"
     );
     for path in [
@@ -789,7 +826,7 @@ fn cli_namespace_boundary_keeps_project_options_out_of_wombat_parsing() {
     );
     assert!(!output.stdout.windows(2).any(|window| window == b"\x1b["));
     assert_eq!(
-        fs::read_to_string(build_dir.join("tree/config/app")).unwrap(),
+        fs::read_to_string(build_dir.join("tree/.config/app")).unwrap(),
         "always\n"
     );
 
@@ -805,7 +842,7 @@ fn cli_namespace_boundary_keeps_project_options_out_of_wombat_parsing() {
 #[test]
 fn cli_deploy_forwards_project_arguments_to_the_exact_applied_build() {
     let repository = parameterised_repository();
-    let target = repository._temporary.path().join("target-home");
+    let target = repository._temporary.path().join("target-root");
     let state = repository._temporary.path().join("state");
     fs::create_dir(&target).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
@@ -817,7 +854,7 @@ fn cli_deploy_forwards_project_arguments_to_the_exact_applied_build() {
             "deploy",
             "-B",
             "build/deploy",
-            "--target-home",
+            "--target-root",
             target.to_str().unwrap(),
             "--conflict",
             "fail",

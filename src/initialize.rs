@@ -7,6 +7,7 @@ use crate::{Result, WombatError};
 const ROOT_SOURCE: &str = "local w = require(\"wombat\")\n\nw.use(\"auto\")\n";
 const AUTO_SOURCE: &str =
     "local w = require(\"wombat\")\n\n-- wombat:add begin\n-- wombat:add end\n";
+const PROJECT_CONFIG: &str = "format_version = 1\n\n[artifacts]\nunallocated = \"warn\"\n";
 const GITIGNORE: &str = "/build/\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,12 +44,16 @@ pub fn initialize(root: &Path) -> Result<InitOutcome> {
     preflight_root(&root)?;
     let root_file = root.join("wombat.lua");
     let modules = root.join("modules");
+    let sources = root.join("src");
     let auto_file = modules.join("auto.lua");
+    let project_config = root.join("wombat.toml");
     let gitignore = root.join(".gitignore");
 
     preflight_exact(&root_file, ROOT_SOURCE)?;
     preflight_directory(&modules)?;
+    preflight_directory(&sources)?;
     preflight_exact(&auto_file, AUTO_SOURCE)?;
+    preflight_exact(&project_config, PROJECT_CONFIG)?;
     let warning = preflight_gitignore(&gitignore)?;
 
     let mut created_files = Vec::new();
@@ -59,8 +64,17 @@ pub fn initialize(root: &Path) -> Result<InitOutcome> {
             fs::create_dir(&modules).map_err(|error| WombatError::io(&modules, error))?;
             created_directories.push(modules.clone());
         }
+        if !sources.exists() {
+            fs::create_dir(&sources).map_err(|error| WombatError::io(&sources, error))?;
+            created_directories.push(sources.clone());
+        }
         create_file_if_missing(&root_file, ROOT_SOURCE.as_bytes(), &mut created_files)?;
         create_file_if_missing(&auto_file, AUTO_SOURCE.as_bytes(), &mut created_files)?;
+        create_file_if_missing(
+            &project_config,
+            PROJECT_CONFIG.as_bytes(),
+            &mut created_files,
+        )?;
         create_file_if_missing(&gitignore, GITIGNORE.as_bytes(), &mut created_files)?;
         Ok(())
     })();

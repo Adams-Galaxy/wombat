@@ -119,7 +119,7 @@ fn root_selection_order_preserves_outputs_but_changes_exact_source_identity() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v10() {
+fn path_fixture_matches_the_exact_manifest_v11() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -133,7 +133,7 @@ fn path_fixture_matches_the_exact_manifest_v10() {
 }
 
 #[test]
-fn directory_fixture_matches_manifest_v10_and_materialised_tree() {
+fn directory_fixture_matches_manifest_v11_and_materialised_tree() {
     let root = fixture("directories");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
@@ -142,11 +142,11 @@ fn directory_fixture_matches_manifest_v10_and_materialised_tree() {
 
     assert_eq!(manifest_json(&outcome.manifest), expected.trim_end());
     assert_eq!(
-        fs::read(build_dir.join("tree/config/app/.hidden")).unwrap(),
+        fs::read(build_dir.join("tree/.config/app/.hidden")).unwrap(),
         b"hidden\n"
     );
     assert_eq!(
-        fs::read(build_dir.join("tree/home/.local/bin/tool")).unwrap(),
+        fs::read(build_dir.join("tree/.local/bin/tool")).unwrap(),
         b"#!/bin/sh\necho wombat\n"
     );
 }
@@ -163,13 +163,13 @@ fn artifact_lua_is_opaque_and_control_helpers_are_isolated() {
 
     assert_eq!(before, after);
     assert_eq!(manifest.artifacts.len(), 2);
-    assert_eq!(manifest.artifacts[0].source, "dot_config/nvim/init.lua");
+    assert_eq!(manifest.artifacts[0].source, "src/dot_config/nvim/init.lua");
     assert_eq!(
         manifest.artifacts[1].source,
-        "dot_config/nvim/lua/plugins/example.lua"
+        "src/dot_config/nvim/lua/plugins/example.lua"
     );
     assert!(
-        fs::read_to_string(root.join("dot_config/nvim/init.lua"))
+        fs::read_to_string(root.join("src/dot_config/nvim/init.lua"))
             .unwrap()
             .contains("must remain opaque")
     );
@@ -240,7 +240,7 @@ fn cli_exposes_help_version_and_usage_errors() {
         apply_help.contains("ask, fail, skip, overwrite"),
         "{apply_help}"
     );
-    assert!(apply_help.contains("--target-home"), "{apply_help}");
+    assert!(apply_help.contains("--target-root"), "{apply_help}");
 
     let version = run_wombat(&["--version"], repository);
     assert!(version.status.success());
@@ -335,7 +335,8 @@ fn cli_build_failures_use_stderr_and_exit_one() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("does not exist or is not a regular file")
+        String::from_utf8_lossy(&output.stderr)
+            .contains("does not exist beneath its declaration base")
     );
 }
 
@@ -344,19 +345,22 @@ fn build_errors_are_precise() {
     let cases = [
         (
             "errors/missing-source",
-            "does not exist or is not a regular file",
+            "does not exist beneath its declaration base",
         ),
-        ("errors/malformed-target", "must begin with `~/`"),
+        ("errors/malformed-target", "must not use `~`"),
         ("errors/traversing-target", "without traversal"),
         (
             "errors/traversing-source",
-            "relative path without traversal",
+            "invalid artifact source selector",
         ),
         (
             "errors/unsupported-artifact",
             "does not support option `kind`",
         ),
-        ("errors/missing-install-options", "cannot infer a target"),
+        (
+            "errors/missing-install-options",
+            "requires an explicit `to`",
+        ),
         ("errors/lua-runtime", "deliberate fixture failure"),
         (
             "errors/conflicting-config",
@@ -390,7 +394,7 @@ fn build_errors_are_precise() {
         ("errors/invalid-config-cycle", "cyclic Lua tables"),
         ("errors/invalid-config-number", "must be finite"),
         ("errors/invalid-export", "unsupported Lua function value"),
-        ("errors/missing-module", "does-not-exist.lua"),
+        ("errors/missing-module", "was not found beneath `modules/`"),
         (
             "errors/invalid-module-name",
             "invalid module name `themes.kanagawa`",

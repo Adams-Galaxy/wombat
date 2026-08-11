@@ -144,9 +144,18 @@ function wombat.generate(name, options)
     return native.declare_generated(name, options)
 end
 
+local function source_name(source)
+    if type(source) == "string" then return source end
+    if type(source) == "table" and type(source.__wombat_hidden) == "string" then
+        return source.__wombat_hidden
+    end
+    error("install() requires a string source or w.hidden() value", 3)
+end
+
 local function validate_install(source_path, options, explicit_kind)
-    if type(source_path) ~= "string" then
-        error("install() requires a string source path", 2)
+    local declared_source = source_name(source_path)
+    if type(source_path) ~= "string" and type(source_path) ~= "table" then
+        error("install() requires a source selector", 2)
     end
     if options ~= nil and type(options) ~= "table" then
         error("install() options must be a table", 2)
@@ -156,7 +165,7 @@ local function validate_install(source_path, options, explicit_kind)
             error("install() requires a string `to` target", 2)
         end
         for key in pairs(options) do
-            if key ~= "to" and key ~= "with" then
+            if key ~= "to" and key ~= "with" and key ~= "exclude" and key ~= "allow_empty" then
                 error("install() does not support option `" .. tostring(key) .. "`", 3)
             end
         end
@@ -165,7 +174,7 @@ local function validate_install(source_path, options, explicit_kind)
     local has_with = options ~= nil and options.with ~= nil
     local kind = explicit_kind
     if kind == nil then
-        kind = (has_with or source_path:sub(-5) == ".tmpl") and "template" or "auto"
+        kind = declared_source:sub(-5) == ".tmpl" and "template" or "auto"
     end
     if kind == "file" and has_with then
         error("install.file() does not support `with`; use install.template()", 3)
@@ -174,7 +183,12 @@ local function validate_install(source_path, options, explicit_kind)
     if kind == "template" and context == nil then
         context = {}
     end
-    return native.install_path(source_path, options and options.to or nil, kind, context)
+    local exclusions = options and options.exclude or {}
+    if type(exclusions) == "string" then exclusions = { exclusions } end
+    if type(exclusions) ~= "table" then error("install() `exclude` must be a string or array", 2) end
+    local allow_empty = options and options.allow_empty or false
+    if type(allow_empty) ~= "boolean" then error("install() `allow_empty` must be boolean", 2) end
+    return native.install_path(source_path, options and options.to or nil, kind, context, exclusions, allow_empty)
 end
 
 local install = {}
@@ -196,6 +210,22 @@ end
 wombat.install = install
 
 wombat.module = {}
+
+function wombat.hidden(source)
+    if type(source) ~= "string" then error("w.hidden() requires a string source path", 2) end
+    return native.hidden_source(source)
+end
+
+function wombat.module.from(source, options)
+    source_name(source)
+    if options ~= nil and type(options) ~= "table" then error("w.module.from() options must be a table", 2) end
+    if options ~= nil then
+        for key in pairs(options) do
+            if key ~= "to" then error("w.module.from() does not support option `" .. tostring(key) .. "`", 2) end
+        end
+    end
+    return native.module_from(source, options and options.to or nil)
+end
 
 function wombat.module.config()
     return native.module_config()

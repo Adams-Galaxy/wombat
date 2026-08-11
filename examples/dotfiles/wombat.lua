@@ -17,6 +17,8 @@ local search = w.prefer.command("rg", {
     accept = { { name = "grep" } },
 })
 
+w.install(".wombat-example")
+
 w.use("theme", { name = input.theme })
 w.use("shell", { search = search.name })
 w.use("git", { name = input.name, email = input.email })

@@ -41,6 +41,8 @@ impl Repository {
     }
 
     fn write(&self, relative: &str, contents: &str) {
+        let (relative, from) = fixture_path(relative);
+        let contents = fixture_module(contents, from);
         let path = self.root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
@@ -49,6 +51,41 @@ impl Repository {
     fn build(&self) -> wombat::Result<wombat::BuildOutcome> {
         build(BuildOptions::new(&self.root, self.root.join("build")).with_host(fixture_host()))
     }
+}
+
+fn fixture_path(relative: &str) -> (String, Option<&'static str>) {
+    for (prefix, replacement, from) in [
+        ("modules/dot_config/", "modules/", Some(".config")),
+        ("modules/dot_local/", "modules/", Some(".local")),
+        ("modules/home/", "modules/", Some(".")),
+        ("dot_config/", "src/dot_config/", None),
+        ("dot_local/", "src/dot_local/", None),
+    ] {
+        if let Some(rest) = relative.strip_prefix(prefix) {
+            return (format!("{replacement}{rest}"), from);
+        }
+    }
+    (relative.to_string(), None)
+}
+
+fn fixture_module(contents: &str, from: Option<&str>) -> String {
+    let Some(from) = from else {
+        return contents.to_string();
+    };
+    if !contents.contains("install")
+        && !contents.contains("generate")
+        && !contents.contains("build.task")
+    {
+        return contents.to_string();
+    };
+    let at = contents
+        .find('\n')
+        .map_or(contents.len(), |index| index + 1);
+    format!(
+        "{}w.module.from({from:?})\n{}",
+        &contents[..at],
+        &contents[at..]
+    )
 }
 
 fn basic_repository(module: &str, source_name: &str, source: &str) -> Repository {
@@ -89,11 +126,11 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 
     let outcome = repository.build().unwrap();
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/starship.toml")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/starship.toml")).unwrap(),
         "[palette]\nformat = 'wombat'\naccent = '#7e9cd8'\nbackground = '#1f1f28'\n"
     );
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/wezterm.lua")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/wezterm.lua")).unwrap(),
         "local config = {}\n-- {{ kept literally }}\nconfig.background = '#1f1f28'\nconfig.literal = '<&>'\nreturn config\n"
     );
     assert!(outcome.manifest.artifacts.iter().all(|artifact| {
@@ -112,17 +149,17 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 }
 
 #[test]
-fn template_fixture_matches_exact_manifest_v10_and_rendered_tree() {
+fn template_fixture_matches_exact_manifest_v11_and_rendered_tree() {
     let root = fixture("templates");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
     let outcome = build(BuildOptions::new(&root, &build_dir).with_host(fixture_host())).unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
     assert_eq!(manifest_json(&outcome.manifest), expected.trim_end());
-    let starship = fs::read_to_string(build_dir.join("tree/config/starship.toml")).unwrap();
+    let starship = fs::read_to_string(build_dir.join("tree/.config/starship.toml")).unwrap();
     assert!(starship.contains("format = \"wombat\""));
     assert!(starship.contains("palette_accent = \"#7e9cd8\""));
-    let wezterm = fs::read_to_string(build_dir.join("tree/config/wezterm.lua")).unwrap();
+    let wezterm = fs::read_to_string(build_dir.join("tree/.config/wezterm.lua")).unwrap();
     assert!(wezterm.contains("-- {{ this remains literal }}"));
     assert!(wezterm.ends_with("return config\n"));
 }
@@ -133,31 +170,31 @@ fn callable_install_and_explicit_forms_disambiguate_template_names() {
     repository.write("wombat.lua", "local w = require('wombat')\nw.use('app')\n");
     repository.write(
         "modules/dot_config/app.lua",
-        "local w = require('wombat')\nw.install.file('literal.tmpl')\nw.install.template('dynamic', { to = '~/.config/rendered', with = { value = 'yes' } })\n",
+        "local w = require('wombat')\nw.install.file('literal.tmpl')\nw.install.template('dynamic', { to = '.config/rendered', with = { value = 'yes' } })\n",
     );
     repository.write("dot_config/literal.tmpl", "{{ untouched }}\n");
     repository.write("dot_config/dynamic", "value={{ value }}\n");
 
     let outcome = repository.build().unwrap();
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/literal.tmpl")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/literal.tmpl")).unwrap(),
         "{{ untouched }}\n"
     );
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/rendered")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/rendered")).unwrap(),
         "value=yes\n"
     );
     let literal = outcome
         .manifest
         .artifacts
         .iter()
-        .find(|artifact| artifact.target.path == "literal.tmpl")
+        .find(|artifact| artifact.target.path == ".config/literal.tmpl")
         .unwrap();
     let rendered = outcome
         .manifest
         .artifacts
         .iter()
-        .find(|artifact| artifact.target.path == "rendered")
+        .find(|artifact| artifact.target.path == ".config/rendered")
         .unwrap();
     assert!(matches!(literal.production, Production::Static));
     assert!(matches!(rendered.production, Production::Template { .. }));
@@ -166,7 +203,7 @@ fn callable_install_and_explicit_forms_disambiguate_template_names() {
 #[test]
 fn tmpl_suffix_renders_with_an_empty_context_and_strips_only_inferred_target() {
     let repository = basic_repository(
-        "local w = require('wombat')\nw.install('empty.tmpl')\nw.install('explicit.tmpl', { to = '~/.config/kept.tmpl' })\n",
+        "local w = require('wombat')\nw.install('empty.tmpl')\nw.install('explicit.tmpl', { to = '.config/kept.tmpl' })\n",
         "empty.tmpl",
         "plain\n",
     );
@@ -174,13 +211,13 @@ fn tmpl_suffix_renders_with_an_empty_context_and_strips_only_inferred_target() {
 
     repository.build().unwrap();
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/empty")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/empty")).unwrap(),
         "plain\n"
     );
     assert!(
         repository
             .root
-            .join("build/tree/config/kept.tmpl")
+            .join("build/tree/.config/kept.tmpl")
             .is_file()
     );
 }
@@ -217,7 +254,7 @@ fn templates_require_utf8_sources_and_map_contexts() {
         "binary",
         "placeholder",
     );
-    fs::write(repository.root.join("dot_config/binary"), [0xff, 0xfe]).unwrap();
+    fs::write(repository.root.join("src/dot_config/binary"), [0xff, 0xfe]).unwrap();
     let error = repository.build().unwrap_err().to_string();
     assert!(error.contains("not valid UTF-8"), "{error}");
 
@@ -286,8 +323,38 @@ fn explicit_template_and_file_forms_reject_directories() {
             "plain",
         );
         let error = repository.build().unwrap_err().to_string();
-        assert!(error.contains("must be a regular file"), "{error}");
+        assert!(error.contains("cannot select a directory"), "{error}");
     }
+}
+
+#[test]
+fn explicit_template_and_file_forms_accept_globs() {
+    let repository = basic_repository(
+        "local w = require('wombat')\nw.install.file('literal-*.tmpl', { to = '.config/literal' })\nw.install.template('render-*', { to = '.config/rendered', with = { value = 'ready' } })\n",
+        "literal-one.tmpl",
+        "{{ value }} remains literal\n",
+    );
+    repository.write("src/dot_config/render-one", "value={{ value }}\n");
+
+    repository.build().unwrap();
+    assert_eq!(
+        fs::read_to_string(
+            repository
+                .root
+                .join("build/tree/.config/literal/literal-one.tmpl")
+        )
+        .unwrap(),
+        "{{ value }} remains literal\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            repository
+                .root
+                .join("build/tree/.config/rendered/render-one")
+        )
+        .unwrap(),
+        "value=ready\n"
+    );
 }
 
 #[test]
@@ -300,7 +367,7 @@ fn template_context_is_frozen_when_declared() {
 
     repository.build().unwrap();
     assert_eq!(
-        fs::read_to_string(repository.root.join("build/tree/config/value")).unwrap(),
+        fs::read_to_string(repository.root.join("build/tree/.config/value")).unwrap(),
         "before\n"
     );
 }

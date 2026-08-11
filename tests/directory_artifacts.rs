@@ -1,312 +1,225 @@
 use std::fs;
-use std::path::PathBuf;
 
-use tempfile::TempDir;
-use wombat::manifest::{SourceOrigin, TargetOrigin};
-use wombat::{BuildOptions, BuildOutcome, build};
+use wombat::{BuildOptions, build};
 
-struct Repository {
-    _temporary: TempDir,
-    root: PathBuf,
+fn write(root: &std::path::Path, relative: &str, contents: &str) {
+    let path = root.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
 }
 
-impl Repository {
-    fn new(root_lua: &str) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("repository");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("wombat.lua"), root_lua).unwrap();
-        Self {
-            _temporary: temporary,
-            root,
+#[test]
+fn grouped_installs_mix_static_and_templates_with_shared_context_and_exclusions() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('.config/app', { with = { name = 'wombat' }, exclude = '*.skip' })\n",
+    );
+    write(temp.path(), "src/dot_config/app/static.toml", "static\n");
+    write(
+        temp.path(),
+        "src/dot_config/app/dynamic.toml.tmpl",
+        "name={{name}}\n",
+    );
+    write(temp.path(), "src/dot_config/app/ignored.skip", "ignored\n");
+    build(BuildOptions::new(temp.path(), temp.path().join("build"))).unwrap();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("build/tree/.config/app/static.toml")).unwrap(),
+        "static\n"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("build/tree/.config/app/dynamic.toml")).unwrap(),
+        "name=wombat\n"
+    );
+    assert!(
+        !temp
+            .path()
+            .join("build/tree/.config/app/ignored.skip")
+            .exists()
+    );
+}
+
+#[test]
+fn empty_set_selectors_are_opt_in() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('missing-*')\n",
+    );
+    fs::create_dir(temp.path().join("src")).unwrap();
+    assert!(build(BuildOptions::new(temp.path(), temp.path().join("bad"))).is_err());
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('missing-*', { allow_empty = true })\n",
+    );
+    assert_eq!(
+        build(BuildOptions::new(temp.path(), temp.path().join("good")))
+            .unwrap()
+            .artifact_count,
+        0
+    );
+}
+
+#[test]
+fn glob_component_depth_basename_and_question_semantics_are_deterministic() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        concat!(
+            "local w = require('wombat')\n",
+            "w.install('a/*.toml', { to = 'single' })\n",
+            "w.install('b/**/*.toml', { to = 'deep' })\n",
+            "w.install('c/app?.toml', { to = 'question' })\n",
+            "w.install('*.yaml', { to = 'basename' })\n",
+        ),
+    );
+    write(temp.path(), "src/a/root.toml", "a-root\n");
+    write(temp.path(), "src/a/nested/deep.toml", "a-deep\n");
+    write(temp.path(), "src/b/root.toml", "b-root\n");
+    write(temp.path(), "src/b/nested/deep.toml", "b-deep\n");
+    write(temp.path(), "src/c/app1.toml", "one\n");
+    write(temp.path(), "src/c/app12.toml", "twelve\n");
+    write(temp.path(), "src/d/e/value.yaml", "yaml\n");
+
+    let outcome = build(BuildOptions::new(temp.path(), temp.path().join("build"))).unwrap();
+    let targets = outcome
+        .manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.target.path.as_str())
+        .collect::<Vec<_>>();
+    assert!(targets.contains(&"single/root.toml"));
+    assert!(!targets.contains(&"single/nested/deep.toml"));
+    assert!(targets.contains(&"deep/root.toml"));
+    assert!(targets.contains(&"deep/nested/deep.toml"));
+    assert!(targets.contains(&"question/app1.toml"));
+    assert!(!targets.contains(&"question/app12.toml"));
+    assert!(targets.contains(&"basename/d/e/value.yaml"));
+    assert!(
+        outcome
+            .manifest
+            .artifact_selections
+            .iter()
+            .all(|selection| selection.matches.windows(2).all(|pair| pair[0] < pair[1]))
+    );
+}
+
+#[test]
+fn explicit_group_roots_reattach_once_but_nested_unallocated_children_still_sever() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('@bundle', { to = 'bundle' })\n",
+    );
+    write(temp.path(), "src/unalloc_bundle/kept", "kept\n");
+    write(
+        temp.path(),
+        "src/unalloc_bundle/unalloc_nested/skipped",
+        "skipped\n",
+    );
+    let outcome = build(BuildOptions::new(temp.path(), temp.path().join("build"))).unwrap();
+    assert!(temp.path().join("build/tree/bundle/kept").is_file());
+    assert!(
+        !temp
+            .path()
+            .join("build/tree/bundle/unalloc_nested/skipped")
+            .exists()
+    );
+    assert_eq!(outcome.manifest.artifact_notices.len(), 1);
+}
+
+#[test]
+fn literal_dot_descendants_are_ignored_by_ordinary_group_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('.')\n",
+    );
+    write(temp.path(), "src/visible", "yes\n");
+    write(temp.path(), "src/.private/hidden", "no\n");
+    build(BuildOptions::new(temp.path(), temp.path().join("build"))).unwrap();
+    assert!(temp.path().join("build/tree/visible").is_file());
+    assert!(!temp.path().join("build/tree/.private/hidden").exists());
+}
+
+#[test]
+fn unallocated_policy_ignore_warn_and_error_are_distinct_after_exclusions() {
+    for (policy, notices, succeeds) in [("ignore", 0, true), ("warn", 1, true), ("error", 0, false)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "wombat.toml",
+            &format!("format_version = 1\n[artifacts]\nunallocated = \"{policy}\"\n"),
+        );
+        write(
+            temp.path(),
+            "wombat.lua",
+            "local w = require('wombat')\nw.install('.', { allow_empty = true })\n",
+        );
+        write(temp.path(), "src/unalloc_payload/file", "skipped\n");
+        let result = build(BuildOptions::new(temp.path(), temp.path().join("build")));
+        if succeeds {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.manifest.artifact_notices.len(), notices);
+            assert!(outcome.manifest.artifacts.is_empty());
+            assert_eq!(outcome.manifest.artifact_selections.len(), 1);
+            assert_eq!(
+                outcome.manifest.artifact_selections[0].skipped_unallocated,
+                ["unalloc_payload/file"]
+            );
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("contains unallocated children"), "{error}");
         }
     }
 
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
-    }
-
-    fn build(&self) -> wombat::Result<BuildOutcome> {
-        build(BuildOptions::new(
-            &self.root,
-            self._temporary.path().join("build"),
-        ))
-    }
-}
-
-#[test]
-fn anchored_directories_expand_hidden_nested_and_dot_local_files() {
-    let repository = Repository::new(
-        "local w = require(\"wombat\")\nw.use(\"nvim\")\nw.use(\"tools\")\nw.use(\"shell\")\n",
+    let excluded = tempfile::tempdir().unwrap();
+    write(
+        excluded.path(),
+        "wombat.toml",
+        "format_version = 1\n[artifacts]\nunallocated = \"error\"\n",
     );
-    repository.write(
-        "modules/dot_config/nvim.lua",
-        "local w = require(\"wombat\")\nw.install(\"nvim\")\n",
+    write(
+        excluded.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('.', { exclude = { 'unalloc_payload/**' }, allow_empty = true })\n",
     );
-    repository.write(
-        "modules/dot_local/tools.lua",
-        "local w = require(\"wombat\")\nw.install(\".\")\n",
-    );
-    repository.write(
-        "modules/home/shell.lua",
-        "local w = require(\"wombat\")\nw.install(\".\")\n",
-    );
-    repository.write("dot_config/nvim/init.lua", "return true\n");
-    repository.write("dot_config/nvim/.state/keep", "hidden\n");
-    repository.write("dot_local/bin/tool", "#!/bin/sh\n");
-    repository.write("home/.profile", "export EDITOR=nvim\n");
-    fs::create_dir_all(repository.root.join("dot_config/nvim/empty/nested")).unwrap();
-
-    let outcome = repository.build().unwrap();
-    let manifest = outcome.manifest;
-    assert_eq!(manifest.format_version, 10);
-    assert_eq!(manifest.artifacts.len(), 4);
-    assert!(
-        manifest
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.target.display == "~/.local/bin/tool")
-    );
-    assert!(
-        manifest
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.target.display == "~/.config/nvim/.state/keep")
-    );
-    for artifact in &manifest.artifacts {
-        assert!(matches!(
-            artifact.source_origin,
-            SourceOrigin::Directory { .. }
-        ));
-    }
-    assert_eq!(
-        fs::read_to_string(outcome.build_dir.join("tree/home/.local/bin/tool")).unwrap(),
-        "#!/bin/sh\n"
-    );
-    assert!(!outcome.build_dir.join("tree/config/nvim/empty").exists());
-}
-
-#[test]
-fn anchorless_directories_support_inferred_and_explicit_roots() {
-    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"directories\")\n");
-    repository.write(
-        "modules/directories.lua",
-        "local w = require(\"wombat\")\nw.install(\"dot_config/app\")\nw.install(\"dot_config/other\", { to = \"~/.config\" })\nw.install(\"home/files\", { to = \"~/\" })\n",
-    );
-    repository.write("dot_config/app/settings.toml", "setting = true\n");
-    repository.write("dot_config/other/other.toml", "other = true\n");
-    repository.write("home/files/readme", "home\n");
-
-    let manifest = repository.build().unwrap().manifest;
-    let explicit = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.source == "home/files/readme")
-        .unwrap();
-    assert_eq!(explicit.target.display, "~/readme");
-    assert!(matches!(
-        explicit.target.origin,
-        TargetOrigin::DirectoryExplicit { ref declared, ref relative }
-            if declared == "~/" && relative == "readme"
-    ));
-    let inferred = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.source == "dot_config/app/settings.toml")
-        .unwrap();
-    assert_eq!(inferred.target.display, "~/.config/app/settings.toml");
-    let config_root = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.source == "dot_config/other/other.toml")
-        .unwrap();
-    assert_eq!(config_root.target.display, "~/.config/other.toml");
-}
-
-#[test]
-fn empty_directory_declarations_emit_no_artifacts_but_retain_source_identity() {
-    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"empty\")\n");
-    repository.write(
-        "modules/dot_config/empty.lua",
-        "local w = require(\"wombat\")\nw.install(\"empty\")\n",
-    );
-    fs::create_dir_all(repository.root.join("dot_config/empty/nested")).unwrap();
-
-    let declared = repository.build().unwrap();
-    assert!(declared.manifest.artifacts.is_empty());
-    repository.write("modules/dot_config/empty.lua", "return true\n");
-    let omitted = repository.build().unwrap();
-    assert_ne!(declared.build_id, omitted.build_id);
-    assert_ne!(declared.manifest.sources, omitted.manifest.sources);
-}
-
-#[test]
-fn direct_and_directory_provenance_produce_distinct_build_identities() {
-    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"tree\")\n");
-    repository.write(
-        "modules/dot_config/tree.lua",
-        "local w = require(\"wombat\")\nw.install(\"tree/file\")\n",
-    );
-    repository.write("dot_config/tree/file", "same\n");
-    let direct = repository.build().unwrap();
-
-    repository.write(
-        "modules/dot_config/tree.lua",
-        "local w = require(\"wombat\")\nw.install(\"tree\")\n",
-    );
-    let directory = repository.build().unwrap();
-
-    assert_ne!(direct.build_id, directory.build_id);
-    assert!(matches!(
-        direct.manifest.artifacts[0].source_origin,
-        SourceOrigin::Direct { .. }
-    ));
-    assert!(matches!(
-        directory.manifest.artifacts[0].source_origin,
-        SourceOrigin::Directory { .. }
-    ));
-}
-
-#[test]
-fn expanded_conflicts_include_concrete_directory_leaves() {
-    let repository =
-        Repository::new("local w = require(\"wombat\")\nw.use(\"directory\")\nw.use(\"direct\")\n");
-    repository.write(
-        "modules/directory.lua",
-        "local w = require(\"wombat\")\nw.install(\"dot_config/tree\")\n",
-    );
-    repository.write(
-        "modules/direct.lua",
-        "local w = require(\"wombat\")\nw.install(\"other\", { to = \"~/.config/tree/file\" })\n",
-    );
-    repository.write("dot_config/tree/file", "directory\n");
-    repository.write("other", "direct\n");
-
-    let error = repository.build().unwrap_err().to_string();
-    assert!(error.contains("same target"), "{error}");
-    assert!(error.contains("dot_config/tree/file"), "{error}");
-    assert!(
-        error.contains("expanded from directory `dot_config/tree`"),
-        "{error}"
-    );
-    assert!(error.contains("modules/directory.lua"), "{error}");
-    assert!(error.contains("modules/direct.lua"), "{error}");
-}
-
-#[test]
-fn home_root_expansion_is_canonicalized_before_conflict_checks() {
-    let repository =
-        Repository::new("local w = require(\"wombat\")\nw.use(\"directory\")\nw.use(\"direct\")\n");
-    repository.write(
-        "modules/directory.lua",
-        "local w = require(\"wombat\")\nw.install(\"dot_config/tree\", { to = \"~/\" })\n",
-    );
-    repository.write(
-        "modules/direct.lua",
-        "local w = require(\"wombat\")\nw.install(\"other\", { to = \"~/.config/file\" })\n",
-    );
-    repository.write("dot_config/tree/.config/file", "directory\n");
-    repository.write("other", "direct\n");
-
-    let error = repository.build().unwrap_err().to_string();
-    assert!(error.contains("same target"), "{error}");
-    assert!(error.contains("~/.config/file"), "{error}");
-}
-
-#[test]
-fn overlapping_directory_ranges_are_allowed_when_leaves_are_disjoint() {
-    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"a\")\nw.use(\"b\")\n");
-    repository.write(
-        "modules/a.lua",
-        "local w = require(\"wombat\")\nw.install(\"dot_config/a\", { to = \"~/.config/shared\" })\n",
-    );
-    repository.write(
-        "modules/b.lua",
-        "local w = require(\"wombat\")\nw.install(\"dot_config/b\", { to = \"~/.config/shared\" })\n",
-    );
-    repository.write("dot_config/a/one", "one\n");
-    repository.write("dot_config/b/two", "two\n");
-
-    let manifest = repository.build().unwrap().manifest;
-    assert_eq!(manifest.artifacts.len(), 2);
-    assert_eq!(manifest.artifacts[0].target.display, "~/.config/shared/one");
-    assert_eq!(manifest.artifacts[1].target.display, "~/.config/shared/two");
-}
-
-#[cfg(unix)]
-#[test]
-fn directory_descendants_reject_symlinks_and_special_files() {
-    use std::os::unix::fs::symlink;
-    use std::os::unix::net::UnixListener;
-
-    fn repository() -> Repository {
-        let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"tree\")\n");
-        repository.write(
-            "modules/dot_config/tree.lua",
-            "local w = require(\"wombat\")\nw.install(\"tree\")\n",
-        );
-        fs::create_dir_all(repository.root.join("dot_config/tree")).unwrap();
-        repository
-    }
-
-    let linked = repository();
-    let outside = linked._temporary.path().join("outside");
-    fs::write(&outside, "outside\n").unwrap();
-    symlink(&outside, linked.root.join("dot_config/tree/link")).unwrap();
-    let error = linked.build().unwrap_err().to_string();
-    assert!(error.contains("symbolic link"), "{error}");
-
-    let root_link = repository();
-    let external_tree = root_link._temporary.path().join("external-tree");
-    fs::create_dir(&external_tree).unwrap();
-    fs::remove_dir(root_link.root.join("dot_config/tree")).unwrap();
-    symlink(&external_tree, root_link.root.join("dot_config/tree")).unwrap();
-    let error = root_link.build().unwrap_err().to_string();
-    assert!(error.contains("symbolic links"), "{error}");
-
-    let component = repository();
-    let external_directory = component._temporary.path().join("external-directory");
-    fs::create_dir(&external_directory).unwrap();
-    fs::write(external_directory.join("file"), "outside\n").unwrap();
-    symlink(
-        &external_directory,
-        component.root.join("dot_config/tree/nested"),
-    )
+    write(excluded.path(), "src/unalloc_payload/file", "excluded\n");
+    build(BuildOptions::new(
+        excluded.path(),
+        excluded.path().join("build"),
+    ))
     .unwrap();
-    let error = component.build().unwrap_err().to_string();
-    assert!(error.contains("symbolic link"), "{error}");
-
-    let special = repository();
-    let socket = special.root.join("dot_config/tree/socket");
-    let _listener = UnixListener::bind(&socket).unwrap();
-    let error = special.build().unwrap_err().to_string();
-    assert!(error.contains("not a regular file or directory"), "{error}");
 }
 
 #[cfg(unix)]
 #[test]
-fn directory_entries_must_have_utf8_paths() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
+fn hidden_and_excluded_subtrees_are_not_traversed_but_visible_symlinks_fail() {
+    use std::os::unix::fs::symlink;
 
-    let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"tree\")\n");
-    repository.write(
-        "modules/dot_config/tree.lua",
-        "local w = require(\"wombat\")\nw.install(\"tree\")\n",
+    let temp = tempfile::tempdir().unwrap();
+    write(
+        temp.path(),
+        "wombat.lua",
+        "local w = require('wombat')\nw.install('.', { exclude = { 'excluded/**' } })\n",
     );
-    let directory = repository.root.join("dot_config/tree");
-    fs::create_dir_all(&directory).unwrap();
-    if fs::write(
-        directory.join(OsString::from_vec(vec![b'f', 0x80])),
-        "bad\n",
-    )
-    .is_err()
-    {
-        return;
-    }
+    write(temp.path(), "src/visible", "ok\n");
+    fs::create_dir_all(temp.path().join("src/.hidden")).unwrap();
+    fs::create_dir_all(temp.path().join("src/excluded")).unwrap();
+    symlink("missing", temp.path().join("src/.hidden/link")).unwrap();
+    symlink("missing", temp.path().join("src/excluded/link")).unwrap();
+    build(BuildOptions::new(temp.path(), temp.path().join("build"))).unwrap();
 
-    let error = repository.build().unwrap_err().to_string();
-    assert!(error.contains("not valid UTF-8"), "{error}");
+    symlink("missing", temp.path().join("src/visible-link")).unwrap();
+    let error = build(BuildOptions::new(temp.path(), temp.path().join("other")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("must not be a symbolic link"), "{error}");
 }

@@ -14,19 +14,19 @@ impl Fixture {
         let temporary = tempfile::tempdir().unwrap();
         let source = temporary.path().join("source");
         let build_dir = temporary.path().join("product");
-        fs::create_dir_all(source.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(source.join("dot_config")).unwrap();
+        fs::create_dir_all(source.join("modules")).unwrap();
+        fs::create_dir_all(source.join("src/dot_config")).unwrap();
         fs::write(
             source.join("wombat.lua"),
             "local w = require(\"wombat\")\nw.use(\"app\")\n",
         )
         .unwrap();
         fs::write(
-            source.join("modules/dot_config/app.lua"),
-            "local w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+            source.join("modules/app.lua"),
+            "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
         )
         .unwrap();
-        fs::write(source.join("dot_config/app.toml"), contents).unwrap();
+        fs::write(source.join("src/dot_config/app.toml"), contents).unwrap();
         build(BuildOptions::new(&source, &build_dir)).unwrap();
         Self {
             _temporary: temporary,
@@ -45,8 +45,8 @@ fn every_product_section_reads_the_verified_manifest() {
         (InspectSection::Target, "Target"),
         (InspectSection::Modules, "module"),
         (InspectSection::Dependencies, "<root> -> app"),
-        (InspectSection::Artifacts, "~/.config/app.toml"),
-        (InspectSection::Sources, "modules/dot_config/app.lua"),
+        (InspectSection::Artifacts, ".config/app.toml"),
+        (InspectSection::Sources, "modules/app.lua"),
     ];
     for (section, expected) in expectations {
         let output = inspect(&fixture.build, section).unwrap();
@@ -58,9 +58,9 @@ fn every_product_section_reads_the_verified_manifest() {
 fn explanation_accepts_target_source_and_absolute_aliases_with_freshness() {
     let fixture = Fixture::new("value = 1\n");
     for selector in [
-        "~/.config/app.toml".to_string(),
         ".config/app.toml".to_string(),
-        "dot_config/app.toml".to_string(),
+        ".config/app.toml".to_string(),
+        "src/dot_config/app.toml".to_string(),
         fixture
             ._temporary
             .path()
@@ -81,7 +81,7 @@ fn explanation_accepts_target_source_and_absolute_aliases_with_freshness() {
     }
 
     fs::write(
-        fixture.source.join("modules/dot_config/app.lua"),
+        fixture.source.join("modules/app.lua"),
         "-- changed\nlocal w = require(\"wombat\")\nw.install(\"app.toml\")\n",
     )
     .unwrap();
@@ -114,21 +114,22 @@ fn inspection_never_evaluates_changed_repository_lua() {
 fn explanation_rejects_ambiguous_source_selectors_with_candidates() {
     let fixture = Fixture::new("value = 1\n");
     fs::write(
-        fixture.source.join("modules/dot_config/app.lua"),
+        fixture.source.join("modules/app.lua"),
         concat!(
             "local w = require(\"wombat\")\n",
+            "w.module.from(\".config\")\n",
             "w.install(\"app.toml\")\n",
-            "w.install(\"app.toml\", { to = \"~/.config/other.toml\" })\n",
+            "w.install(\"app.toml\", { to = \".config/other.toml\" })\n",
         ),
     )
     .unwrap();
     build(BuildOptions::new(&fixture.source, &fixture.build)).unwrap();
 
-    let error = explain(&fixture.build, "dot_config/app.toml", None, None).unwrap_err();
+    let error = explain(&fixture.build, "src/dot_config/app.toml", None, None).unwrap_err();
     let rendered = error.to_string();
     assert!(rendered.contains("is ambiguous"), "{rendered}");
-    assert!(rendered.contains("~/.config/app.toml"), "{rendered}");
-    assert!(rendered.contains("~/.config/other.toml"), "{rendered}");
+    assert!(rendered.contains(".config/app.toml"), "{rendered}");
+    assert!(rendered.contains(".config/other.toml"), "{rendered}");
 }
 
 #[test]
@@ -139,7 +140,7 @@ fn relocated_products_inspect_without_source_and_corruption_is_rejected() {
     let output = explain(&fixture.build, ".config/app.toml", None, None).unwrap();
     assert!(output.contains("source repository is not available"));
 
-    fs::write(fixture.build.join("tree/config/app.toml"), "tampered\n").unwrap();
+    fs::write(fixture.build.join("tree/.config/app.toml"), "tampered\n").unwrap();
     let error = inspect(&fixture.build, InspectSection::Overview).unwrap_err();
     assert!(error.to_string().contains("content identity"), "{error}");
 }
@@ -151,7 +152,7 @@ fn semantic_comparison_reports_source_and_artifact_changes() {
     let output = compare(&left.build, &right.build).unwrap();
     assert!(output.contains("Product comparison"));
     assert!(output.contains("Artifacts"));
-    assert!(output.contains("Change ~/.config/app.toml"));
+    assert!(output.contains("Change .config/app.toml"));
 }
 
 #[test]

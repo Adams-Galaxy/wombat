@@ -39,9 +39,9 @@ enum Command {
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
 
-        /// Home directory to mutate. Defaults to the current user's home.
+        /// Deployment root to mutate. Defaults to the current user's home.
         #[arg(long)]
-        target_home: Option<PathBuf>,
+        target_root: Option<PathBuf>,
 
         /// Policy for unmanaged collisions and downstream modifications.
         #[arg(long)]
@@ -98,8 +98,12 @@ enum Command {
     },
     /// Add an existing home file to Wombat source state.
     Add {
-        /// Absolute existing file beneath the target home.
+        /// Absolute existing file beneath the target root.
         target: PathBuf,
+
+        /// Root used to derive the target-relative source path. Defaults to the current user's home.
+        #[arg(long)]
+        target_root: Option<PathBuf>,
     },
     /// Inspect a pending construction plan or one exact completed product.
     Inspect {
@@ -134,29 +138,29 @@ enum Command {
         #[arg(num_args = 1..=2)]
         products: Vec<PathBuf>,
     },
-    /// Compare a completed build product with a target home.
+    /// Compare a completed build product with a target root.
     Diff {
         /// Build product, relative to the resolved source unless absolute.
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
 
-        /// Home directory to inspect. Defaults to the current user's home.
+        /// Deployment root to inspect. Defaults to the current user's home.
         #[arg(long)]
-        target_home: Option<PathBuf>,
+        target_root: Option<PathBuf>,
 
         /// Include complete patch bodies for creates, removals, and adoptions.
         #[arg(long)]
         patch: bool,
     },
-    /// Guardedly reconcile an exact completed build with a target home.
+    /// Guardedly reconcile an exact completed build with a target root.
     Apply {
         /// Build product, relative to the resolved source unless absolute.
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
 
-        /// Home directory to mutate. Defaults to the current user's home.
+        /// Deployment root to mutate. Defaults to the current user's home.
         #[arg(long)]
-        target_home: Option<PathBuf>,
+        target_root: Option<PathBuf>,
 
         /// Policy for unmanaged collisions and downstream modifications.
         #[arg(long)]
@@ -168,9 +172,9 @@ enum Command {
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
 
-        /// Home directory to mutate. Defaults to the current user's home.
+        /// Deployment root to mutate. Defaults to the current user's home.
         #[arg(long)]
-        target_home: Option<PathBuf>,
+        target_root: Option<PathBuf>,
 
         /// Policy for unmanaged collisions and downstream modifications.
         #[arg(long)]
@@ -310,7 +314,7 @@ fn main() -> ExitCode {
             repository,
             ssh,
             build_dir,
-            target_home,
+            target_root,
             conflict,
             yes,
             no_bootstrap,
@@ -334,8 +338,8 @@ fn main() -> ExitCode {
                 stdout.paint(wombat::Role::Path, acquired.destination.to_string_lossy())
             );
             let source_root = wombat::config::resolve_source(Some(&acquired.destination))?;
-            let target_home_explicit = target_home.is_some();
-            let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
+            let target_root_explicit = target_root.is_some();
+            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
             let build_options =
                 configured_build_options(&source_root, build_dir, project_arguments)?;
             let planned = wombat::plan(build_options.clone())?;
@@ -360,7 +364,7 @@ fn main() -> ExitCode {
             print!("{}", stdout.human_output(&target_requirements.display()));
             println!(
                 "  deployment: {} ({})",
-                stdout.paint(wombat::Role::Path, target_home.to_string_lossy()),
+                stdout.paint(wombat::Role::Path, target_root.to_string_lossy()),
                 if no_deploy { "disabled" } else { "guarded" }
             );
             if host_requirements.operational_failure() || target_requirements.operational_failure()
@@ -410,7 +414,7 @@ fn main() -> ExitCode {
                     planned.plan.plan_id, outcome.manifest.plan_id
                 )));
             }
-            print_build_outcome(&outcome, stdout);
+            print_build_outcome(&outcome, stdout, stderr);
             let initial = wombat::check(&outcome.build_dir)?;
             print!("{}", stdout.human_output(&initial.display()));
             if initial.operational_failure() {
@@ -426,8 +430,8 @@ fn main() -> ExitCode {
             if no_deploy {
                 Ok(())
             } else {
-                let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_home)
-                    .with_target_home_explicit(target_home_explicit);
+                let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
+                    .with_target_root_explicit(target_root_explicit);
                 let prepared = wombat::prepare_apply(&options)?;
                 if prepared.build_id() != outcome.build_id {
                     Err(wombat::WombatError::configuration(
@@ -456,7 +460,7 @@ fn main() -> ExitCode {
                     build_dir,
                     project_arguments,
                 )?)
-                .map(|outcome| print_build_outcome(&outcome, stdout))
+                .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
             }
         }),
         Command::Prepare {
@@ -489,9 +493,16 @@ fn main() -> ExitCode {
                     }
                 })
         }
-        Command::Add { target } => wombat::config::resolve_source(cli.source.as_deref())
-            .and_then(|source_root| wombat::config::resolve_home().map(|home| (source_root, home)))
-            .and_then(|(source_root, home)| wombat::add(&source_root, &home, &target))
+        Command::Add {
+            target,
+            target_root,
+        } => wombat::config::resolve_source(cli.source.as_deref())
+            .and_then(|source_root| {
+                target_root
+                    .map_or_else(wombat::config::resolve_home, Ok)
+                    .map(|root| (source_root, root))
+            })
+            .and_then(|(source_root, target_root)| wombat::add(&source_root, &target_root, &target))
             .map(|outcome| println!("{}", stdout.paint(wombat::Role::Success, outcome.display()))),
         Command::Inspect {
             section,
@@ -560,22 +571,22 @@ fn main() -> ExitCode {
         }
         Command::Diff {
             build_dir,
-            target_home,
+            target_root,
             patch,
-        } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_home)
+        } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_root)
             .map(|options| options.with_patch(patch))
             .and_then(|options| wombat::diff(&options))
             .map(|outcome| print!("{}", stdout.human_output(&outcome.output))),
         Command::Apply {
             build_dir,
-            target_home,
+            target_root,
             conflict,
-        } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_home).and_then(
+        } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_root).and_then(
             |options| apply_options(&options, effective_policy(conflict), stdout, stderr),
         ),
         Command::Deploy {
             build_dir,
-            target_home,
+            target_root,
             conflict,
             project_arguments,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
@@ -588,16 +599,16 @@ fn main() -> ExitCode {
                 print!("{}", stdout.human_output(&help));
                 return Ok(());
             }
-            let target_home_explicit = target_home.is_some();
-            let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
+            let target_root_explicit = target_root.is_some();
+            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
             let outcome = wombat::build(configured_build_options(
                 &source_root,
                 build_dir,
                 project_arguments,
             )?)?;
-            print_build_outcome(&outcome, stdout);
-            let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_home)
-                .with_target_home_explicit(target_home_explicit);
+            print_build_outcome(&outcome, stdout, stderr);
+            let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
+                .with_target_root_explicit(target_root_explicit);
             let prepared = wombat::prepare_apply(&options)?;
             if prepared.build_id() != outcome.build_id {
                 return Err(wombat::WombatError::configuration(format!(
@@ -686,7 +697,11 @@ fn parse_color(value: &str) -> ColorArg {
     }
 }
 
-fn print_build_outcome(outcome: &wombat::BuildOutcome, presenter: wombat::Presenter) {
+fn print_build_outcome(
+    outcome: &wombat::BuildOutcome,
+    presenter: wombat::Presenter,
+    warnings: wombat::Presenter,
+) {
     println!(
         "{} {} ({} artifacts) at {}",
         presenter.paint(wombat::Role::Success, outcome.status.to_string()),
@@ -694,6 +709,27 @@ fn print_build_outcome(outcome: &wombat::BuildOutcome, presenter: wombat::Presen
         outcome.artifact_count,
         presenter.paint(wombat::Role::Path, outcome.build_dir.to_string_lossy(),)
     );
+    for notice in &outcome.manifest.artifact_notices {
+        let paths = notice
+            .skipped
+            .iter()
+            .map(|path| format!("`{path}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "{}",
+            warnings.paint(
+                wombat::Role::Warning,
+                format!(
+                    "warning: artifact selector `{}` owned by `{}` skipped unallocated source{} {paths} at {}",
+                    notice.selector,
+                    notice.owner,
+                    if notice.skipped.len() == 1 { "" } else { "s" },
+                    notice.declared_at,
+                ),
+            )
+        );
+    }
 }
 
 fn configured_build_options(
@@ -709,17 +745,17 @@ fn configured_build_options(
 fn resolve_deployment_options(
     source: Option<&std::path::Path>,
     build_dir: PathBuf,
-    target_home: Option<PathBuf>,
+    target_root: Option<PathBuf>,
 ) -> wombat::Result<wombat::DeploymentOptions> {
     let build_dir = if build_dir.is_absolute() {
         build_dir
     } else {
         wombat::config::resolve_source(source)?.join(build_dir)
     };
-    let target_home_explicit = target_home.is_some();
-    let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
-    Ok(wombat::DeploymentOptions::new(build_dir, target_home)
-        .with_target_home_explicit(target_home_explicit))
+    let target_root_explicit = target_root.is_some();
+    let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
+    Ok(wombat::DeploymentOptions::new(build_dir, target_root)
+        .with_target_root_explicit(target_root_explicit))
 }
 
 fn resolve_product_path(

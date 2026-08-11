@@ -13,13 +13,13 @@ use crate::manifest::{
 };
 use crate::{Result, WombatError};
 
-pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 2;
+pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TargetState {
     pub format_version: u32,
-    pub target_home: String,
+    pub target_root: String,
     pub complete_build_id: Option<String>,
     pub artifacts: Vec<AppliedArtifact>,
 }
@@ -30,6 +30,8 @@ pub(crate) struct AppliedArtifact {
     pub kind: ArtifactKind,
     pub source: String,
     pub source_origin: SourceOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_projection: Option<crate::manifest::SourceProjection>,
     pub production: Production,
     pub target: TargetPath,
     pub content: FileContent,
@@ -49,6 +51,7 @@ impl AppliedArtifact {
             kind: artifact.kind,
             source: artifact.source,
             source_origin: artifact.source_origin,
+            source_projection: artifact.source_projection,
             production: artifact.production,
             target: artifact.target,
             content: artifact.content,
@@ -63,6 +66,7 @@ impl AppliedArtifact {
             kind: self.kind,
             source: self.source.clone(),
             source_origin: self.source_origin.clone(),
+            source_projection: self.source_projection.clone(),
             production: self.production.clone(),
             target: self.target.clone(),
             content: self.content.clone(),
@@ -73,10 +77,10 @@ impl AppliedArtifact {
 }
 
 impl TargetState {
-    pub fn empty(target_home: String) -> Self {
+    pub fn empty(target_root: String) -> Self {
         Self {
             format_version: TARGET_STATE_FORMAT_VERSION,
-            target_home,
+            target_root,
             complete_build_id: None,
             artifacts: Vec::new(),
         }
@@ -93,7 +97,7 @@ pub(crate) enum LockMode {
 pub(crate) struct TargetStateGuard {
     directory: PathBuf,
     state_path: PathBuf,
-    target_home: String,
+    target_root: String,
     _lock: File,
 }
 
@@ -104,14 +108,14 @@ impl Drop for TargetStateGuard {
 }
 
 impl TargetStateGuard {
-    pub fn open(state_root: &Path, target_home: &Path, mode: LockMode) -> Result<Self> {
-        let target_home =
-            fs::canonicalize(target_home).map_err(|error| WombatError::io(target_home, error))?;
-        let target_home_string = target_home
+    pub fn open(state_root: &Path, target_root: &Path, mode: LockMode) -> Result<Self> {
+        let target_root =
+            fs::canonicalize(target_root).map_err(|error| WombatError::io(target_root, error))?;
+        let target_root_string = target_root
             .to_str()
-            .ok_or_else(|| WombatError::configuration("target home must be valid UTF-8"))?
+            .ok_or_else(|| WombatError::configuration("target root must be valid UTF-8"))?
             .to_string();
-        let key = target_key(&target_home);
+        let key = target_key(&target_root);
         let wombat_root = state_root.join("wombat");
         let targets_root = wombat_root.join("targets");
         let directory = targets_root.join(key);
@@ -146,14 +150,14 @@ impl TargetStateGuard {
         };
         result.map_err(|error| match error {
             TryLockError::WouldBlock => WombatError::configuration(format!(
-                "target `{target_home_string}` is in use by another Wombat process"
+                "target `{target_root_string}` is in use by another Wombat process"
             )),
             TryLockError::Error(error) => WombatError::io(&lock_path, error),
         })?;
         Ok(Self {
             state_path: directory.join("state.json"),
             directory,
-            target_home: target_home_string,
+            target_root: target_root_string,
             _lock: lock,
         })
     }
@@ -170,7 +174,7 @@ impl TargetStateGuard {
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(TargetState::empty(self.target_home.clone()));
+                return Ok(TargetState::empty(self.target_root.clone()));
             }
             Err(error) => return Err(WombatError::io(&self.state_path, error)),
         }
@@ -186,18 +190,18 @@ impl TargetStateGuard {
                 self.state_path.display()
             )));
         }
-        if state.target_home != self.target_home {
+        if state.target_root != self.target_root {
             return Err(WombatError::configuration(format!(
                 "target state `{}` belongs to `{}`, not `{}`",
                 self.state_path.display(),
-                state.target_home,
-                self.target_home
+                state.target_root,
+                self.target_root
             )));
         }
         if !state
             .artifacts
             .windows(2)
-            .all(|pair| pair[0].target.key().cmp(&pair[1].target.key()).is_lt())
+            .all(|pair| pair[0].target.key().cmp(pair[1].target.key()).is_lt())
         {
             return Err(WombatError::configuration(format!(
                 "target state artifacts in `{}` are not uniquely sorted",
@@ -217,9 +221,9 @@ impl TargetStateGuard {
     }
 
     pub fn write(&self, state: &TargetState) -> Result<()> {
-        if state.target_home != self.target_home {
+        if state.target_root != self.target_root {
             return Err(WombatError::configuration(
-                "refusing to write target state for a different target home",
+                "refusing to write target state for a different target root",
             ));
         }
         if state.format_version != TARGET_STATE_FORMAT_VERSION {
@@ -288,8 +292,8 @@ pub(crate) fn resolve_state_root(explicit: Option<&Path>) -> Result<PathBuf> {
     Ok(home.join(".local/state"))
 }
 
-fn target_key(target_home: &Path) -> String {
-    let digest = Sha256::digest(target_home.as_os_str().as_encoded_bytes());
+fn target_key(target_root: &Path) -> String {
+    let digest = Sha256::digest(target_root.as_os_str().as_encoded_bytes());
     let mut output = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
@@ -326,7 +330,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         if artifact.mode != expected_mode {
             return Err(WombatError::configuration(format!(
                 "target state artifact `{}` has mode {:04o}, expected {expected_mode:04o}",
-                artifact.target.display, artifact.mode
+                artifact.target.path, artifact.mode
             )));
         }
     }
@@ -365,6 +369,9 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         requirements: Vec::new(),
         preparations: Vec::new(),
         tasks,
+        artifact_policy: crate::manifest::ArtifactPolicy::default(),
+        artifact_notices: Vec::new(),
+        artifact_selections: Vec::new(),
         artifacts: artifacts.iter().map(AppliedArtifact::to_artifact).collect(),
     };
     crate::build::validate_manifest(&manifest)
@@ -398,10 +405,9 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
                 revision: None,
             },
             target_root: Some(TaskTargetRoot {
-                anchor: artifact.target.anchor,
                 path: String::new(),
                 origin: EvaluatedTargetOrigin::Explicit {
-                    declared: artifact.target.display.clone(),
+                    declared: artifact.target.path.clone(),
                 },
             }),
             declared_at: artifact.declared_at.clone(),

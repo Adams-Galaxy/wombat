@@ -5,7 +5,7 @@ use wombat::{BuildOptions, build};
 
 fn repository(root: &std::path::Path, root_lua: &str) {
     fs::create_dir_all(root.join("modules/dot_config")).unwrap();
-    fs::create_dir_all(root.join("dot_config")).unwrap();
+    fs::create_dir_all(root.join("src/dot_config")).unwrap();
     fs::write(root.join("wombat.lua"), root_lua).unwrap();
 }
 
@@ -78,10 +78,10 @@ fn required_helpers_are_catalogued_and_preserve_declaration_callers() {
     .unwrap();
     fs::write(
         root.join("modules/dot_config/app.lua"),
-        "local w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+        "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
     )
     .unwrap();
-    fs::write(root.join("dot_config/app.toml"), "value = true\n").unwrap();
+    fs::write(root.join("src/dot_config/app.toml"), "value = true\n").unwrap();
 
     let manifest = build(BuildOptions::new(&root, "build")).unwrap().manifest;
     assert!(
@@ -131,11 +131,11 @@ fn syntax_errors_and_template_errors_use_source_aware_diagnostics() {
     );
     fs::write(
         template_root.join("modules/dot_config/broken.lua"),
-        "local w = require(\"wombat\")\nw.install.template(\"broken.tmpl\", { with = {} })\n",
+        "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install.template(\"broken.tmpl\", { with = {} })\n",
     )
     .unwrap();
     fs::write(
-        template_root.join("dot_config/broken.tmpl"),
+        template_root.join("src/dot_config/broken.tmpl"),
         "value = {{missing}}\n",
     )
     .unwrap();
@@ -143,7 +143,7 @@ fn syntax_errors_and_template_errors_use_source_aware_diagnostics() {
         .unwrap_err()
         .render(false);
     assert!(
-        template.contains("--> dot_config/broken.tmpl:1:"),
+        template.contains("--> src/dot_config/broken.tmpl:1:"),
         "{template}"
     );
     assert!(template.contains("value = {{missing}}"), "{template}");

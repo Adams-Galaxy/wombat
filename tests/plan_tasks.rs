@@ -10,6 +10,7 @@ fn repository() -> (tempfile::TempDir, std::path::PathBuf) {
     let temporary = tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+    fs::create_dir_all(source.join("src/dot_config")).unwrap();
     fs::create_dir_all(source.join("tasks/helpers")).unwrap();
     fs::write(
         source.join("wombat.lua"),
@@ -19,6 +20,7 @@ fn repository() -> (tempfile::TempDir, std::path::PathBuf) {
     fs::write(
         source.join("modules/dot_config/generated.lua"),
         r#"local w = require('wombat')
+w.module.from(".config")
 w.generate("lua.bin", { content = "lua\0bytes" })
 w.build.task("generate.py", { greeting = "Hello", count = 2 })
 "#,
@@ -50,7 +52,7 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     let (_temporary, source) = repository();
     let options = BuildOptions::new(&source, "build");
     let planned = plan(options.clone()).unwrap();
-    assert_eq!(planned.plan.format_version, 1);
+    assert_eq!(planned.plan.format_version, 2);
     assert_eq!(planned.plan.tasks.len(), 1);
     assert_eq!(planned.plan.build_requirements.len(), 1);
     assert!(!planned.build_dir.join(".wombat/tasks").exists());
@@ -59,15 +61,15 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     assert!(inspected.contains("cache: true"));
 
     let built = build(options.clone()).unwrap();
-    assert_eq!(built.manifest.format_version, 10);
+    assert_eq!(built.manifest.format_version, 11);
     assert_eq!(built.manifest.plan_id, planned.plan.plan_id);
     assert_eq!(built.manifest.tasks[0].outputs.len(), 1);
     assert_eq!(
-        fs::read(built.build_dir.join("tree/config/lua.bin")).unwrap(),
+        fs::read(built.build_dir.join("tree/.config/lua.bin")).unwrap(),
         b"lua\0bytes"
     );
     assert_eq!(
-        fs::read_to_string(built.build_dir.join("tree/config/nested/.hidden")).unwrap(),
+        fs::read_to_string(built.build_dir.join("tree/.config/nested/.hidden")).unwrap(),
         "Hello x 2\n"
     );
     assert!(
@@ -96,6 +98,7 @@ fn missing_task_interpreter_stops_before_execution() {
     fs::write(
         source.join("modules/dot_config/generated.lua"),
         r#"local w = require('wombat')
+w.module.from(".config")
 w.build.task("generate.py", {}, { interpreter = "wombat-plan-0010-missing" })
 "#,
     )
@@ -112,6 +115,7 @@ fn task_cache_repairs_corruption_and_respects_revision_and_opt_out() {
     let temporary = tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+    fs::create_dir_all(source.join("src/dot_config")).unwrap();
     fs::create_dir_all(source.join("tasks")).unwrap();
     fs::write(
         source.join("wombat.lua"),
@@ -121,7 +125,7 @@ fn task_cache_repairs_corruption_and_respects_revision_and_opt_out() {
     let module = source.join("modules/dot_config/generated.lua");
     fs::write(
         &module,
-        "local w = require('wombat')\nw.build.task('counter.py', { value = 'one' })\nw.build.task('gate.sh', {}, { cache = false })\n",
+        "local w = require('wombat')\nw.module.from('.config')\nw.build.task('counter.py', { value = 'one' })\nw.build.task('gate.sh', {}, { cache = false })\n",
     )
     .unwrap();
     fs::write(
@@ -143,7 +147,7 @@ counter.write_text(str(runs))
     let options = BuildOptions::new(&source, "build");
     let first = build(options.clone()).unwrap();
     assert_eq!(
-        fs::read_to_string(first.build_dir.join("tree/config/counter.txt")).unwrap(),
+        fs::read_to_string(first.build_dir.join("tree/.config/counter.txt")).unwrap(),
         "one:1\n"
     );
     let second = build(options.clone()).unwrap();
@@ -157,18 +161,18 @@ counter.write_text(str(runs))
     fs::write(&derivation, "not json").unwrap();
     let repaired = build(options.clone()).unwrap();
     assert_eq!(
-        fs::read_to_string(repaired.build_dir.join("tree/config/counter.txt")).unwrap(),
+        fs::read_to_string(repaired.build_dir.join("tree/.config/counter.txt")).unwrap(),
         "one:2\n"
     );
 
     fs::write(
         &module,
-        "local w = require('wombat')\nw.build.task('counter.py', { value = 'one' }, { cache = { revision = 'v2' } })\nw.build.task('gate.sh', {}, { cache = false })\n",
+        "local w = require('wombat')\nw.module.from('.config')\nw.build.task('counter.py', { value = 'one' }, { cache = { revision = 'v2' } })\nw.build.task('gate.sh', {}, { cache = false })\n",
     )
     .unwrap();
     let revised = build(options).unwrap();
     assert_eq!(
-        fs::read_to_string(revised.build_dir.join("tree/config/counter.txt")).unwrap(),
+        fs::read_to_string(revised.build_dir.join("tree/.config/counter.txt")).unwrap(),
         "one:3\n"
     );
     let task_root = revised.build_dir.join(".wombat/tasks");
@@ -194,6 +198,7 @@ fn inferred_runners_share_the_fixed_protocol_and_publish_normal_artifacts() {
     let temporary = tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+    fs::create_dir_all(source.join("src/dot_config")).unwrap();
     fs::create_dir_all(source.join("tasks")).unwrap();
     fs::write(
         source.join("wombat.lua"),
@@ -202,7 +207,7 @@ fn inferred_runners_share_the_fixed_protocol_and_publish_normal_artifacts() {
     .unwrap();
     fs::write(
         source.join("modules/dot_config/runners.lua"),
-        "local w = require('wombat')\nw.build.task('python.py')\nw.build.task('posix.sh')\nw.build.task('bash.bash')\nw.build.task('embedded.lua')\nw.build.task('direct')\n",
+        "local w = require('wombat')\nw.module.from('.config')\nw.build.task('python.py')\nw.build.task('posix.sh')\nw.build.task('bash.bash')\nw.build.task('embedded.lua')\nw.build.task('direct')\n",
     )
     .unwrap();
     fs::write(
@@ -235,7 +240,7 @@ fn inferred_runners_share_the_fixed_protocol_and_publish_normal_artifacts() {
     let outcome = build(BuildOptions::new(&source, "build")).unwrap();
     for name in ["python", "posix", "bash", "lua", "direct"] {
         assert_eq!(
-            fs::read_to_string(outcome.build_dir.join("tree/config").join(name)).unwrap(),
+            fs::read_to_string(outcome.build_dir.join("tree/.config").join(name)).unwrap(),
             format!("{name}\n")
         );
     }
@@ -247,6 +252,7 @@ fn task_failure_preserves_the_previous_completed_product() {
     let temporary = tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::create_dir_all(source.join("modules/dot_config")).unwrap();
+    fs::create_dir_all(source.join("src/dot_config")).unwrap();
     fs::create_dir_all(source.join("tasks")).unwrap();
     fs::write(
         source.join("wombat.lua"),
@@ -256,7 +262,7 @@ fn task_failure_preserves_the_previous_completed_product() {
     let module = source.join("modules/dot_config/app.lua");
     fs::write(
         &module,
-        "local w = require('wombat')\nw.generate('stable', { content = 'old' })\n",
+        "local w = require('wombat')\nw.module.from('.config')\nw.generate('stable', { content = 'old' })\n",
     )
     .unwrap();
     let first = build(BuildOptions::new(&source, "build")).unwrap();
@@ -267,7 +273,7 @@ fn task_failure_preserves_the_previous_completed_product() {
     .unwrap();
     fs::write(
         &module,
-        "local w = require('wombat')\nw.generate('stable', { content = 'new' })\nw.build.task('fail.sh')\n",
+        "local w = require('wombat')\nw.module.from('.config')\nw.generate('stable', { content = 'new' })\nw.build.task('fail.sh')\n",
     )
     .unwrap();
     let error = build(BuildOptions::new(&source, "build")).unwrap_err();
@@ -288,7 +294,7 @@ fn task_failure_preserves_the_previous_completed_product() {
         serde_json::from_slice(&fs::read(first.build_dir.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(retained.build_id, first.build_id);
     assert_eq!(
-        fs::read(first.build_dir.join("tree/config/stable")).unwrap(),
+        fs::read(first.build_dir.join("tree/.config/stable")).unwrap(),
         b"old"
     );
 }
@@ -341,9 +347,11 @@ fn task_paths_and_root_output_fail_before_publication() {
         "local w = require('wombat')\nw.build.task('output.py')\n",
     )
     .unwrap();
-    let root = build(BuildOptions::new(&source, "build")).unwrap_err();
-    assert!(root.to_string().contains("provide `to`"));
-    assert!(!source.join("build/manifest.json").exists());
+    build(BuildOptions::new(&source, "build")).unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join("build/tree/file")).unwrap(),
+        "value"
+    );
 }
 
 #[test]
@@ -354,7 +362,7 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
     let entrypoint = source.join("wombat.lua");
     fs::write(
         &entrypoint,
-        "local w = require('wombat')\nw.generate('value', { content = 'one', to = '~/.value' })\n",
+        "local w = require('wombat')\nw.generate('value', { content = 'one', to = '.value' })\n",
     )
     .unwrap();
     let options = BuildOptions::new(&source, "build");
@@ -363,7 +371,7 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
 
     fs::write(
         &entrypoint,
-        "local w = require('wombat')\nw.generate('value', { content = 'two', to = '~/.value' })\n",
+        "local w = require('wombat')\nw.generate('value', { content = 'two', to = '.value' })\n",
     )
     .unwrap();
     let second = plan(options).unwrap();
@@ -377,4 +385,15 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
     fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     let tampered = wombat::plan::read(&second.build_dir).unwrap_err();
     assert!(tampered.to_string().contains("identity mismatch"));
+
+    let mut legacy: serde_json::Value = serde_json::to_value(&second.plan).unwrap();
+    legacy["format_version"] = serde_json::Value::from(1);
+    fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let error = wombat::plan::read(&second.build_dir)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported build plan format version 1") && error.contains("expected 2"),
+        "{error}"
+    );
 }

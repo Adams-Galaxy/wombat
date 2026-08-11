@@ -6,7 +6,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::build::open_build;
-use crate::manifest::{Artifact, BuildPlan, Manifest, Production, TargetAnchor};
+use crate::manifest::{Artifact, BuildPlan, Manifest, Production};
 use crate::{Result, WombatError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,7 +41,7 @@ pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
 pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
     match section {
         PlanInspectSection::Overview => format!(
-            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  build providers: {}\n  build requirements: {}\n  target providers: {}\n  target requirements: {}\n  tasks: {}\n  declared artifacts: {}\n",
+            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  build providers: {}\n  build requirements: {}\n  target providers: {}\n  target requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
             plan.plan_id,
             plan.format_version,
             plan.wombat_version,
@@ -54,6 +54,7 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
             plan.providers.len(),
             plan.requirements.len(),
             plan.tasks.len(),
+            plan.artifact_selections.len(),
             plan.artifacts.len(),
         ),
         PlanInspectSection::Providers => {
@@ -104,25 +105,30 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
                         .unwrap_or_default(),
                     task.target_root
                         .as_ref()
-                        .map(|root| format!("{:?}:{}", root.anchor, root.path))
+                        .map(|root| root.path.clone())
                         .unwrap_or_else(|| "none (outputless only)".to_string()),
                     task.declared_at
                 )
             }),
         ),
-        PlanInspectSection::Artifacts => render_list(
-            "Declared artifacts",
-            plan.artifacts.iter().map(|artifact| {
-                format!(
-                    "{}\n  owner: {}\n  source: {}\n  production: {}\n  declared at: {}",
-                    artifact.target.display,
-                    artifact.owner,
-                    artifact.source,
-                    json(&artifact.production),
-                    artifact.declared_at
-                )
-            }),
-        ),
+        PlanInspectSection::Artifacts => {
+            render_list(
+                "Artifact selections",
+                plan.artifact_selections.iter().map(render_selection),
+            ) + &render_list(
+                "Declared artifacts",
+                plan.artifacts.iter().map(|artifact| {
+                    format!(
+                        "{}\n  owner: {}\n  source: {}\n  production: {}\n  declared at: {}",
+                        artifact.target.path,
+                        artifact.owner,
+                        artifact.source,
+                        json(&artifact.production),
+                        artifact.declared_at
+                    )
+                }),
+            )
+        }
         PlanInspectSection::Sources => render_list(
             "Sources",
             plan.sources
@@ -309,7 +315,7 @@ pub fn explain(
         matches => {
             let candidates = matches
                 .iter()
-                .map(|artifact| format!("`{}` from `{}`", artifact.target.display, artifact.source))
+                .map(|artifact| format!("`{}` from `{}`", artifact.target.path, artifact.source))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(WombatError::configuration(format!(
@@ -329,7 +335,7 @@ pub fn compare(left: &Path, right: &Path) -> Result<String> {
 fn render_section(manifest: &Manifest, section: InspectSection) -> String {
     match section {
         InspectSection::Overview => format!(
-            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  build providers: {}\n  build requirements: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifacts: {}\n",
+            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  build providers: {}\n  build requirements: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
             manifest.build_id,
             manifest.format_version,
             manifest.plan_id,
@@ -346,6 +352,7 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
             manifest.preparations.len(),
             manifest.requirements.len(),
             manifest.tasks.len(),
+            manifest.artifact_selections.len(),
             manifest.artifacts.len(),
         ),
         InspectSection::Inputs => render_list(
@@ -469,19 +476,24 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                 )
             }),
         ),
-        InspectSection::Artifacts => render_list(
-            "Artifacts",
-            manifest.artifacts.iter().map(|artifact| {
-                format!(
-                    "{}\n  owner: {}\n  source: {}\n  production: {}\n  digest: {}",
-                    artifact.target.display,
-                    artifact.owner,
-                    artifact.source,
-                    production_name(&artifact.production),
-                    artifact.content.digest
-                )
-            }),
-        ),
+        InspectSection::Artifacts => {
+            render_list(
+                "Artifact selections",
+                manifest.artifact_selections.iter().map(render_selection),
+            ) + &render_list(
+                "Artifacts",
+                manifest.artifacts.iter().map(|artifact| {
+                    format!(
+                        "{}\n  owner: {}\n  source: {}\n  production: {}\n  digest: {}",
+                        artifact.target.path,
+                        artifact.owner,
+                        artifact.source,
+                        production_name(&artifact.production),
+                        artifact.content.digest
+                    )
+                }),
+            )
+        }
         InspectSection::Sources => render_list(
             "Sources",
             manifest
@@ -507,6 +519,26 @@ fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
         requirement.binding.identity,
         requirement.candidates.len(),
         requirement.declared_at
+    )
+}
+
+fn render_selection(selection: &crate::manifest::ArtifactSelection) -> String {
+    format!(
+        "{}\n  owner: {}\n  expanded: {}\n  physical: {}/{}\n  kind: {:?}\n  target: {}\n  matches: {}\n  skipped unallocated: {}\n  declared at: {}",
+        selection.declared,
+        selection.owner,
+        selection.expanded,
+        selection.source_base,
+        selection.physical,
+        selection.kind,
+        selection
+            .explicit_target
+            .as_deref()
+            .or(selection.source_base_target.as_deref())
+            .unwrap_or("unallocated"),
+        selection.matches.len(),
+        selection.skipped_unallocated.len(),
+        selection.declared_at,
     )
 }
 
@@ -557,7 +589,7 @@ fn render_explanation(
         .find(|module| module.name == artifact.owner);
     let mut output = format!(
         "Artifact {}\n  build: {}\n  owner: {}\n  source: {}\n  source origin: {}\n  production: {}\n  target inference: {}\n  content: {} bytes, {}, executable={}\n  declared at: {}\n",
-        artifact.target.display,
+        artifact.target.path,
         manifest.build_id,
         artifact.owner,
         artifact.source,
@@ -649,14 +681,11 @@ fn source_freshness(
 
 fn artifact_aliases(artifact: &Artifact, home: Option<&Path>) -> BTreeSet<String> {
     let mut aliases = BTreeSet::from([
-        artifact.target.display.clone(),
+        artifact.target.path.clone(),
         artifact.target.path.clone(),
         artifact.source.clone(),
     ]);
-    let logical = match artifact.target.anchor {
-        TargetAnchor::Config => format!(".config/{}", artifact.target.path),
-        TargetAnchor::Home => artifact.target.path.clone(),
-    };
+    let logical = artifact.target.path.clone();
     aliases.insert(logical.clone());
     if let Some(home) = home {
         aliases.insert(home.join(logical).to_string_lossy().into_owned());
@@ -767,9 +796,48 @@ fn render_comparison(left: &Manifest, right: &Manifest) -> String {
     );
     compare_map(
         &mut output,
+        "Artifact selections",
+        keyed(&left.artifact_selections, |selection| {
+            format!(
+                "{}:{}@{}",
+                selection.owner, selection.declared, selection.declared_at
+            )
+        }),
+        keyed(&right.artifact_selections, |selection| {
+            format!(
+                "{}:{}@{}",
+                selection.owner, selection.declared, selection.declared_at
+            )
+        }),
+    );
+    if left.artifact_policy != right.artifact_policy {
+        output.push_str(&format!(
+            "Artifact policy\n  - {}\n  + {}\n",
+            json(&left.artifact_policy),
+            json(&right.artifact_policy)
+        ));
+    }
+    compare_map(
+        &mut output,
+        "Artifact notices",
+        keyed(&left.artifact_notices, |notice| {
+            format!(
+                "{}:{}@{}",
+                notice.owner, notice.selector, notice.declared_at
+            )
+        }),
+        keyed(&right.artifact_notices, |notice| {
+            format!(
+                "{}:{}@{}",
+                notice.owner, notice.selector, notice.declared_at
+            )
+        }),
+    );
+    compare_map(
+        &mut output,
         "Artifacts",
-        keyed(&left.artifacts, |artifact| artifact.target.display.clone()),
-        keyed(&right.artifacts, |artifact| artifact.target.display.clone()),
+        keyed(&left.artifacts, |artifact| artifact.target.path.clone()),
+        keyed(&right.artifacts, |artifact| artifact.target.path.clone()),
     );
     output
 }

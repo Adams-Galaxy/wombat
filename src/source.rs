@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::SystemTime;
 
 use crate::{Result, WombatError};
@@ -95,9 +95,10 @@ pub(crate) fn validate_source_components(repository: &Path, source: &Path) -> Re
     Ok(())
 }
 
-pub(crate) fn snapshot_directory(
+pub(crate) fn snapshot_directory_filtered(
     repository: &Path,
     directory: &Path,
+    mut include: impl FnMut(&str, bool) -> bool,
 ) -> Result<Vec<DirectoryLeaf>> {
     validate_source_components(repository, directory)?;
     let metadata =
@@ -110,11 +111,16 @@ pub(crate) fn snapshot_directory(
     }
 
     let mut leaves = Vec::new();
-    walk_directory(directory, directory, &mut leaves)?;
+    walk_directory(directory, directory, &mut leaves, &mut include)?;
     Ok(leaves)
 }
 
-fn walk_directory(root: &Path, directory: &Path, leaves: &mut Vec<DirectoryLeaf>) -> Result<()> {
+fn walk_directory(
+    root: &Path,
+    directory: &Path,
+    leaves: &mut Vec<DirectoryLeaf>,
+    include: &mut impl FnMut(&str, bool) -> bool,
+) -> Result<()> {
     let mut entries = fs::read_dir(directory)
         .map_err(|error| WombatError::io(directory, error))?
         .collect::<std::io::Result<Vec<_>>>()
@@ -126,6 +132,9 @@ fn walk_directory(root: &Path, directory: &Path, leaves: &mut Vec<DirectoryLeaf>
         let relative = portable_relative(root, &path)?;
         let metadata =
             fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+        if !include(&relative, metadata.file_type().is_dir()) {
+            continue;
+        }
         if metadata.file_type().is_symlink() {
             return Err(WombatError::configuration(format!(
                 "static directory entry `{}` must not be a symbolic link",
@@ -133,7 +142,7 @@ fn walk_directory(root: &Path, directory: &Path, leaves: &mut Vec<DirectoryLeaf>
             )));
         }
         if metadata.file_type().is_dir() {
-            walk_directory(root, &path, leaves)?;
+            walk_directory(root, &path, leaves, include)?;
         } else if metadata.file_type().is_file() {
             leaves.push(DirectoryLeaf {
                 relative,
@@ -161,10 +170,4 @@ fn portable_relative(root: &Path, path: &Path) -> Result<String> {
                 path.display()
             ))
         })
-}
-
-pub(crate) fn join_portable(root: &Path, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .fold(root.to_path_buf(), |path, component| path.join(component))
 }

@@ -14,21 +14,25 @@ use crate::context::{
 use crate::frozen::FrozenValue;
 use crate::inputs::{self, InputSpec};
 use crate::manifest::{
-    ArtifactKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact, EvaluatedDirectory,
-    EvaluatedManifest, EvaluatedProduction, EvaluatedTask, InferenceBasis, MAX_SOURCE_TRACE_FRAMES,
-    ManifestModule, Observation, ObservationSubject, Provider, ProviderBinding, ProviderOrigin,
-    ProviderPreparation, Publications, Requirement, RequirementCandidate, RequirementChoice,
-    RequirementKind, ResolutionAttempt, ResolutionOutcome, SourceAnchor, SourceFile,
-    SourceLocation, SourceOrigin, SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner,
-    TaskRunnerFamily, TaskTargetRoot,
+    ArtifactKind, ArtifactNotice, ArtifactNoticeKind, ArtifactPolicy, ArtifactSelection,
+    ArtifactSelectionKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact,
+    EvaluatedDirectory, EvaluatedManifest, EvaluatedProduction, EvaluatedTask,
+    MAX_SOURCE_TRACE_FRAMES, ManifestModule, ModuleSourceBase, Observation, ObservationSubject,
+    Provider, ProviderBinding, ProviderOrigin, ProviderPreparation, Publications, Requirement,
+    RequirementCandidate, RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome,
+    SourceFile, SourceLocation, SourceOrigin, SourceTrace, Task, TaskCachePolicy, TaskLogPolicy,
+    TaskRunner, TaskRunnerFamily, TaskTargetRoot,
 };
 use crate::path::{
-    expand_target_root, infer_target, infer_target_root, parse_explicit_target,
-    parse_explicit_target_root, prefixed_source, reject_noncanonical_artifact_trees,
-    validate_declared_source, validate_relative_path,
+    infer_target, infer_target_root, parse_explicit_target, parse_explicit_target_root,
+    reject_legacy_artifact_trees, validate_relative_path,
+};
+use crate::selection::{
+    compile_selector, hidden_components_authorized, in_static_scope, is_excluded, matcher,
+    project_physical,
 };
 use crate::source::{
-    SourceFingerprint, fingerprint_regular_file, join_portable, snapshot_directory,
+    SourceFingerprint, fingerprint_regular_file, snapshot_directory_filtered,
     validate_source_components,
 };
 use crate::{Diagnostic, Result, WombatError};
@@ -74,6 +78,8 @@ struct ModuleRecord {
     state: EvaluationState,
     export: Option<FrozenValue>,
     location: Option<ModuleLocation>,
+    source_base: Option<ModuleSourceBase>,
+    declarations_started: bool,
 }
 
 impl ModuleRecord {
@@ -83,6 +89,8 @@ impl ModuleRecord {
             state: EvaluationState::Selected,
             export: None,
             location: None,
+            source_base: None,
+            declarations_started: false,
         }
     }
 
@@ -96,8 +104,6 @@ impl ModuleRecord {
 #[derive(Clone, Debug)]
 struct ModuleLocation {
     file: PathBuf,
-    source_base: PathBuf,
-    source_anchor: Option<SourceAnchor>,
 }
 
 #[derive(Debug)]
@@ -115,6 +121,9 @@ struct RuntimeState {
     tasks: Vec<EvaluatedTask>,
     artifacts: Vec<EvaluatedArtifact>,
     directories: Vec<EvaluatedDirectory>,
+    artifact_policy: ArtifactPolicy,
+    artifact_notices: Vec<ArtifactNotice>,
+    artifact_selections: Vec<ArtifactSelection>,
     stack: Vec<String>,
     host: HostContext,
     target: ResolvedTarget,
@@ -137,16 +146,35 @@ impl RuntimeState {
         self.stack.last().map(String::as_str)
     }
 
-    fn active_location(&self) -> (PathBuf, Option<SourceAnchor>) {
+    fn active_location(&self) -> (PathBuf, String, Option<String>, bool) {
         self.active_module().map_or_else(
-            || (self.root.clone(), None),
+            || {
+                (
+                    self.root.join("src"),
+                    String::new(),
+                    Some(String::new()),
+                    false,
+                )
+            },
             |module| {
-                let location = self
+                let record = self
                     .modules
                     .get(module)
-                    .and_then(|record| record.location.as_ref())
                     .expect("an active module must have a resolved location");
-                (location.source_base.clone(), location.source_anchor)
+                match &record.source_base {
+                    Some(base) => (
+                        self.root.join(&base.physical),
+                        base.logical.clone(),
+                        base.target.clone(),
+                        base.hidden,
+                    ),
+                    None => (
+                        self.root.join("src"),
+                        String::new(),
+                        Some(String::new()),
+                        false,
+                    ),
+                }
             },
         )
     }
@@ -184,7 +212,8 @@ pub(crate) fn evaluate(root: &Path) -> Result<EvaluatedManifest> {
 
 pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<EvaluationOutcome> {
     let root = fs::canonicalize(root).map_err(|source| WombatError::io(root, source))?;
-    reject_noncanonical_artifact_trees(&root)?;
+    reject_legacy_artifact_trees(&root)?;
+    let (artifact_policy, project_config) = crate::project::load(&root)?;
     let entrypoint = root.join("wombat.lua");
 
     let target = options.host.resolved_target();
@@ -203,6 +232,9 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         tasks: Vec::new(),
         artifacts: Vec::new(),
         directories: Vec::new(),
+        artifact_policy,
+        artifact_notices: Vec::new(),
+        artifact_selections: Vec::new(),
         stack: Vec::new(),
         host: options.host,
         target,
@@ -219,6 +251,22 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         failure_frames: Vec::new(),
         failure_tail_call: false,
     }));
+
+    if let Some(config) = project_config {
+        let path = root.join(&config.path);
+        let metadata = fs::metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+        let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+        state.borrow_mut().sources.insert(
+            config.path.clone(),
+            TrackedSource {
+                manifest: config,
+                fingerprint: SourceFingerprint::from_metadata(&metadata),
+                snapshot: String::from_utf8(bytes).map_err(|_| {
+                    WombatError::configuration("repository `wombat.toml` must contain valid UTF-8")
+                })?,
+            },
+        );
+    }
 
     let source = load_tracked_source(&state, &entrypoint)?;
 
@@ -496,18 +544,156 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
         })?,
     )?;
 
+    let module_from_state = Rc::clone(&state);
+    native.set(
+        "module_from",
+        lua.create_function(move |lua, (source, target): (Value, Option<String>)| {
+            let location = caller_location(lua, &module_from_state);
+            declare_module_from(&module_from_state, source, target.as_deref(), location)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    native.set(
+        "hidden_source",
+        lua.create_function(|lua, source: String| {
+            let value = lua.create_table()?;
+            value.set("__wombat_hidden", source)?;
+            Ok(value)
+        })?,
+    )?;
+
     native.set(
         "install_path",
         lua.create_function(
-            move |lua, (source_path, target, kind, context): (String, Option<String>, String, Value)| {
+            move |lua,
+                  (source, target, kind, context, exclusions, allow_empty): (
+                Value,
+                Option<String>,
+                String,
+                Value,
+                Vec<String>,
+                bool,
+            )| {
                 let location = caller_location(lua, &state);
-                register_artifact(&state, &source_path, target.as_deref(), &kind, context, location)
-                    .map_err(mlua::Error::external)
+                let (source_path, hidden) = decode_source_selector(source)?;
+                register_artifact(
+                    &state,
+                    ArtifactDeclaration {
+                        source_path: &source_path,
+                        hidden,
+                        explicit_target: target.as_deref(),
+                        requested_kind: &kind,
+                        context,
+                        exclusions,
+                        allow_empty,
+                        location,
+                    },
+                )
+                .map_err(mlua::Error::external)
             },
         )?,
     )?;
 
     Ok(native)
+}
+
+fn decode_source_selector(value: Value) -> mlua::Result<(String, bool)> {
+    match value {
+        Value::String(value) => Ok((value.to_str()?.to_string(), false)),
+        Value::Table(value) => {
+            let source = value
+                .get::<Option<String>>("__wombat_hidden")?
+                .ok_or_else(|| {
+                    mlua::Error::external("artifact source must be a string or w.hidden() value")
+                })?;
+            Ok((source, true))
+        }
+        _ => Err(mlua::Error::external(
+            "artifact source must be a string or w.hidden() value",
+        )),
+    }
+}
+
+fn declare_module_from(
+    state: &Rc<RefCell<RuntimeState>>,
+    source: Value,
+    explicit_target: Option<&str>,
+    location: Location,
+) -> Result<()> {
+    let (declared, hidden) = decode_source_selector(source).map_err(WombatError::from)?;
+    let selector = compile_selector(&declared, hidden)?;
+    if selector.glob {
+        return Err(WombatError::configuration(
+            "w.module.from() requires an exact source directory, not a glob",
+        ));
+    }
+    let mut state = state.borrow_mut();
+    let name = state
+        .active_module()
+        .ok_or_else(|| {
+            WombatError::configuration("w.module.from() may only be called from a selected module")
+        })?
+        .to_string();
+    let record = state.modules.get(&name).expect("active module exists");
+    if record.declarations_started {
+        return Err(WombatError::configuration(format!(
+            "w.module.from() must run before artifact or task declarations at {}",
+            location.display()
+        )));
+    }
+    if record.source_base.is_some() {
+        return Err(WombatError::configuration(format!(
+            "module `{name}` declares w.module.from() more than once"
+        )));
+    }
+    let physical_relative = if selector.physical == "." {
+        String::new()
+    } else {
+        selector.physical.clone()
+    };
+    let physical = if physical_relative.is_empty() {
+        "src".to_string()
+    } else {
+        format!("src/{physical_relative}")
+    };
+    let absolute = state.root.join(&physical);
+    let metadata =
+        fs::symlink_metadata(&absolute).map_err(|error| WombatError::io(&absolute, error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(WombatError::configuration(format!(
+            "module source base `{physical}` must be a directory"
+        )));
+    }
+    let projection = if physical_relative.is_empty() {
+        crate::manifest::SourceProjection {
+            physical: String::new(),
+            logical: String::new(),
+            allocated: true,
+            hidden,
+            components: Vec::new(),
+        }
+    } else {
+        project_physical(&physical_relative, hidden)?
+    };
+    let target = match explicit_target {
+        Some(target) => Some(parse_explicit_target_root(target)?.path),
+        None if projection.allocated => Some(projection.logical.clone()),
+        None => None,
+    };
+    state
+        .modules
+        .get_mut(&name)
+        .expect("active module exists")
+        .source_base = Some(ModuleSourceBase {
+        declared,
+        expanded: selector.expanded,
+        physical,
+        logical: projection.logical,
+        target,
+        hidden,
+    });
+    Ok(())
 }
 
 fn register_input_spec(
@@ -2155,18 +2341,21 @@ fn declare_generated(
     let executable = options.get::<Option<bool>>("executable")?.unwrap_or(false);
 
     let mut state = state.borrow_mut();
-    let (_, module_anchor) = state.active_location();
+    let (_, _, module_target, _) = state.active_location();
     let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
     let target = match explicit_target.as_deref() {
         Some(target) => parse_explicit_target(target)?,
         None => {
-            let anchor = module_anchor.ok_or_else(|| {
+            let base = module_target.ok_or_else(|| {
                 WombatError::configuration(format!(
-                    "cannot infer a target for generated artifact `{name}` from root policy; provide `to` at {}",
+                    "cannot infer a target for generated artifact `{name}` from an unallocated module; provide `to` at {}",
                     location.display()
                 ))
             })?;
-            infer_target(anchor, name, InferenceBasis::ModuleAnchor)?
+            infer_target(
+                &crate::path::join_relative(&base, name),
+                format!("generated:{name}"),
+            )?
         }
     };
     state.root_policy_started = true;
@@ -2180,6 +2369,7 @@ fn declare_generated(
         source_origin: SourceOrigin::Generated {
             name: name.to_string(),
         },
+        source_projection: None,
         production: EvaluatedProduction::GeneratedLua {
             content: bytes,
             executable,
@@ -2313,7 +2503,7 @@ fn declare_task(
     }
 
     let mut state = state.borrow_mut();
-    let (_, module_anchor) = state.active_location();
+    let (_, _, module_target, _) = state.active_location();
     let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
     let identity = format!(
         "{}:{}{}",
@@ -2335,12 +2525,11 @@ fn declare_task(
     }
     let target_root = match explicit_target.as_deref() {
         Some(target) => Some(parse_explicit_target_root(target)?),
-        None => module_anchor
-            .map(|anchor| infer_target_root(anchor, "", InferenceBasis::ModuleAnchor))
+        None => module_target
+            .map(|base| infer_target_root(&base, format!("module:{owner}")))
             .transpose()?,
     }
     .map(|root| TaskTargetRoot {
-        anchor: root.anchor,
         path: root.path,
         origin: root.origin,
     });
@@ -2482,154 +2671,376 @@ fn source_executable(_path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+struct ArtifactDeclaration<'a> {
+    source_path: &'a str,
+    hidden: bool,
+    explicit_target: Option<&'a str>,
+    requested_kind: &'a str,
+    context: Value,
+    exclusions: Vec<String>,
+    allow_empty: bool,
+    location: Location,
+}
+
 fn register_artifact(
     state: &Rc<RefCell<RuntimeState>>,
-    source_path: &str,
-    explicit_target: Option<&str>,
-    requested_kind: &str,
-    context: Value,
-    location: Location,
+    declaration: ArtifactDeclaration<'_>,
 ) -> Result<()> {
-    validate_declared_source(source_path)?;
+    let ArtifactDeclaration {
+        source_path,
+        hidden,
+        explicit_target,
+        requested_kind,
+        context,
+        exclusions,
+        allow_empty,
+        location,
+    } = declaration;
     if !matches!(requested_kind, "auto" | "file" | "template") {
         return Err(WombatError::configuration(format!(
             "unsupported artifact production kind `{requested_kind}`"
         )));
     }
 
+    let mut selector = compile_selector(source_path, hidden)?;
+    let exclusion_matchers = exclusions
+        .iter()
+        .map(|value| compile_selector(value, hidden).and_then(|value| matcher(&value.physical)))
+        .collect::<Result<Vec<_>>>()?;
     let mut state = state.borrow_mut();
     let repository_root = state.root.clone();
-    let (source_base, module_anchor) = state.active_location();
-    let prefixed = if module_anchor.is_none() {
-        prefixed_source(source_path)?
-    } else {
-        None
-    };
-    let inference = match (module_anchor, prefixed) {
-        (Some(anchor), _) => Some((
-            anchor,
-            if source_path == "." { "" } else { source_path },
-            InferenceBasis::ModuleAnchor,
-        )),
-        (None, Some((anchor, relative))) => Some((anchor, relative, InferenceBasis::SourcePrefix)),
-        (None, None) => None,
-    };
-
+    let (source_base, base_logical, base_target, base_hidden) = state.active_location();
     let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
-    let absolute_source = if source_path == "." {
-        source_base
+    if let Some(module) = state.active_module().map(str::to_string) {
+        state
+            .modules
+            .get_mut(&module)
+            .expect("active module exists")
+            .declarations_started = true;
+    }
+    let mut absolute_selection = if selector.physical == "." {
+        source_base.clone()
     } else {
-        source_base.join(source_path)
+        source_base.join(&selector.physical)
     };
-    let metadata = match fs::symlink_metadata(&absolute_source) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(WombatError::configuration(format!(
-                "static artifact source `{}` does not exist or is not a regular file or directory",
-                display_path(&repository_root, &absolute_source)
-            )));
-        }
-        Err(error) => return Err(WombatError::io(&absolute_source, error)),
-    };
-    validate_source_components(&repository_root, &absolute_source)?;
-    if metadata.file_type().is_file() {
-        let production = match requested_kind {
-            "auto" | "file" => EvaluatedProduction::Static,
-            "template" => {
-                let context = FrozenValue::from_lua(context)?;
-                if !matches!(context, FrozenValue::Map(_)) {
-                    return Err(WombatError::configuration(
-                        "template `with` context must be a string-keyed map",
-                    ));
-                }
-                EvaluatedProduction::Template { context }
-            }
-            other => {
+    if !selector.glob && !selector.physical.ends_with(".tmpl") {
+        let template_physical = format!("{}.tmpl", selector.physical);
+        let template_selection = source_base.join(&template_physical);
+        let exact_metadata = fs::symlink_metadata(&absolute_selection);
+        let template_metadata = fs::symlink_metadata(&template_selection);
+        match (&exact_metadata, &template_metadata) {
+            (Ok(exact), Ok(template))
+                if exact.file_type().is_file() && template.file_type().is_file() =>
+            {
                 return Err(WombatError::configuration(format!(
-                    "unsupported artifact production kind `{other}`"
+                    "artifact source `{source_path}` is ambiguous: both `{}` and `{}` exist; name the physical `.tmpl` source explicitly or remove one candidate",
+                    display_path(&repository_root, &absolute_selection),
+                    display_path(&repository_root, &template_selection),
                 )));
             }
-        };
-        let target = match explicit_target {
-            Some(target) => parse_explicit_target(target)?,
-            None => {
-                let (anchor, mut relative, basis) = inference.ok_or_else(|| {
-                    WombatError::configuration(format!(
-                        "cannot infer a target for source `{source_path}` from an anchorless module; use a `dot_config/`, `dot_local/`, or `home/` source prefix, or provide `to`"
-                    ))
-                })?;
-                if matches!(production, EvaluatedProduction::Template { .. }) {
-                    relative = relative.strip_suffix(".tmpl").unwrap_or(relative);
-                }
-                infer_target(anchor, relative, basis)?
+            (Err(error), Ok(template))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && template.file_type().is_file() =>
+            {
+                selector.physical = template_physical;
+                selector.expanded.push_str(".tmpl");
+                absolute_selection = template_selection;
             }
+            _ => {}
+        }
+    }
+    let mut selected = Vec::new();
+    let mut selected_snapshot = None;
+    let mut selected_snapshot_root = source_base.clone();
+    let directory_selector = !selector.glob && absolute_selection.is_dir();
+    let set_selector = selector.glob || directory_selector;
+    if directory_selector && requested_kind != "auto" {
+        return Err(WombatError::configuration(format!(
+            "install.{requested_kind}() cannot select a directory; use install() for directory selection"
+        )));
+    }
+    if selector.glob {
+        let selector_matcher = matcher(&selector.physical)?;
+        let snapshot = snapshot_directory_filtered(
+            &repository_root,
+            &source_base,
+            |relative, is_directory| {
+                in_static_scope(relative, &selector.static_root)
+                    && hidden_components_authorized(relative, &selector.physical)
+                    && !is_excluded(&exclusion_matchers, relative, is_directory)
+            },
+        )?;
+        for leaf in &snapshot {
+            if selector_matcher.is_match(&leaf.relative) {
+                selected.push((leaf.relative.clone(), leaf.fingerprint.clone()));
+            }
+        }
+        selected_snapshot = Some(snapshot);
+    } else if absolute_selection.is_dir() {
+        let snapshot = snapshot_directory_filtered(
+            &repository_root,
+            &absolute_selection,
+            |relative, is_directory| {
+                !relative
+                    .split('/')
+                    .any(crate::selection::is_hidden_component)
+                    && !is_excluded(&exclusion_matchers, relative, is_directory)
+            },
+        )?;
+        for leaf in &snapshot {
+            let relative = if selector.physical == "." {
+                leaf.relative.clone()
+            } else {
+                format!("{}/{}", selector.physical, leaf.relative)
+            };
+            selected.push((relative, leaf.fingerprint.clone()));
+        }
+        selected_snapshot_root = absolute_selection.clone();
+        selected_snapshot = Some(snapshot);
+    } else {
+        if !exclusions.is_empty() || allow_empty {
+            return Err(WombatError::configuration(
+                "`exclude` and `allow_empty` are only valid for directory or glob selectors",
+            ));
+        }
+        let metadata = fs::symlink_metadata(&absolute_selection).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                WombatError::configuration(format!(
+                    "artifact source `{source_path}` does not exist beneath its declaration base"
+                ))
+            } else {
+                WombatError::io(&absolute_selection, error)
+            }
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(WombatError::configuration(format!(
+                "artifact source `{source_path}` must be a regular file or directory"
+            )));
+        }
+        selected.push((
+            selector.physical.clone(),
+            SourceFingerprint::from_metadata(&metadata),
+        ));
+    }
+    if selected.is_empty() && !(set_selector && allow_empty) {
+        return Err(WombatError::configuration(format!(
+            "artifact selector `{source_path}` matched no files; set `allow_empty = true` if this is intentional"
+        )));
+    }
+    let context = FrozenValue::from_lua(context)?;
+    if !matches!(context, FrozenValue::Null | FrozenValue::Map(_)) {
+        return Err(WombatError::configuration(
+            "template `with` context must be a string-keyed map",
+        ));
+    }
+    let explicit_root = explicit_target
+        .map(parse_explicit_target_root)
+        .transpose()?;
+    let selection_root = if selector.glob {
+        selector.static_root.trim_end_matches('/').to_string()
+    } else if set_selector {
+        selector.physical.clone()
+    } else {
+        selector
+            .physical
+            .rsplit_once('/')
+            .map_or("", |(root, _)| root)
+            .to_string()
+    };
+    let mut skipped = Vec::new();
+    let mut matched = Vec::new();
+    for (relative, fingerprint) in selected {
+        let hidden_authorized = hidden_components_authorized(&relative, &selector.physical);
+        if relative
+            .split('/')
+            .any(crate::selection::is_hidden_component)
+            && !hidden_authorized
+        {
+            continue;
+        }
+        let mut projection = project_physical(&relative, hidden_authorized)?;
+        let relative_from_root = relative
+            .strip_prefix(&selection_root)
+            .unwrap_or(&relative)
+            .trim_start_matches('/');
+        let relative_projection = if relative_from_root.is_empty() {
+            projection.clone()
+        } else {
+            project_physical(
+                relative_from_root,
+                hidden_components_authorized(relative_from_root, &selector.physical),
+            )?
+        };
+        let projected_relative = relative_projection.logical.clone();
+        let target_path = if !set_selector {
+            explicit_target.map(str::to_string).or_else(|| {
+                projection
+                    .allocated
+                    .then(|| {
+                        base_target
+                            .as_ref()
+                            .map(|base| crate::path::join_relative(base, &projection.logical))
+                    })
+                    .flatten()
+            })
+        } else if let Some(root) = &explicit_root {
+            relative_projection
+                .allocated
+                .then(|| crate::path::join_relative(&root.path, &projected_relative))
+        } else if projection.allocated {
+            base_target
+                .as_ref()
+                .map(|base| crate::path::join_relative(base, &projection.logical))
+        } else {
+            None
+        };
+        let Some(mut target_path) = target_path else {
+            skipped.push(relative.clone());
+            continue;
+        };
+        let template = match requested_kind {
+            "template" => true,
+            "file" => false,
+            _ => {
+                relative.ends_with(".tmpl")
+                    || (!set_selector && !matches!(context, FrozenValue::Null))
+            }
+        };
+        if template && explicit_target.is_none() {
+            target_path = target_path
+                .strip_suffix(".tmpl")
+                .unwrap_or(&target_path)
+                .to_string();
+        }
+        let source = display_path(&repository_root, &source_base.join(&relative));
+        projection.physical = source.clone();
+        let origin = if set_selector {
+            SourceOrigin::Directory {
+                declared: source_path.to_string(),
+                expanded: selector.expanded.clone(),
+                root: display_path(&repository_root, &source_base.join(&selection_root)),
+                relative: relative_from_root.to_string(),
+                exclusions: exclusions.clone(),
+                allow_empty,
+            }
+        } else {
+            SourceOrigin::Direct {
+                declared: source_path.to_string(),
+                expanded: selector.expanded.clone(),
+            }
+        };
+        let target = if !set_selector && explicit_target.is_some() {
+            parse_explicit_target(&target_path)?
+        } else if let Some(root) = &explicit_root {
+            crate::manifest::TargetPath {
+                path: target_path,
+                origin: crate::manifest::TargetOrigin::DirectoryExplicit {
+                    declared: root.path.clone(),
+                    relative: projected_relative,
+                },
+            }
+        } else {
+            infer_target(&target_path, source.clone())?
         };
         state.artifacts.push(EvaluatedArtifact {
             kind: ArtifactKind::File,
-            source: display_path(&repository_root, &absolute_source),
-            source_origin: SourceOrigin::Direct {
-                declared: source_path.to_string(),
+            source,
+            source_origin: origin,
+            source_projection: Some(projection),
+            production: if template {
+                EvaluatedProduction::Template {
+                    context: match &context {
+                        FrozenValue::Null => FrozenValue::empty_map(),
+                        value => value.clone(),
+                    },
+                }
+            } else {
+                EvaluatedProduction::Static
             },
-            production,
             target,
-            fingerprint: Some(SourceFingerprint::from_metadata(&metadata)),
-            owner,
-            declared_at: location.trace,
+            fingerprint: Some(fingerprint),
+            owner: owner.clone(),
+            declared_at: location.trace.clone(),
         });
-    } else if metadata.file_type().is_dir() {
-        if requested_kind == "template" {
+        matched.push(relative);
+    }
+    if !skipped.is_empty() {
+        if !set_selector {
             return Err(WombatError::configuration(format!(
-                "template source `{}` must be a regular file, not a directory",
-                display_path(&repository_root, &absolute_source)
+                "unallocated artifact source `{source_path}` requires an explicit `to`"
             )));
         }
-        if requested_kind == "file" {
-            return Err(WombatError::configuration(format!(
-                "static file source `{}` must be a regular file, not a directory",
-                display_path(&repository_root, &absolute_source)
-            )));
+        match state.artifact_policy.unallocated {
+            crate::manifest::UnallocatedPolicy::Ignore => {}
+            crate::manifest::UnallocatedPolicy::Warn => {
+                state.artifact_notices.push(ArtifactNotice {
+                    kind: ArtifactNoticeKind::UnallocatedSkipped,
+                    owner: owner.clone(),
+                    selector: source_path.to_string(),
+                    skipped: skipped.clone(),
+                    declared_at: location.trace.clone(),
+                })
+            }
+            crate::manifest::UnallocatedPolicy::Error => {
+                return Err(WombatError::configuration(format!(
+                    "artifact selector `{source_path}` contains unallocated children without an explicit `to`"
+                )));
+            }
         }
-        let (anchor, relative_root, basis) = inference.ok_or_else(|| {
-            WombatError::configuration(format!(
-                "directory source `{source_path}` is outside canonical artifact trees; use `home/`, `dot_config/`, or `dot_local/`"
-            ))
-        })?;
-        let target_root = match explicit_target {
-            Some(target) => parse_explicit_target_root(target)?,
-            None => infer_target_root(anchor, relative_root, basis)?,
+    }
+    if set_selector && matched.is_empty() && !allow_empty {
+        return Err(WombatError::configuration(format!(
+            "artifact selector `{source_path}` produced no allocated files after exclusions and source policy; set `allow_empty = true` if this is intentional"
+        )));
+    }
+    let selection_kind = if selector.glob {
+        ArtifactSelectionKind::Glob
+    } else if set_selector {
+        ArtifactSelectionKind::Directory
+    } else {
+        ArtifactSelectionKind::Exact
+    };
+    state.artifact_selections.push(ArtifactSelection {
+        owner: owner.clone(),
+        declared: source_path.to_string(),
+        expanded: selector.expanded.clone(),
+        physical: selector.physical.clone(),
+        source_base: display_path(&repository_root, &source_base),
+        source_base_logical: base_logical,
+        source_base_target: base_target.clone(),
+        source_base_hidden: base_hidden,
+        hidden,
+        kind: selection_kind,
+        static_root: selector.static_root.clone(),
+        exclusions: exclusions.clone(),
+        allow_empty,
+        explicit_target: explicit_target.map(str::to_string),
+        matches: matched,
+        skipped_unallocated: skipped,
+        declared_at: location.trace.clone(),
+    });
+    if set_selector {
+        let snapshot = selected_snapshot.expect("set selectors record a traversal snapshot");
+        let target_root = match explicit_root {
+            Some(root) => Some(root),
+            None => base_target
+                .as_deref()
+                .map(|target| infer_target_root(target, format!("selector:{source_path}")))
+                .transpose()?,
         };
-        let snapshot = snapshot_directory(&repository_root, &absolute_source)?;
-        let resolved_root = display_path(&repository_root, &absolute_source);
-        for leaf in &snapshot {
-            let source = join_portable(&absolute_source, &leaf.relative);
-            state.artifacts.push(EvaluatedArtifact {
-                kind: ArtifactKind::File,
-                source: display_path(&repository_root, &source),
-                source_origin: SourceOrigin::Directory {
-                    declared: source_path.to_string(),
-                    root: resolved_root.clone(),
-                    relative: leaf.relative.clone(),
-                },
-                production: EvaluatedProduction::Static,
-                target: expand_target_root(&target_root, &leaf.relative)?,
-                fingerprint: Some(leaf.fingerprint.clone()),
-                owner: owner.clone(),
-                declared_at: location.trace.clone(),
-            });
-        }
         state.directories.push(EvaluatedDirectory {
             declared_source: source_path.to_string(),
-            root: resolved_root,
+            root: display_path(&repository_root, &selected_snapshot_root),
+            physical_selector: selector.physical,
+            static_root: selector.static_root,
+            hidden,
+            glob: selector.glob,
+            exclusions,
             target_root,
             owner,
             declared_at: location.trace,
             snapshot,
         });
-    } else {
-        return Err(WombatError::configuration(format!(
-            "static artifact source `{}` is not a regular file or directory",
-            display_path(&repository_root, &absolute_source)
-        )));
     }
     Ok(())
 }
@@ -2738,65 +3149,69 @@ fn evaluate_module(lua: &Lua, state: &Rc<RefCell<RuntimeState>>, name: &str) -> 
 }
 
 fn resolve_module(root: &Path, name: &str) -> Result<ModuleLocation> {
-    let candidates = [
-        (
-            root.join("modules").join(format!("{name}.lua")),
-            root.to_path_buf(),
-            None,
-        ),
-        (
-            root.join("modules")
-                .join("dot_config")
-                .join(format!("{name}.lua")),
-            root.join("dot_config"),
-            Some(SourceAnchor::DotConfig),
-        ),
-        (
-            root.join("modules")
-                .join("home")
-                .join(format!("{name}.lua")),
-            root.join("home"),
-            Some(SourceAnchor::Home),
-        ),
-        (
-            root.join("modules")
-                .join("dot_local")
-                .join(format!("{name}.lua")),
-            root.join("dot_local"),
-            Some(SourceAnchor::DotLocal),
-        ),
-    ];
+    let mut candidates = Vec::new();
+    collect_module_files(&root.join("modules"), &mut candidates)?;
     let matches = candidates
         .iter()
-        .filter(|(file, _, _)| file.is_file())
+        .filter(|file| {
+            file.extension().is_some_and(|ext| ext == "lua")
+                && file.file_stem().is_some_and(|stem| stem == name)
+        })
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [(file, source_base, source_anchor)] => Ok(ModuleLocation {
-            file: file.clone(),
-            source_base: source_base.clone(),
-            source_anchor: *source_anchor,
+        [file] => Ok(ModuleLocation {
+            file: (*file).clone(),
         }),
-        [] => {
-            let searched = candidates
-                .iter()
-                .map(|(file, _, _)| display_path(root, file))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(WombatError::configuration(format!(
-                "module `{name}` was not found; searched {searched}"
-            )))
-        }
+        [] => Err(WombatError::configuration(format!(
+            "module `{name}` was not found beneath `modules/`"
+        ))),
         _ => {
             let found = matches
                 .iter()
-                .map(|(file, _, _)| display_path(root, file))
+                .map(|file| display_path(root, file))
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(WombatError::configuration(format!(
-                "module `{name}` is ambiguous across module anchors: {found}"
+                "module id `{name}` is duplicated by filename stem: {found}"
             )))
         }
     }
+}
+
+fn collect_module_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(WombatError::io(directory, error)),
+    };
+    let mut entries = entries
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| WombatError::io(directory, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(WombatError::configuration(format!(
+                "module path `{}` must not be a symbolic link",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_module_files(&path, files)?;
+        } else if metadata.is_file() {
+            if path.extension().is_some_and(|ext| ext == "lua") {
+                files.push(path);
+            }
+        } else {
+            return Err(WombatError::configuration(format!(
+                "module path `{}` must be a regular file or directory",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_dependency_cycles(state: &RuntimeState) -> Result<()> {
@@ -2863,6 +3278,7 @@ fn build_manifest(
                 .map(|location| display_path(&state.root, &location.file))
                 .expect("selected modules are evaluated before manifest construction"),
             config: module.config(),
+            source_base: module.source_base.clone(),
         })
         .collect();
     let dependencies = state.dependencies.iter().cloned().collect();
@@ -2870,7 +3286,7 @@ fn build_manifest(
     artifacts.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(&right.target.key())
+            .cmp(right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_at.cmp(&right.declared_at))
@@ -2902,6 +3318,9 @@ fn build_manifest(
         requirements: state.requirements.clone(),
         preparations,
         tasks: state.tasks.clone(),
+        artifact_policy: state.artifact_policy,
+        artifact_notices: state.artifact_notices.clone(),
+        artifact_selections: state.artifact_selections.clone(),
         artifacts,
         directories,
     }
@@ -2925,7 +3344,7 @@ pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Re
     ordered.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(&right.target.key())
+            .cmp(right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
     });
@@ -2942,7 +3361,7 @@ pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Re
                 .all(|prior| prior.target.key() != artifact.target.key())
         {
             return Err(artifact_conflict(
-                &artifact.target.display,
+                &artifact.target.path,
                 "multiple artifacts resolve to the same target",
                 &duplicates,
             ));
@@ -2951,23 +3370,20 @@ pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Re
         let descendants = ordered
             .iter()
             .skip(index + 1)
-            .filter(|descendant| {
-                artifact.target.anchor == descendant.target.anchor
-                    && is_path_ancestor(&artifact.target.path, &descendant.target.path)
-            })
+            .filter(|descendant| is_path_ancestor(&artifact.target.path, &descendant.target.path))
             .copied()
             .collect::<Vec<_>>();
         if !descendants.is_empty() {
             let displays = descendants
                 .iter()
-                .map(|descendant| format!("`{}`", descendant.target.display))
+                .map(|descendant| format!("`{}`", descendant.target.path))
                 .collect::<Vec<_>>()
                 .join(", ");
             let mut conflicts = Vec::with_capacity(descendants.len() + 1);
             conflicts.push(*artifact);
             conflicts.extend(descendants);
             return Err(artifact_conflict(
-                &artifact.target.display,
+                &artifact.target.path,
                 &format!("file target is an ancestor of {displays}"),
                 &conflicts,
             ));
@@ -2987,13 +3403,14 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
         .iter()
         .map(|artifact| {
             let source = match &artifact.source_origin {
-                SourceOrigin::Direct { declared } => {
+                SourceOrigin::Direct { declared, .. } => {
                     format!("`{}` (direct source `{declared}`)", artifact.source)
                 }
                 SourceOrigin::Directory {
                     declared,
                     root,
                     relative,
+                    ..
                 } => format!(
                     "`{}` (leaf `{relative}` expanded from directory `{declared}` at `{root}`)",
                     artifact.source

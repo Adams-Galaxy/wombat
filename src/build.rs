@@ -13,15 +13,14 @@ use tempfile::{Builder, NamedTempFile};
 use crate::context::HostContext;
 use crate::manifest::{
     Artifact, EvaluatedArtifact, EvaluatedDirectory, EvaluatedProduction, FileContent,
-    MANIFEST_FORMAT_VERSION, Manifest, Production, RendererIdentity, SourceOrigin, TargetAnchor,
-    TargetOrigin,
+    MANIFEST_FORMAT_VERSION, Manifest, Production, RendererIdentity, SourceOrigin, TargetOrigin,
 };
 use crate::path::{
-    display_target, expand_target_root, infer_target, parse_explicit_target,
-    parse_explicit_target_root, validate_declared_source, validate_relative_path,
+    display_target, expand_target_root, parse_explicit_target, parse_explicit_target_root,
+    validate_declared_source, validate_relative_path,
 };
 use crate::runtime::{EvaluationOptions, EvaluationOutcome, evaluate_with};
-use crate::source::{SourceFingerprint, fingerprint_regular_file, snapshot_directory};
+use crate::source::{SourceFingerprint, fingerprint_regular_file, snapshot_directory_filtered};
 use crate::{Result, WombatError};
 
 const WORKSPACE_FORMAT_VERSION: u32 = 1;
@@ -174,6 +173,9 @@ struct IdentityPayload<'a> {
     requirements: &'a [crate::manifest::Requirement],
     preparations: &'a [crate::manifest::ProviderPreparation],
     tasks: &'a [crate::manifest::Task],
+    artifact_policy: &'a crate::manifest::ArtifactPolicy,
+    artifact_notices: &'a [crate::manifest::ArtifactNotice],
+    artifact_selections: &'a [crate::manifest::ArtifactSelection],
     artifacts: &'a [Artifact],
 }
 
@@ -676,9 +678,18 @@ fn validate_build_location(source_root: &Path, build_dir: &Path) -> Result<()> {
     }
     if let Ok(relative) = build_dir.strip_prefix(source_root)
         && let Some(Component::Normal(first)) = relative.components().next()
-        && ["modules", "lua", "home", "dot_config", "dot_local"]
-            .iter()
-            .any(|reserved| first == *reserved)
+        && [
+            "modules",
+            "lua",
+            "tasks",
+            "providers",
+            "src",
+            "home",
+            "dot_config",
+            "dot_local",
+        ]
+        .iter()
+        .any(|reserved| first == *reserved)
     {
         return Err(WombatError::configuration(format!(
             "build directory `{}` must not be inside repository control or artifact roots",
@@ -779,10 +790,6 @@ fn materialise_inner(
 ) -> Result<Manifest> {
     let tree = product_root.join("tree");
     fs::create_dir(&tree).map_err(|error| WombatError::io(&tree, error))?;
-    for anchor in ["home", "config"] {
-        let path = tree.join(anchor);
-        fs::create_dir(&path).map_err(|error| WombatError::io(&path, error))?;
-    }
 
     let mut artifacts = Vec::with_capacity(desired.artifacts.len());
     for (index, artifact) in desired.artifacts.iter().enumerate() {
@@ -811,6 +818,9 @@ fn materialise_inner(
         requirements: desired.requirements,
         preparations: desired.preparations,
         tasks: desired.tasks.into_iter().map(|task| task.task).collect(),
+        artifact_policy: desired.artifact_policy,
+        artifact_notices: desired.artifact_notices,
+        artifact_selections: desired.artifact_selections,
         artifacts,
     };
     manifest.build_id = compute_build_id(&manifest)?;
@@ -901,11 +911,7 @@ fn materialise_artifact(
     cache: Option<&crate::cache::BuildCache>,
 ) -> Result<Artifact> {
     let source_path = source_root.join(&artifact.source);
-    let anchor = match artifact.target.anchor {
-        TargetAnchor::Home => "home",
-        TargetAnchor::Config => "config",
-    };
-    let destination = tree.join(anchor).join(&artifact.target.path);
+    let destination = tree.join(&artifact.target.path);
     let parent = destination.parent().expect("file artifacts have a parent");
     fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
     let (production, content) = match &artifact.production {
@@ -975,6 +981,7 @@ fn materialise_artifact(
         kind: artifact.kind,
         source: artifact.source.clone(),
         source_origin: artifact.source_origin.clone(),
+        source_projection: artifact.source_projection.clone(),
         production,
         target: artifact.target.clone(),
         content,
@@ -1410,7 +1417,31 @@ fn revalidate_sources(
     }
     for directory in directories {
         let source = source_root.join(&directory.root);
-        if snapshot_directory(source_root, &source)? != directory.snapshot {
+        let exclusion_matchers = directory
+            .exclusions
+            .iter()
+            .map(|value| {
+                crate::selection::compile_selector(value, directory.hidden)
+                    .and_then(|selector| crate::selection::matcher(&selector.physical))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let snapshot =
+            snapshot_directory_filtered(source_root, &source, |relative, is_directory| {
+                let visible = if directory.glob {
+                    crate::selection::in_static_scope(relative, &directory.static_root)
+                        && crate::selection::hidden_components_authorized(
+                            relative,
+                            &directory.physical_selector,
+                        )
+                } else {
+                    !relative
+                        .split('/')
+                        .any(crate::selection::is_hidden_component)
+                };
+                visible
+                    && !crate::selection::is_excluded(&exclusion_matchers, relative, is_directory)
+            })?;
+        if snapshot != directory.snapshot {
             return Err(WombatError::configuration(format!(
                 "static directory source `{}` changed during materialisation",
                 source.display()
@@ -1487,6 +1518,9 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
         requirements: &manifest.requirements,
         preparations: &manifest.preparations,
         tasks: &manifest.tasks,
+        artifact_policy: &manifest.artifact_policy,
+        artifact_notices: &manifest.artifact_notices,
+        artifact_selections: &manifest.artifact_selections,
         artifacts: &manifest.artifacts,
     };
     let bytes = serde_json::to_vec(&payload)?;
@@ -1695,6 +1729,41 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 module.name, module.source
             )));
         }
+        if let Some(base) = &module.source_base {
+            let compiled = crate::selection::compile_selector(&base.declared, base.hidden)?;
+            let expected_physical = if compiled.physical == "." {
+                "src".to_string()
+            } else {
+                format!("src/{}", compiled.physical)
+            };
+            if base.expanded != compiled.expanded || base.physical != expected_physical {
+                return Err(WombatError::configuration(format!(
+                    "manifest module `{}` has inconsistent source-base projection",
+                    module.name
+                )));
+            }
+            let projection = if compiled.physical == "." {
+                crate::manifest::SourceProjection {
+                    physical: String::new(),
+                    logical: String::new(),
+                    allocated: true,
+                    hidden: base.hidden,
+                    components: Vec::new(),
+                }
+            } else {
+                crate::selection::project_physical(&compiled.physical, base.hidden)?
+            };
+            if base.logical != projection.logical || (base.target.is_none() && projection.allocated)
+            {
+                return Err(WombatError::configuration(format!(
+                    "manifest module `{}` has inconsistent logical or target source base",
+                    module.name
+                )));
+            }
+            if let Some(target) = &base.target {
+                parse_explicit_target_root(target)?;
+            }
+        }
     }
     if !manifest
         .dependencies
@@ -1727,11 +1796,17 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         "target",
     )?;
     validate_tasks(manifest, &source_paths)?;
+    validate_artifact_metadata(
+        manifest.artifact_policy,
+        &manifest.artifact_notices,
+        &manifest.artifact_selections,
+        &source_paths,
+    )?;
     if !manifest.artifacts.windows(2).all(|pair| {
         pair[0]
             .target
             .key()
-            .cmp(&pair[1].target.key())
+            .cmp(pair[1].target.key())
             .then_with(|| pair[0].owner.cmp(&pair[1].owner))
             .then_with(|| pair[0].source.cmp(&pair[1].source))
             .then_with(|| pair[0].declared_at.cmp(&pair[1].declared_at))
@@ -1749,18 +1824,52 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest artifact declaration",
         )?;
         validate_relative_path(&artifact.target.path, "manifest target path")?;
+        if let Some(projection) = &artifact.source_projection {
+            if projection.physical != artifact.source {
+                return Err(WombatError::configuration(
+                    "manifest source projection does not identify its artifact source",
+                ));
+            }
+            if projection.components.is_empty() {
+                return Err(WombatError::configuration(
+                    "manifest source projection requires parsed components",
+                ));
+            }
+            let relative = projection
+                .components
+                .iter()
+                .map(|component| component.physical.as_str())
+                .collect::<Vec<_>>()
+                .join("/");
+            let expected = crate::selection::project_physical(&relative, projection.hidden)?;
+            if expected.logical != projection.logical
+                || expected.allocated != projection.allocated
+                || expected.hidden != projection.hidden
+                || expected.components != projection.components
+                || !artifact.source.ends_with(&relative)
+            {
+                return Err(WombatError::configuration(
+                    "manifest source projection is internally inconsistent",
+                ));
+            }
+        }
         match &artifact.source_origin {
-            SourceOrigin::Direct { declared } => {
+            SourceOrigin::Direct { declared, .. } => {
                 validate_declared_source(declared)?;
                 if declared == "." {
                     return Err(WombatError::configuration(
                         "manifest direct artifact source must identify a file",
                     ));
                 }
-                let expected_source = resolve_declared_manifest_source(
-                    declared,
-                    &artifact.declared_at.primary.source,
-                );
+                let expected_source = artifact
+                    .source_projection
+                    .as_ref()
+                    .map(|value| value.physical.as_str())
+                    .ok_or_else(|| {
+                        WombatError::configuration(
+                            "manifest direct source is missing source projection",
+                        )
+                    })?;
                 if artifact.source != expected_source {
                     return Err(WombatError::configuration(format!(
                         "manifest direct source `{}` does not match declared source `{expected_source}`",
@@ -1772,30 +1881,25 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 declared,
                 root,
                 relative,
+                ..
             } => {
                 validate_declared_source(declared)?;
                 validate_relative_path(root, "manifest directory source root")?;
                 validate_relative_path(relative, "manifest directory relative path")?;
-                let expected_root = resolve_declared_manifest_source(
-                    declared,
-                    &artifact.declared_at.primary.source,
-                );
-                if root != &expected_root {
-                    return Err(WombatError::configuration(format!(
-                        "manifest directory root `{root}` does not match declared root `{expected_root}`"
-                    )));
-                }
-                let expected_source = format!("{root}/{relative}");
+                let expected_source = artifact
+                    .source_projection
+                    .as_ref()
+                    .map(|value| value.physical.as_str())
+                    .ok_or_else(|| {
+                        WombatError::configuration(
+                            "manifest directory source is missing source projection",
+                        )
+                    })?;
                 if artifact.source != expected_source {
                     return Err(WombatError::configuration(format!(
                         "manifest directory source `{}` does not match `{expected_source}`",
                         artifact.source
                     )));
-                }
-                if !matches!(artifact.production, Production::Static) {
-                    return Err(WombatError::configuration(
-                        "manifest directory-expanded artifacts must use static production",
-                    ));
                 }
             }
             SourceOrigin::Generated { name } => {
@@ -1882,93 +1986,154 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 }
             }
         }
-        let expected_display = display_target(artifact.target.anchor, &artifact.target.path);
-        if artifact.target.display != expected_display {
-            return Err(WombatError::configuration(format!(
-                "manifest target display `{}` does not match `{expected_display}`",
-                artifact.target.display
-            )));
-        }
+        let expected_display = display_target(&artifact.target.path);
+        debug_assert_eq!(expected_display, artifact.target.path);
         match &artifact.target.origin {
             TargetOrigin::Explicit { declared } => {
                 let parsed = parse_explicit_target(declared)?;
-                if parsed.anchor != artifact.target.anchor
-                    || parsed.path != artifact.target.path
-                    || parsed.display != artifact.target.display
-                {
+                if parsed.path != artifact.target.path {
                     return Err(WombatError::configuration(format!(
                         "manifest explicit target `{declared}` does not match its resolved target"
                     )));
                 }
             }
-            TargetOrigin::Inferred {
-                basis,
-                source_anchor,
-            } => {
-                let expected = manifest_declaration_anchor(&artifact.declared_at.primary.source)
-                    .map_or_else(
-                        || {
-                            crate::manifest::SourceAnchor::ALL
-                                .into_iter()
-                                .find(|anchor| {
-                                    artifact.source == anchor.source_prefix()
-                                        || artifact
-                                            .source
-                                            .starts_with(&format!("{}/", anchor.source_prefix()))
-                                })
-                                .map(|anchor| {
-                                    (crate::manifest::InferenceBasis::SourcePrefix, anchor)
-                                })
-                        },
-                        |anchor| Some((crate::manifest::InferenceBasis::ModuleAnchor, anchor)),
-                    );
-                if expected != Some((*basis, *source_anchor)) {
-                    return Err(WombatError::configuration(format!(
-                        "manifest inferred target `{}` has inconsistent inference provenance",
-                        artifact.target.display
-                    )));
-                }
-                let relative = match &artifact.source_origin {
-                    SourceOrigin::Generated { name } => name.as_str(),
-                    SourceOrigin::Task { relative, .. } => relative.as_str(),
-                    SourceOrigin::Direct { .. } | SourceOrigin::Directory { .. } => {
-                        let prefix = format!("{}/", source_anchor.source_prefix());
-                        artifact.source.strip_prefix(&prefix).ok_or_else(|| {
-                            WombatError::configuration(format!(
-                                "manifest inferred source `{}` is outside its {:?} source anchor",
-                                artifact.source, source_anchor
-                            ))
-                        })?
-                    }
-                };
-                let relative = if matches!(artifact.production, Production::Template { .. }) {
-                    relative.strip_suffix(".tmpl").unwrap_or(relative)
-                } else {
-                    relative
-                };
-                let parsed = infer_target(*source_anchor, relative, *basis)?;
-                if parsed.anchor != artifact.target.anchor
-                    || parsed.path != artifact.target.path
-                    || parsed.display != artifact.target.display
-                {
-                    return Err(WombatError::configuration(format!(
-                        "manifest inferred target `{}` does not match its concrete source",
-                        artifact.target.display
-                    )));
+            TargetOrigin::Inferred { source } => {
+                if source.is_empty() {
+                    return Err(WombatError::configuration(
+                        "manifest inferred target requires source provenance",
+                    ));
                 }
             }
             TargetOrigin::DirectoryExplicit { declared, relative } => {
                 let root = parse_explicit_target_root(declared)?;
                 let parsed = expand_target_root(&root, relative)?;
-                if parsed.anchor != artifact.target.anchor
-                    || parsed.path != artifact.target.path
-                    || parsed.display != artifact.target.display
-                {
+                if parsed.path != artifact.target.path {
                     return Err(WombatError::configuration(format!(
                         "manifest directory target `{declared}` plus `{relative}` does not match its resolved target"
                     )));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_artifact_metadata(
+    policy: crate::manifest::ArtifactPolicy,
+    notices: &[crate::manifest::ArtifactNotice],
+    selections: &[crate::manifest::ArtifactSelection],
+    source_paths: &std::collections::BTreeSet<&str>,
+) -> Result<()> {
+    use crate::manifest::{ArtifactNoticeKind, ArtifactSelectionKind, UnallocatedPolicy};
+
+    for selection in selections {
+        validate_source_trace(
+            &selection.declared_at,
+            source_paths,
+            "artifact selection declaration",
+        )?;
+        validate_relative_path(&selection.source_base, "artifact selection source base")?;
+        if selection.source_base != "src" && !selection.source_base.starts_with("src/") {
+            return Err(WombatError::configuration(
+                "artifact selection source base must live beneath `src/`",
+            ));
+        }
+        if !selection.source_base_logical.is_empty() {
+            validate_relative_path(
+                &selection.source_base_logical,
+                "artifact selection logical source base",
+            )?;
+        }
+        if let Some(target) = &selection.source_base_target {
+            parse_explicit_target_root(target)?;
+        }
+        if let Some(target) = &selection.explicit_target {
+            parse_explicit_target_root(target)?;
+        }
+        let compiled = crate::selection::compile_selector(&selection.declared, selection.hidden)?;
+        let relaxed_template = selection.kind == ArtifactSelectionKind::Exact
+            && !compiled.physical.ends_with(".tmpl")
+            && selection.physical == format!("{}.tmpl", compiled.physical)
+            && selection.expanded == format!("{}.tmpl", compiled.expanded);
+        if (!relaxed_template
+            && (selection.physical != compiled.physical || selection.expanded != compiled.expanded))
+            || selection.static_root != compiled.static_root
+        {
+            return Err(WombatError::configuration(
+                "artifact selection does not match its declared selector",
+            ));
+        }
+        let expected_kind = if compiled.glob {
+            ArtifactSelectionKind::Glob
+        } else if selection.kind == ArtifactSelectionKind::Glob {
+            return Err(WombatError::configuration(
+                "artifact selection kind is inconsistent with its selector",
+            ));
+        } else {
+            selection.kind
+        };
+        if expected_kind != selection.kind {
+            return Err(WombatError::configuration(
+                "artifact selection kind is inconsistent with its selector",
+            ));
+        }
+        if selection.kind == ArtifactSelectionKind::Exact && selection.allow_empty {
+            return Err(WombatError::configuration(
+                "exact artifact selections cannot allow an empty result",
+            ));
+        }
+        for exclusion in &selection.exclusions {
+            crate::selection::compile_selector(exclusion, selection.hidden)?;
+        }
+        for (label, paths) in [
+            ("matches", &selection.matches),
+            ("skipped sources", &selection.skipped_unallocated),
+        ] {
+            if !paths.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(WombatError::configuration(format!(
+                    "artifact selection {label} are not uniquely sorted"
+                )));
+            }
+            for path in paths {
+                validate_relative_path(path, "artifact selection result path")?;
+            }
+        }
+        if selection.matches.is_empty() && !selection.allow_empty {
+            return Err(WombatError::configuration(
+                "artifact selection without matches must explicitly allow an empty result",
+            ));
+        }
+    }
+
+    if policy.unallocated != UnallocatedPolicy::Warn && !notices.is_empty() {
+        return Err(WombatError::configuration(
+            "unallocated artifact notices require warning policy",
+        ));
+    }
+    for notice in notices {
+        if notice.kind != ArtifactNoticeKind::UnallocatedSkipped
+            || notice.skipped.is_empty()
+            || !notice.skipped.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(WombatError::configuration(
+                "manifest contains an invalid artifact notice",
+            ));
+        }
+        validate_source_trace(
+            &notice.declared_at,
+            source_paths,
+            "artifact notice declaration",
+        )?;
+        let matching = selections.iter().filter(|selection| {
+            selection.owner == notice.owner
+                && selection.declared == notice.selector
+                && selection.declared_at == notice.declared_at
+                && selection.skipped_unallocated == notice.skipped
+        });
+        if matching.count() != 1 {
+            return Err(WombatError::configuration(
+                "artifact notice does not identify exactly one source selection",
+            ));
         }
     }
     Ok(())
@@ -2072,7 +2237,7 @@ fn validate_tasks(
         {
             return Err(WombatError::configuration(format!(
                 "manifest task artifact `{}` has no matching task output",
-                artifact.target.display
+                artifact.target.path
             )));
         }
     }
@@ -2428,38 +2593,11 @@ fn validate_source_trace(
     Ok(())
 }
 
-fn resolve_declared_manifest_source(declared: &str, declared_from: &str) -> String {
-    let prefix = manifest_declaration_anchor(declared_from)
-        .map(crate::manifest::SourceAnchor::source_prefix);
-    match (prefix, declared) {
-        (Some(prefix), ".") => prefix.to_string(),
-        (Some(prefix), _) => format!("{prefix}/{declared}"),
-        (None, ".") => ".".to_string(),
-        (None, _) => declared.to_string(),
-    }
-}
-
-fn manifest_declaration_anchor(declared_from: &str) -> Option<crate::manifest::SourceAnchor> {
-    if declared_from.starts_with("modules/dot_config/") {
-        Some(crate::manifest::SourceAnchor::DotConfig)
-    } else if declared_from.starts_with("modules/dot_local/") {
-        Some(crate::manifest::SourceAnchor::DotLocal)
-    } else if declared_from.starts_with("modules/home/") {
-        Some(crate::manifest::SourceAnchor::Home)
-    } else {
-        None
-    }
-}
-
 fn verify_tree(tree: &Path, manifest: &Manifest) -> Result<()> {
     let mut expected_files = BTreeMap::new();
-    let mut expected_dirs = BTreeSet::from(["home".to_string(), "config".to_string()]);
+    let mut expected_dirs = BTreeSet::new();
     for artifact in &manifest.artifacts {
-        let anchor = match artifact.target.anchor {
-            TargetAnchor::Home => "home",
-            TargetAnchor::Config => "config",
-        };
-        let relative = format!("{anchor}/{}", artifact.target.path);
+        let relative = artifact.target.path.clone();
         if expected_files.insert(relative.clone(), artifact).is_some() {
             return Err(WombatError::configuration(format!(
                 "manifest contains duplicate tree path `{relative}`"
@@ -2911,19 +3049,19 @@ mod tests {
     use crate::runtime::evaluate;
 
     fn repository(root: &Path) {
-        fs::create_dir_all(root.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(root.join("dot_config")).unwrap();
+        fs::create_dir_all(root.join("modules")).unwrap();
+        fs::create_dir_all(root.join("src/dot_config")).unwrap();
         fs::write(
             root.join("wombat.lua"),
             "local w = require(\"wombat\")\nw.use(\"app\")\n",
         )
         .unwrap();
         fs::write(
-            root.join("modules/dot_config/app.lua"),
-            "local w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+            root.join("modules/app.lua"),
+            "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
         )
         .unwrap();
-        fs::write(root.join("dot_config/app.toml"), "version = 1\n").unwrap();
+        fs::write(root.join("src/dot_config/app.toml"), "version = 1\n").unwrap();
     }
 
     #[test]
@@ -2948,8 +3086,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let source = temporary.path().join("repository");
         let staged = temporary.path().join("staged");
-        fs::create_dir_all(source.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(source.join("dot_config")).unwrap();
+        fs::create_dir_all(source.join("modules")).unwrap();
+        fs::create_dir_all(source.join("src/dot_config")).unwrap();
         fs::create_dir(&staged).unwrap();
         fs::write(
             source.join("wombat.lua"),
@@ -2957,11 +3095,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            source.join("modules/dot_config/app.lua"),
-            "local w = require('wombat')\nw.install('app.tmpl', { with = { value = 'before' } })\n",
+            source.join("modules/app.lua"),
+            "local w = require('wombat')\nw.module.from('.config')\nw.install('app.tmpl', { with = { value = 'before' } })\n",
         )
         .unwrap();
-        let template = source.join("dot_config/app.tmpl");
+        let template = source.join("src/dot_config/app.tmpl");
         fs::write(&template, "{{ value }}\n").unwrap();
         let desired = evaluate(&source).unwrap();
 
@@ -2983,13 +3121,13 @@ mod tests {
         repository(&source);
         fs::create_dir(&staged).unwrap();
         let desired = evaluate(&source).unwrap();
-        let module = source.join("modules/dot_config/app.lua");
+        let module = source.join("modules/app.lua");
 
         let error = materialise_with_hook(&source, &staged, desired, |point| {
             if point == MaterialisationPoint::BeforeFinalValidation {
                 fs::write(
                     &module,
-                    "-- changed\nlocal w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+                    "-- changed\nlocal w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
                 )
                 .unwrap();
             }
@@ -3028,19 +3166,19 @@ mod tests {
             let temporary = tempfile::tempdir().unwrap();
             let source = temporary.path().join("repository");
             let current = temporary.path().join("current");
-            fs::create_dir_all(source.join("modules/dot_config")).unwrap();
-            fs::create_dir_all(source.join("dot_config/tree")).unwrap();
+            fs::create_dir_all(source.join("modules")).unwrap();
+            fs::create_dir_all(source.join("src/dot_config/tree")).unwrap();
             fs::write(
                 source.join("wombat.lua"),
                 "local w = require(\"wombat\")\nw.use(\"tree\")\n",
             )
             .unwrap();
             fs::write(
-                source.join("modules/dot_config/tree.lua"),
-                "local w = require(\"wombat\")\nw.install(\"tree\")\n",
+                source.join("modules/tree.lua"),
+                "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"tree\")\n",
             )
             .unwrap();
-            let leaf = source.join("dot_config/tree/file");
+            let leaf = source.join("src/dot_config/tree/file");
             fs::write(&leaf, "before\n").unwrap();
             let previous = build(BuildOptions::new(&source, &current)).unwrap();
             let desired = evaluate(&source).unwrap();
@@ -3054,11 +3192,11 @@ mod tests {
                 match mutation {
                     Mutation::Content => fs::write(&leaf, "changed\n").unwrap(),
                     Mutation::Add => {
-                        fs::write(source.join("dot_config/tree/added"), "added\n").unwrap();
+                        fs::write(source.join("src/dot_config/tree/added"), "added\n").unwrap();
                     }
                     Mutation::Remove => fs::remove_file(&leaf).unwrap(),
                     Mutation::Rename => {
-                        fs::rename(&leaf, source.join("dot_config/tree/renamed")).unwrap();
+                        fs::rename(&leaf, source.join("src/dot_config/tree/renamed")).unwrap();
                     }
                     Mutation::Type => {
                         fs::remove_file(&leaf).unwrap();
@@ -3099,7 +3237,7 @@ mod tests {
             let staged = temporary.path().join("staged");
             repository(&source);
             let previous = build(BuildOptions::new(&source, &current)).unwrap();
-            fs::write(source.join("dot_config/app.toml"), "version = 2\n").unwrap();
+            fs::write(source.join("src/dot_config/app.toml"), "version = 2\n").unwrap();
             let replacement = build(BuildOptions::new(&source, &staged)).unwrap();
             assert_ne!(previous.build_id, replacement.build_id);
 

@@ -92,7 +92,7 @@ fn setup_clones_builds_checks_deploys_and_converges_without_pulling() {
             .arg(&locator)
             .arg("--no-bootstrap")
             .arg("--yes")
-            .arg("--target-home")
+            .arg("--target-root")
             .arg(&home)
             .arg("--")
             .args(["--name", "Setup User", "--email", "setup@example.invalid"])

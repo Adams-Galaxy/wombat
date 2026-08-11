@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{Artifact, FileContent, Manifest, TargetAnchor};
+use crate::manifest::{Artifact, FileContent, Manifest};
 use crate::source::SourceFingerprint;
 use crate::state::TargetState;
 use crate::{Result, WombatError};
@@ -45,7 +45,7 @@ pub struct ReconciliationItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReconciliationPlan {
-    pub target_home: PathBuf,
+    pub target_root: PathBuf,
     pub build_id: String,
     pub items: Vec<ReconciliationItem>,
 }
@@ -74,12 +74,12 @@ pub(crate) enum ActualArtifact {
 }
 
 pub(crate) fn plan_reconciliation(
-    target_home: &Path,
+    target_root: &Path,
     desired: &Manifest,
     previous: &TargetState,
 ) -> Result<ReconciliationPlan> {
-    let target_home =
-        fs::canonicalize(target_home).map_err(|error| WombatError::io(target_home, error))?;
+    let target_root =
+        fs::canonicalize(target_root).map_err(|error| WombatError::io(target_root, error))?;
     let desired_by_target = desired
         .artifacts
         .iter()
@@ -107,11 +107,11 @@ pub(crate) fn plan_reconciliation(
         let representative = desired_artifact
             .or(previous_artifact)
             .expect("reconciliation keys have an artifact");
-        let path = target_path(&target_home, representative);
-        let actual = inspect_actual(&target_home, &path)?;
+        let path = target_path(&target_root, representative);
+        let actual = inspect_actual(&target_root, &path)?;
         let (action, reason) = classify(desired_artifact, previous_artifact, &actual);
         items.push(ReconciliationItem {
-            target: representative.target.display.clone(),
+            target: representative.target.path.clone(),
             path,
             action,
             reason,
@@ -122,7 +122,7 @@ pub(crate) fn plan_reconciliation(
     }
 
     Ok(ReconciliationPlan {
-        target_home,
+        target_root,
         build_id: desired.build_id.clone(),
         items,
     })
@@ -187,15 +187,15 @@ pub(crate) fn actual_matches(actual: &ActualArtifact, artifact: &Artifact) -> bo
     )
 }
 
-pub(crate) fn inspect_actual(target_home: &Path, path: &Path) -> Result<ActualArtifact> {
-    let relative = path.strip_prefix(target_home).map_err(|_| {
+pub(crate) fn inspect_actual(target_root: &Path, path: &Path) -> Result<ActualArtifact> {
+    let relative = path.strip_prefix(target_root).map_err(|_| {
         WombatError::configuration(format!(
-            "target path `{}` escapes target home `{}`",
+            "target path `{}` escapes target root `{}`",
             path.display(),
-            target_home.display()
+            target_root.display()
         ))
     })?;
-    let mut current = target_home.to_path_buf();
+    let mut current = target_root.to_path_buf();
     let components = relative.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
@@ -278,15 +278,12 @@ fn read_actual_file(path: &Path, before: &fs::Metadata) -> Result<ActualArtifact
     })
 }
 
-pub(crate) fn target_path(target_home: &Path, artifact: &Artifact) -> PathBuf {
-    match artifact.target.anchor {
-        TargetAnchor::Home => target_home.join(&artifact.target.path),
-        TargetAnchor::Config => target_home.join(".config").join(&artifact.target.path),
-    }
+pub(crate) fn target_path(target_root: &Path, artifact: &Artifact) -> PathBuf {
+    target_root.join(&artifact.target.path)
 }
 
-pub(crate) fn target_key(artifact: &Artifact) -> (TargetAnchor, String) {
-    (artifact.target.anchor, artifact.target.path.clone())
+pub(crate) fn target_key(artifact: &Artifact) -> String {
+    artifact.target.path.clone()
 }
 
 pub(crate) fn expected_mode(artifact: &Artifact) -> u32 {
@@ -329,8 +326,8 @@ fn digest_string(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::{ActualArtifact, ReconciliationAction, classify, expected_mode};
     use crate::manifest::{
-        Artifact, ArtifactKind, FileContent, InferenceBasis, Production, SourceAnchor,
-        SourceLocation, SourceOrigin, SourceTrace, TargetAnchor, TargetOrigin, TargetPath,
+        Artifact, ArtifactKind, FileContent, Production, SourceLocation, SourceOrigin, SourceTrace,
+        TargetOrigin, TargetPath,
     };
 
     fn artifact(owner: &str, digest: &str) -> Artifact {
@@ -339,15 +336,14 @@ mod tests {
             source: "dot_config/app".to_string(),
             source_origin: SourceOrigin::Direct {
                 declared: "app".to_string(),
+                expanded: "app".to_string(),
             },
+            source_projection: None,
             production: Production::Static,
             target: TargetPath {
-                anchor: TargetAnchor::Config,
                 path: "app".to_string(),
-                display: "~/.config/app".to_string(),
                 origin: TargetOrigin::Inferred {
-                    basis: InferenceBasis::ModuleAnchor,
-                    source_anchor: SourceAnchor::DotConfig,
+                    source: "src/dot_config/app".to_string(),
                 },
             },
             content: FileContent {

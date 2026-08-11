@@ -177,7 +177,6 @@ pub(crate) fn execute_tasks(
                 .expect("nonempty task output has a target root");
             let target = expand_target_root(
                 &EvaluatedTargetRoot {
-                    anchor: target_root.anchor,
                     path: target_root.path.clone(),
                     origin: target_root.origin.clone(),
                 },
@@ -194,6 +193,7 @@ pub(crate) fn execute_tasks(
                     identity: task.identity.clone(),
                     relative: cached.relative.clone(),
                 },
+                source_projection: None,
                 production: EvaluatedProduction::Task {
                     identity: task.identity.clone(),
                     output: cached.relative.clone(),
@@ -227,7 +227,7 @@ pub(crate) fn execute_tasks(
     desired.artifacts.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(&right.target.key())
+            .cmp(right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_at.cmp(&right.declared_at))

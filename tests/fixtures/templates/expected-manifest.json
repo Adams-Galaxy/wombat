@@ -1,16 +1,16 @@
 {
-  "format_version": 10,
+  "format_version": 11,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:71f229f25e4fc40a62dbc0e3acad4e11c6bb192fff1ef8c8543cb4fd33c1d77a",
-  "plan_id": "sha256:5471df6c4e456d4e2e283ec21bd2d0bbe15fd8933db1df2cf122f13a3fc2c4ba",
+  "build_id": "sha256:c13f4ae8281733f09e49cac5ae572e677005de9c42e3b515c5b6957cbfc7ce8f",
+  "plan_id": "sha256:a949b7926506bbb7b3c75b349a1f308066c05de7d256c62c03e806681049c8b2",
   "sources": [
     {
       "path": "modules/dot_config/starship.lua",
-      "digest": "sha256:5a3d4d93815d1c7a9d7b4fd20c0f2f046368523f77ef95e5e06f334e7d386708"
+      "digest": "sha256:544b7cdebca73731ec38beb83d9aa78d747b36dc8a0ba4eb97955767bde26563"
     },
     {
       "path": "modules/dot_config/wezterm.lua",
-      "digest": "sha256:6d488e030a386933d59433e61f689160f07806e5a3c03912b1dd9068b4ac8793"
+      "digest": "sha256:d91063000f2ca7b4ec30439487781d4bbbff9b534f36e30c2b7f740c0f57e141"
     },
     {
       "path": "modules/theme.lua",
@@ -35,7 +35,15 @@
     {
       "name": "starship",
       "source": "modules/dot_config/starship.lua",
-      "config": {}
+      "config": {},
+      "source_base": {
+        "declared": ".config",
+        "expanded": ".config",
+        "physical": "src/dot_config",
+        "logical": ".config",
+        "target": ".config",
+        "hidden": false
+      }
     },
     {
       "name": "theme",
@@ -45,7 +53,15 @@
     {
       "name": "wezterm",
       "source": "modules/dot_config/wezterm.lua",
-      "config": {}
+      "config": {},
+      "source_base": {
+        "declared": ".config",
+        "expanded": ".config",
+        "physical": "src/dot_config",
+        "logical": ".config",
+        "target": ".config",
+        "hidden": false
+      }
     }
   ],
   "dependencies": [
@@ -92,7 +108,7 @@
       "declared_at": {
         "primary": {
           "source": "modules/dot_config/starship.lua",
-          "line": 2
+          "line": 3
         },
         "callers": []
       }
@@ -104,7 +120,7 @@
       "declared_at": {
         "primary": {
           "source": "modules/dot_config/wezterm.lua",
-          "line": 2
+          "line": 3
         },
         "callers": []
       }
@@ -117,13 +133,85 @@
   "requirements": [],
   "preparations": [],
   "tasks": [],
+  "artifact_policy": {
+    "unallocated": "warn"
+  },
+  "artifact_notices": [],
+  "artifact_selections": [
+    {
+      "owner": "starship",
+      "declared": "starship.toml.tmpl",
+      "expanded": "starship.toml.tmpl",
+      "physical": "starship.toml.tmpl",
+      "source_base": "src/dot_config",
+      "source_base_logical": ".config",
+      "source_base_target": ".config",
+      "source_base_hidden": false,
+      "hidden": false,
+      "kind": "exact",
+      "static_root": "starship.toml.tmpl",
+      "exclusions": [],
+      "allow_empty": false,
+      "matches": [
+        "starship.toml.tmpl"
+      ],
+      "skipped_unallocated": [],
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 16
+        },
+        "callers": []
+      }
+    },
+    {
+      "owner": "wezterm",
+      "declared": "wezterm.lua.tmpl",
+      "expanded": "wezterm.lua.tmpl",
+      "physical": "wezterm.lua.tmpl",
+      "source_base": "src/dot_config",
+      "source_base_logical": ".config",
+      "source_base_target": ".config",
+      "source_base_hidden": false,
+      "hidden": false,
+      "kind": "exact",
+      "static_root": "wezterm.lua.tmpl",
+      "exclusions": [],
+      "allow_empty": false,
+      "matches": [
+        "wezterm.lua.tmpl"
+      ],
+      "skipped_unallocated": [],
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/wezterm.lua",
+          "line": 5
+        },
+        "callers": []
+      }
+    }
+  ],
   "artifacts": [
     {
       "kind": "file",
-      "source": "dot_config/starship.toml.tmpl",
+      "source": "src/dot_config/starship.toml.tmpl",
       "source_origin": {
         "kind": "direct",
-        "declared": "starship.toml.tmpl"
+        "declared": "starship.toml.tmpl",
+        "expanded": "starship.toml.tmpl"
+      },
+      "source_projection": {
+        "physical": "src/dot_config/starship.toml.tmpl",
+        "logical": "starship.toml.tmpl",
+        "allocated": true,
+        "hidden": false,
+        "components": [
+          {
+            "physical": "starship.toml.tmpl",
+            "logical": "starship.toml.tmpl",
+            "attributes": []
+          }
+        ]
       },
       "production": {
         "kind": "template",
@@ -142,13 +230,10 @@
         }
       },
       "target": {
-        "anchor": "config",
-        "path": "starship.toml",
-        "display": "~/.config/starship.toml",
+        "path": ".config/starship.toml",
         "origin": {
           "kind": "inferred",
-          "basis": "module_anchor",
-          "source_anchor": "dot_config"
+          "source": "src/dot_config/starship.toml.tmpl"
         }
       },
       "content": {
@@ -160,17 +245,31 @@
       "declared_at": {
         "primary": {
           "source": "modules/dot_config/starship.lua",
-          "line": 15
+          "line": 16
         },
         "callers": []
       }
     },
     {
       "kind": "file",
-      "source": "dot_config/wezterm.lua.tmpl",
+      "source": "src/dot_config/wezterm.lua.tmpl",
       "source_origin": {
         "kind": "direct",
-        "declared": "wezterm.lua.tmpl"
+        "declared": "wezterm.lua.tmpl",
+        "expanded": "wezterm.lua.tmpl"
+      },
+      "source_projection": {
+        "physical": "src/dot_config/wezterm.lua.tmpl",
+        "logical": "wezterm.lua.tmpl",
+        "allocated": true,
+        "hidden": false,
+        "components": [
+          {
+            "physical": "wezterm.lua.tmpl",
+            "logical": "wezterm.lua.tmpl",
+            "attributes": []
+          }
+        ]
       },
       "production": {
         "kind": "template",
@@ -192,13 +291,10 @@
         }
       },
       "target": {
-        "anchor": "config",
-        "path": "wezterm.lua",
-        "display": "~/.config/wezterm.lua",
+        "path": ".config/wezterm.lua",
         "origin": {
           "kind": "inferred",
-          "basis": "module_anchor",
-          "source_anchor": "dot_config"
+          "source": "src/dot_config/wezterm.lua.tmpl"
         }
       },
       "content": {
@@ -210,7 +306,7 @@
       "declared_at": {
         "primary": {
           "source": "modules/dot_config/wezterm.lua",
-          "line": 4
+          "line": 5
         },
         "callers": []
       }

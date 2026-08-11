@@ -66,6 +66,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         artifacts.push(PlannedArtifact {
             source: artifact.source.clone(),
             source_origin: artifact.source_origin.clone(),
+            source_projection: artifact.source_projection.clone(),
             production,
             target: artifact.target.clone(),
             owner: artifact.owner.clone(),
@@ -89,6 +90,9 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         requirements: desired.requirements.clone(),
         preparations: desired.preparations.clone(),
         tasks: desired.tasks.iter().map(|task| task.task.clone()).collect(),
+        artifact_policy: desired.artifact_policy,
+        artifact_notices: desired.artifact_notices.clone(),
+        artifact_selections: desired.artifact_selections.clone(),
         artifacts,
     };
     plan.plan_id = compute_id(&plan)?;
@@ -176,6 +180,17 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
             "build plan tasks must not contain executed outputs",
         ));
     }
+    let source_paths = plan
+        .sources
+        .iter()
+        .map(|source| source.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    crate::build::validate_artifact_metadata(
+        plan.artifact_policy,
+        &plan.artifact_notices,
+        &plan.artifact_selections,
+        &source_paths,
+    )?;
     Ok(())
 }
 
@@ -197,6 +212,9 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         requirements: &'a [crate::manifest::Requirement],
         preparations: &'a [crate::manifest::ProviderPreparation],
         tasks: &'a [crate::manifest::Task],
+        artifact_policy: &'a crate::manifest::ArtifactPolicy,
+        artifact_notices: &'a [crate::manifest::ArtifactNotice],
+        artifact_selections: &'a [crate::manifest::ArtifactSelection],
         artifacts: &'a [PlannedArtifact],
     }
     let identity = Identity {
@@ -215,6 +233,9 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         requirements: &plan.requirements,
         preparations: &plan.preparations,
         tasks: &plan.tasks,
+        artifact_policy: &plan.artifact_policy,
+        artifact_notices: &plan.artifact_notices,
+        artifact_selections: &plan.artifact_selections,
         artifacts: &plan.artifacts,
     };
     Ok(digest(&serde_json::to_vec(&identity)?))

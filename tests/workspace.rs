@@ -15,27 +15,25 @@ impl Repository {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("repository");
         let build_dir = temporary.path().join("output");
-        fs::create_dir_all(root.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(root.join("modules/home")).unwrap();
-        fs::create_dir_all(root.join("dot_config")).unwrap();
-        fs::create_dir_all(root.join("home")).unwrap();
+        fs::create_dir_all(root.join("modules/apps")).unwrap();
+        fs::create_dir_all(root.join("src/dot_config")).unwrap();
         fs::write(
             root.join("wombat.lua"),
             "local w = require(\"wombat\")\nw.use(\"app\")\nw.use(\"shell\")\n",
         )
         .unwrap();
         fs::write(
-            root.join("modules/dot_config/app.lua"),
-            "local w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+            root.join("modules/apps/app.lua"),
+            "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
         )
         .unwrap();
         fs::write(
-            root.join("modules/home/shell.lua"),
-            "local w = require(\"wombat\")\nw.install(\".tool\")\n",
+            root.join("modules/apps/shell.lua"),
+            "local w = require(\"wombat\")\nw.module.from(\".\")\nw.install(\".tool\")\n",
         )
         .unwrap();
-        fs::write(root.join("dot_config/app.toml"), "theme = 'dark'\n").unwrap();
-        fs::write(root.join("home/.tool"), "#!/bin/sh\necho tool\n").unwrap();
+        fs::write(root.join("src/dot_config/app.toml"), "theme = 'dark'\n").unwrap();
+        fs::write(root.join("src/dot_tool"), "#!/bin/sh\necho tool\n").unwrap();
         Self {
             temporary,
             root,
@@ -84,11 +82,11 @@ fn build_product_is_exact_relocatable_and_cache_independent() {
     assert_eq!(first.build_id.len(), 71);
     assert_eq!(first.artifact_count, 2);
     assert_eq!(
-        fs::read(repository.build_dir.join("tree/config/app.toml")).unwrap(),
+        fs::read(repository.build_dir.join("tree/.config/app.toml")).unwrap(),
         b"theme = 'dark'\n"
     );
     assert_eq!(
-        fs::read(repository.build_dir.join("tree/home/.tool")).unwrap(),
+        fs::read(repository.build_dir.join("tree/.tool")).unwrap(),
         b"#!/bin/sh\necho tool\n"
     );
     assert!(verify_build(&repository.build_dir).is_ok());
@@ -117,7 +115,7 @@ fn semantic_and_file_changes_produce_new_build_identities() {
     let first = repository.build().unwrap();
 
     fs::write(
-        repository.root.join("dot_config/app.toml"),
+        repository.root.join("src/dot_config/app.toml"),
         "theme = 'light'\n",
     )
     .unwrap();
@@ -134,8 +132,8 @@ fn semantic_and_file_changes_produce_new_build_identities() {
     assert_ne!(content.build_id, configuration.build_id);
 
     fs::rename(
-        repository.root.join("modules/dot_config/app.lua"),
-        repository.root.join("modules/dot_config/renamed.lua"),
+        repository.root.join("modules/apps/app.lua"),
+        repository.root.join("modules/apps/renamed.lua"),
     )
     .unwrap();
     fs::write(
@@ -145,7 +143,16 @@ fn semantic_and_file_changes_produce_new_build_identities() {
     .unwrap();
     let ownership = repository.build().unwrap();
     assert_ne!(configuration.build_id, ownership.build_id);
-    assert_eq!(ownership.manifest.artifacts[1].owner, "renamed");
+    assert_eq!(
+        ownership
+            .manifest
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.target.path == ".config/app.toml")
+            .unwrap()
+            .owner,
+        "renamed"
+    );
 }
 
 #[cfg(unix)]
@@ -158,7 +165,7 @@ fn executable_intent_is_normalized_and_affects_identity() {
     assert!(!first.manifest.artifacts[0].content.executable);
     assert!(!first.manifest.artifacts[1].content.executable);
     assert_eq!(
-        fs::metadata(repository.build_dir.join("tree/home/.tool"))
+        fs::metadata(repository.build_dir.join("tree/.tool"))
             .unwrap()
             .permissions()
             .mode()
@@ -166,13 +173,22 @@ fn executable_intent_is_normalized_and_affects_identity() {
         0o644
     );
 
-    let source = repository.root.join("home/.tool");
+    let source = repository.root.join("src/dot_tool");
     fs::set_permissions(&source, fs::Permissions::from_mode(0o711)).unwrap();
     let executable = repository.build().unwrap();
     assert_ne!(first.build_id, executable.build_id);
-    assert!(executable.manifest.artifacts[0].content.executable);
+    assert!(
+        executable
+            .manifest
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.target.path == ".tool")
+            .unwrap()
+            .content
+            .executable
+    );
     assert_eq!(
-        fs::metadata(repository.build_dir.join("tree/home/.tool"))
+        fs::metadata(repository.build_dir.join("tree/.tool"))
             .unwrap()
             .permissions()
             .mode()
@@ -186,17 +202,17 @@ fn rebuilding_replaces_tampered_or_extra_derived_output() {
     let repository = Repository::new();
     let first = repository.build().unwrap();
     fs::write(
-        repository.build_dir.join("tree/config/app.toml"),
+        repository.build_dir.join("tree/.config/app.toml"),
         "tampered\n",
     )
     .unwrap();
-    fs::write(repository.build_dir.join("tree/config/extra"), "extra\n").unwrap();
+    fs::write(repository.build_dir.join("tree/.config/extra"), "extra\n").unwrap();
     assert!(verify_build(&repository.build_dir).is_err());
 
     let repaired = repository.build().unwrap();
     assert_eq!(repaired.status, BuildStatus::Repaired);
     assert_eq!(repaired.build_id, first.build_id);
-    assert!(!repository.build_dir.join("tree/config/extra").exists());
+    assert!(!repository.build_dir.join("tree/.config/extra").exists());
     assert!(verify_build(&repository.build_dir).is_ok());
 }
 
@@ -222,7 +238,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 
     let missing = repository.temporary.path().join("missing");
     copy_product(&repository.build_dir, &missing);
-    fs::remove_file(missing.join("tree/config/app.toml")).unwrap();
+    fs::remove_file(missing.join("tree/.config/app.toml")).unwrap();
     assert!(
         verify_build(&missing)
             .unwrap_err()
@@ -232,7 +248,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 
     let extra = repository.temporary.path().join("extra");
     copy_product(&repository.build_dir, &extra);
-    fs::write(extra.join("tree/home/extra"), "extra\n").unwrap();
+    fs::write(extra.join("tree/extra"), "extra\n").unwrap();
     assert!(
         verify_build(&extra)
             .unwrap_err()
@@ -256,7 +272,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 }
 
 #[test]
-fn verifier_rejects_v7_unknown_v10_fields_and_internally_inconsistent_provenance() {
+fn verifier_rejects_v10_unknown_v11_fields_and_internally_inconsistent_provenance() {
     let repository = Repository::new();
     repository.build().unwrap();
 
@@ -265,15 +281,15 @@ fn verifier_rejects_v7_unknown_v10_fields_and_internally_inconsistent_provenance
     let legacy_manifest = legacy.join("manifest.json");
     let mut json: serde_json::Value =
         serde_json::from_slice(&fs::read(&legacy_manifest).unwrap()).unwrap();
-    json["format_version"] = serde_json::Value::from(7);
+    json["format_version"] = serde_json::Value::from(10);
     fs::write(&legacy_manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     let error = verify_build(&legacy).unwrap_err().to_string();
     assert!(
-        error.contains("unsupported manifest format version 7"),
+        error.contains("unsupported manifest format version 10"),
         "{error}"
     );
 
-    let unknown = repository.temporary.path().join("unknown-v10-field");
+    let unknown = repository.temporary.path().join("unknown-v11-field");
     copy_product(&repository.build_dir, &unknown);
     let unknown_manifest = unknown.join("manifest.json");
     let mut json: serde_json::Value =
@@ -296,7 +312,7 @@ fn verifier_rejects_v7_unknown_v10_fields_and_internally_inconsistent_provenance
     )
     .unwrap();
     let error = verify_build(&provenance).unwrap_err().to_string();
-    assert!(error.contains("does not match declared source"), "{error}");
+    assert!(error.contains("build ID mismatch"), "{error}");
 
     let uncatalogued = repository.temporary.path().join("uncatalogued-source");
     copy_product(&repository.build_dir, &uncatalogued);
@@ -329,10 +345,10 @@ fn verifier_rejects_symlinks_non_utf8_entries_and_wrong_modes() {
 
     let linked = repository.temporary.path().join("linked");
     copy_product(&repository.build_dir, &linked);
-    fs::remove_file(linked.join("tree/config/app.toml")).unwrap();
+    fs::remove_file(linked.join("tree/.config/app.toml")).unwrap();
     symlink(
-        repository.root.join("dot_config/app.toml"),
-        linked.join("tree/config/app.toml"),
+        repository.root.join("src/dot_config/app.toml"),
+        linked.join("tree/.config/app.toml"),
     )
     .unwrap();
     assert!(
@@ -365,7 +381,7 @@ fn verifier_rejects_symlinks_non_utf8_entries_and_wrong_modes() {
     copy_product(&repository.build_dir, &invalid);
     let invalid_name_result = fs::write(
         invalid
-            .join("tree/config")
+            .join("tree/.config")
             .join(OsString::from_vec(vec![b'x', 0x80])),
         "invalid\n",
     );
@@ -384,7 +400,7 @@ fn verifier_rejects_symlinks_non_utf8_entries_and_wrong_modes() {
     let mode = repository.temporary.path().join("mode");
     copy_product(&repository.build_dir, &mode);
     fs::set_permissions(
-        mode.join("tree/config/app.toml"),
+        mode.join("tree/.config/app.toml"),
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
@@ -468,7 +484,7 @@ fn workspace_refuses_unsafe_ownership_and_source_mismatch() {
     for unsafe_path in [
         repository.root.clone(),
         repository.temporary.path().to_path_buf(),
-        repository.root.join("dot_config/build"),
+        repository.root.join("src/dot_config/build"),
         repository.root.join("dot_local/build"),
         repository.root.join("modules/build"),
     ] {
@@ -535,7 +551,7 @@ fn initialized_workspace_preserves_unrelated_top_level_files() {
     repository.build().unwrap();
     fs::write(repository.build_dir.join("notes.txt"), "user-owned note\n").unwrap();
     fs::write(
-        repository.root.join("dot_config/app.toml"),
+        repository.root.join("src/dot_config/app.toml"),
         "updated = true\n",
     )
     .unwrap();

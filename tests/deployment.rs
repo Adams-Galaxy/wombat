@@ -29,8 +29,8 @@ impl Repository {
         let build_dir = root.join("build");
         let home = temporary.path().join("home");
         let state = temporary.path().join("state");
-        fs::create_dir_all(root.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(root.join("dot_config")).unwrap();
+        fs::create_dir_all(root.join("modules")).unwrap();
+        fs::create_dir_all(root.join("src/dot_config")).unwrap();
         fs::create_dir(&home).unwrap();
         fs::write(
             root.join("wombat.lua"),
@@ -38,11 +38,11 @@ impl Repository {
         )
         .unwrap();
         fs::write(
-            root.join("modules/dot_config/app.lua"),
-            "local w = require('wombat')\nw.install('app.toml')\n",
+            root.join("modules/app.lua"),
+            "local w = require('wombat')\nw.module.from('.config')\nw.install('app.toml')\n",
         )
         .unwrap();
-        fs::write(root.join("dot_config/app.toml"), contents).unwrap();
+        fs::write(root.join("src/dot_config/app.toml"), contents).unwrap();
         Self {
             root,
             build_dir,
@@ -120,7 +120,7 @@ fn diff_apply_update_and_unchanged_form_a_complete_workflow() {
     let first = repository.build();
 
     let first_diff = diff(&repository.options()).unwrap();
-    assert!(first_diff.output.contains("Create ~/.config/app.toml"));
+    assert!(first_diff.output.contains("Create .config/app.toml"));
     assert!(!first_diff.output.contains("+theme = 'dark'"));
     assert!(first_diff.output.contains("1 changes: 1 create"));
     let patched = diff(&repository.options().with_patch(true)).unwrap();
@@ -150,7 +150,7 @@ fn diff_apply_update_and_unchanged_form_a_complete_workflow() {
     );
 
     fs::write(
-        repository.root.join("dot_config/app.toml"),
+        repository.root.join("src/dot_config/app.toml"),
         "theme = 'light'\n",
     )
     .unwrap();
@@ -177,7 +177,7 @@ fn source_only_identity_changes_advance_complete_state_without_rewriting_targets
         .modified()
         .unwrap();
 
-    let module = repository.root.join("modules/dot_config/app.lua");
+    let module = repository.root.join("modules/app.lua");
     let original = fs::read_to_string(&module).unwrap();
     fs::write(&module, format!("-- provenance only\n{original}")).unwrap();
     let second = repository.build();
@@ -211,7 +211,11 @@ fn downstream_changes_fail_skip_and_overwrite_with_incomplete_state() {
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
 
     fs::write(repository.target(), "downstream = true\n").unwrap();
-    fs::write(repository.root.join("dot_config/app.toml"), "version = 2\n").unwrap();
+    fs::write(
+        repository.root.join("src/dot_config/app.toml"),
+        "version = 2\n",
+    )
+    .unwrap();
     let desired = repository.build();
     let error = apply(&repository.options(), ConflictPolicy::Fail)
         .unwrap_err()
@@ -224,7 +228,7 @@ fn downstream_changes_fail_skip_and_overwrite_with_incomplete_state() {
 
     let skipped = apply(&repository.options(), ConflictPolicy::Skip).unwrap();
     assert_eq!(skipped.status, ApplyStatus::AppliedWithSkips);
-    assert_eq!(skipped.skipped, vec!["~/.config/app.toml"]);
+    assert_eq!(skipped.skipped, vec![".config/app.toml"]);
     assert!(repository.state_json()["complete_build_id"].is_null());
     assert_ne!(
         repository.state_json()["artifacts"][0]["content"],
@@ -247,23 +251,23 @@ fn downstream_changes_fail_skip_and_overwrite_with_incomplete_state() {
 fn skips_preserve_conflicted_records_while_committing_successful_artifacts() {
     let repository = Repository::new("unused\n");
     fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "local w = require('wombat')\nw.install('a')\nw.install('b')\n",
+        repository.root.join("modules/app.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('a')\nw.install('b')\n",
     )
     .unwrap();
-    fs::write(repository.root.join("dot_config/a"), "a1\n").unwrap();
-    fs::write(repository.root.join("dot_config/b"), "b1\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/a"), "a1\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/b"), "b1\n").unwrap();
     repository.build();
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
     let old_state = repository.state_json();
 
-    fs::write(repository.root.join("dot_config/a"), "a2\n").unwrap();
-    fs::write(repository.root.join("dot_config/b"), "b2\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/a"), "a2\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/b"), "b2\n").unwrap();
     fs::write(repository.home.join(".config/b"), "downstream\n").unwrap();
     repository.build();
     let outcome = apply(&repository.options(), ConflictPolicy::Skip).unwrap();
     assert_eq!(outcome.updated, 1);
-    assert_eq!(outcome.skipped, vec!["~/.config/b"]);
+    assert_eq!(outcome.skipped, vec![".config/b"]);
     assert_eq!(
         fs::read_to_string(repository.home.join(".config/a")).unwrap(),
         "a2\n"
@@ -288,12 +292,12 @@ fn skips_preserve_conflicted_records_while_committing_successful_artifacts() {
 fn unmanaged_collisions_are_reported_together_and_fail_without_mutation() {
     let repository = Repository::new("unused\n");
     fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "local w = require('wombat')\nw.install('a')\nw.install('b')\n",
+        repository.root.join("modules/app.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('a')\nw.install('b')\n",
     )
     .unwrap();
-    fs::write(repository.root.join("dot_config/a"), "desired a\n").unwrap();
-    fs::write(repository.root.join("dot_config/b"), "desired b\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/a"), "desired a\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/b"), "desired b\n").unwrap();
     repository.build();
     fs::create_dir_all(repository.home.join(".config")).unwrap();
     fs::write(repository.home.join(".config/a"), "existing a\n").unwrap();
@@ -301,8 +305,8 @@ fn unmanaged_collisions_are_reported_together_and_fail_without_mutation() {
     let error = apply(&repository.options(), ConflictPolicy::Fail)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("~/.config/a"), "{error}");
-    assert!(error.contains("~/.config/b"), "{error}");
+    assert!(error.contains(".config/a"), "{error}");
+    assert!(error.contains(".config/b"), "{error}");
     assert_eq!(
         fs::read_to_string(repository.home.join(".config/a")).unwrap(),
         "existing a\n"
@@ -318,11 +322,7 @@ fn stale_files_are_removed_only_when_they_still_match_previous_state() {
     let repository = Repository::new("managed = true\n");
     repository.build();
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
-    fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "return true\n",
-    )
-    .unwrap();
+    fs::write(repository.root.join("modules/app.lua"), "return true\n").unwrap();
     repository.build();
 
     let plan = diff(&repository.options()).unwrap().plan;
@@ -339,18 +339,14 @@ fn stale_files_are_removed_only_when_they_still_match_previous_state() {
     );
 
     fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "local w = require('wombat')\nw.install('app.toml')\n",
+        repository.root.join("modules/app.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('app.toml')\n",
     )
     .unwrap();
     repository.build();
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
     fs::write(repository.target(), "changed = true\n").unwrap();
-    fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "return true\n",
-    )
-    .unwrap();
+    fs::write(repository.root.join("modules/app.lua"), "return true\n").unwrap();
     repository.build();
     let error = apply(&repository.options(), ConflictPolicy::Fail)
         .unwrap_err()
@@ -403,11 +399,7 @@ fn downstream_deletion_conflicts_then_becomes_a_safe_forget_when_no_longer_desir
             .contains("deleted downstream")
     );
 
-    fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "return true\n",
-    )
-    .unwrap();
+    fs::write(repository.root.join("modules/app.lua"), "return true\n").unwrap();
     repository.build();
     let plan = diff(&repository.options()).unwrap().plan;
     assert_eq!(plan.items[0].action, ReconciliationAction::Forget);
@@ -437,8 +429,8 @@ fn identical_content_ownership_transfer_advances_state_without_rewriting() {
     )
     .unwrap();
     fs::write(
-        repository.root.join("modules/dot_config/other.lua"),
-        "local w = require('wombat')\nw.install('app.toml')\n",
+        repository.root.join("modules/other.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('app.toml')\n",
     )
     .unwrap();
     repository.build();
@@ -548,15 +540,19 @@ fn build_and_target_locks_are_held_for_the_entire_prepared_operation() {
 fn partial_filesystem_failure_keeps_old_state_and_retry_adopts_completed_files() {
     let repository = Repository::new("a = true\n");
     fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "local w = require('wombat')\nw.install('a.toml')\nw.install('b.toml')\n",
+        repository.root.join("modules/app.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('a.toml')\nw.install('b.toml')\n",
     )
     .unwrap();
-    fs::write(repository.root.join("dot_config/a.toml"), "a = true\n").unwrap();
-    fs::write(repository.root.join("dot_config/b.toml"), "b = true\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/a.toml"), "a = true\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/b.toml"), "b = true\n").unwrap();
     repository.build();
     let prepared = prepare_apply(&repository.options()).unwrap();
-    fs::write(repository.build_dir.join("tree/config/b.toml"), "corrupt\n").unwrap();
+    fs::write(
+        repository.build_dir.join("tree/.config/b.toml"),
+        "corrupt\n",
+    )
+    .unwrap();
 
     let error = prepared.apply(&Default::default()).unwrap_err().to_string();
     assert!(
@@ -591,7 +587,11 @@ fn state_write_failure_keeps_old_state_and_retry_advances_it_safely() {
     repository.build();
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
     let state_before = fs::read(repository.state_dir().join("state.json")).unwrap();
-    fs::write(repository.root.join("dot_config/app.toml"), "version = 2\n").unwrap();
+    fs::write(
+        repository.root.join("src/dot_config/app.toml"),
+        "version = 2\n",
+    )
+    .unwrap();
     repository.build();
     let prepared = prepare_apply(&repository.options()).unwrap();
     fs::set_permissions(repository.state_dir(), fs::Permissions::from_mode(0o500)).unwrap();
@@ -616,7 +616,11 @@ fn state_write_failure_keeps_old_state_and_retry_advances_it_safely() {
 #[test]
 fn binary_diff_reports_digests_sizes_and_modes_without_dumping_bytes() {
     let repository = Repository::new("text\n");
-    fs::write(repository.root.join("dot_config/app.toml"), [0, 1, 2, 3]).unwrap();
+    fs::write(
+        repository.root.join("src/dot_config/app.toml"),
+        [0, 1, 2, 3],
+    )
+    .unwrap();
     repository.build();
     let output = diff(&repository.options().with_patch(true)).unwrap().output;
     assert!(
@@ -643,18 +647,18 @@ fn target_compatibility_precedes_state_or_target_mutation_and_explicit_roots_all
     let implicit_state = repository._temporary.path().join("implicit-state");
     let options = DeploymentOptions::new(&repository.build_dir, &repository.home)
         .with_state_root(&implicit_state)
-        .with_target_home_explicit(false)
+        .with_target_root_explicit(false)
         .with_host(host(OperatingSystemName::Macos, Architecture::Aarch64));
     let error = prepare_apply(&options).unwrap_err().to_string();
     assert!(error.contains("target OS `linux`"), "{error}");
     assert!(error.contains("host OS `macos`"), "{error}");
-    assert!(error.contains("--target-home"), "{error}");
+    assert!(error.contains("--target-root"), "{error}");
     assert!(!implicit_state.exists());
     assert!(!repository.target().exists());
 
     let explicit = DeploymentOptions::new(&repository.build_dir, &repository.home)
         .with_state_root(&repository.state)
-        .with_target_home_explicit(true)
+        .with_target_root_explicit(true)
         .with_host(host(OperatingSystemName::Macos, Architecture::Aarch64));
     let prepared = prepare_apply(&explicit).unwrap();
     assert_eq!(prepared.warnings().len(), 1);
@@ -669,12 +673,12 @@ fn target_compatibility_precedes_state_or_target_mutation_and_explicit_roots_all
 fn focused_prepared_diff_contains_only_the_selected_conflict() {
     let repository = Repository::new("first = 1\n");
     fs::write(
-        repository.root.join("modules/dot_config/app.lua"),
-        "local w = require('wombat')\nw.install('app.toml')\nw.install('other.toml')\n",
+        repository.root.join("modules/app.lua"),
+        "local w = require('wombat')\nw.module.from('.config')\nw.install('app.toml')\nw.install('other.toml')\n",
     )
     .unwrap();
     fs::write(
-        repository.root.join("dot_config/other.toml"),
+        repository.root.join("src/dot_config/other.toml"),
         "second = 1\n",
     )
     .unwrap();
@@ -686,16 +690,20 @@ fn focused_prepared_diff_contains_only_the_selected_conflict() {
         "downstream = 'second'\n",
     )
     .unwrap();
-    fs::write(repository.root.join("dot_config/app.toml"), "first = 2\n").unwrap();
     fs::write(
-        repository.root.join("dot_config/other.toml"),
+        repository.root.join("src/dot_config/app.toml"),
+        "first = 2\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.root.join("src/dot_config/other.toml"),
         "second = 2\n",
     )
     .unwrap();
     repository.build();
     let prepared = prepare_apply(&repository.options()).unwrap();
-    let focused = prepared.rendered_diff_for("~/.config/app.toml").unwrap();
-    assert!(focused.contains("~/.config/app.toml"), "{focused}");
+    let focused = prepared.rendered_diff_for(".config/app.toml").unwrap();
+    assert!(focused.contains(".config/app.toml"), "{focused}");
     assert!(!focused.contains("other.toml"), "{focused}");
     assert!(focused.contains("downstream = 'first'"), "{focused}");
 }
@@ -793,7 +801,7 @@ fn cli_deploy_builds_and_applies_once_and_noninteractive_conflicts_fail() {
             "--source",
             repository.root.to_str().unwrap(),
             "deploy",
-            "--target-home",
+            "--target-root",
             repository.home.to_str().unwrap(),
         ],
         repository._temporary.path(),
@@ -811,13 +819,13 @@ fn cli_deploy_builds_and_applies_once_and_noninteractive_conflicts_fail() {
     );
 
     fs::write(repository.target(), "downstream = true\n").unwrap();
-    fs::write(repository.root.join("dot_config/app.toml"), "cli = 2\n").unwrap();
+    fs::write(repository.root.join("src/dot_config/app.toml"), "cli = 2\n").unwrap();
     let output = run_wombat(
         &[
             "--source",
             repository.root.to_str().unwrap(),
             "deploy",
-            "--target-home",
+            "--target-root",
             repository.home.to_str().unwrap(),
         ],
         repository._temporary.path(),
@@ -835,15 +843,15 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
     let build = repository.build_dir.to_str().unwrap();
     let home = repository.home.to_str().unwrap();
     let output = run_wombat(
-        &["diff", "-B", build, "--target-home", home],
+        &["diff", "-B", build, "--target-root", home],
         repository._temporary.path(),
         &repository.home,
         &repository.state,
     );
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Create ~/.config/app.toml"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Create .config/app.toml"));
     let output = run_wombat(
-        &["apply", "-B", build, "--target-home", home],
+        &["apply", "-B", build, "--target-root", home],
         repository._temporary.path(),
         &repository.home,
         &repository.state,
@@ -855,14 +863,18 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
     );
 
     fs::write(repository.target(), "downstream = true\n").unwrap();
-    fs::write(repository.root.join("dot_config/app.toml"), "version = 2\n").unwrap();
+    fs::write(
+        repository.root.join("src/dot_config/app.toml"),
+        "version = 2\n",
+    )
+    .unwrap();
     repository.build();
     let skipped = run_wombat_with_input(
         &[
             "apply",
             "-B",
             build,
-            "--target-home",
+            "--target-root",
             home,
             "--conflict",
             "ask",
@@ -889,7 +901,7 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
             "apply",
             "-B",
             build,
-            "--target-home",
+            "--target-root",
             home,
             "--conflict",
             "ask",
@@ -979,11 +991,11 @@ fn unsupported_target_state_versions_are_rejected() {
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
     let state_path = repository.state_dir().join("state.json");
     let mut state = repository.state_json();
-    state["format_version"] = serde_json::json!(3);
+    state["format_version"] = serde_json::json!(2);
     fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let error = diff(&repository.options()).unwrap_err().to_string();
     assert!(
-        error.contains("unsupported target state format version 3") && error.contains("expected 2"),
+        error.contains("unsupported target state format version 2") && error.contains("expected 3"),
         "{error}"
     );
 }

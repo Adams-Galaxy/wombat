@@ -21,8 +21,8 @@ impl CliFixture {
         let xdg = temporary.path().join("xdg");
         let repository = temporary.path().join("repository");
         let unrelated = temporary.path().join("unrelated");
-        fs::create_dir_all(repository.join("modules/dot_config")).unwrap();
-        fs::create_dir_all(repository.join("dot_config")).unwrap();
+        fs::create_dir_all(repository.join("modules")).unwrap();
+        fs::create_dir_all(repository.join("src/dot_config")).unwrap();
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&unrelated).unwrap();
         fs::write(
@@ -31,11 +31,11 @@ impl CliFixture {
         )
         .unwrap();
         fs::write(
-            repository.join("modules/dot_config/app.lua"),
-            "local w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+            repository.join("modules/app.lua"),
+            "local w = require(\"wombat\")\nw.module.from(\".config\")\nw.install(\"app.toml\")\n",
         )
         .unwrap();
-        fs::write(repository.join("dot_config/app.toml"), "app = true\n").unwrap();
+        fs::write(repository.join("src/dot_config/app.toml"), "app = true\n").unwrap();
         Self {
             temporary,
             home,
@@ -156,7 +156,7 @@ fn explicit_source_uses_configured_task_interpreter() {
     let fixture = CliFixture::new();
     fs::create_dir_all(fixture.repository.join("tasks")).unwrap();
     fs::write(
-        fixture.repository.join("modules/dot_config/app.lua"),
+        fixture.repository.join("modules/app.lua"),
         "local w = require('wombat')\nw.build.task('generate.py')\n",
     )
     .unwrap();
@@ -184,7 +184,7 @@ fn explicit_source_uses_configured_task_interpreter() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("generate.py: running"));
     assert_eq!(
-        fs::read_to_string(fixture.repository.join("build/tree/config/configured")).unwrap(),
+        fs::read_to_string(fixture.repository.join("build/tree/configured")).unwrap(),
         "yes\n"
     );
     let manifest: serde_json::Value =
