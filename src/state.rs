@@ -354,6 +354,9 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         observations: Vec::new(),
         modules: Vec::new(),
         dependencies: Vec::new(),
+        providers: Vec::new(),
+        requirements: Vec::new(),
+        preparations: Vec::new(),
         artifacts: artifacts.iter().map(AppliedArtifact::to_artifact).collect(),
     };
     crate::build::validate_manifest(&manifest)

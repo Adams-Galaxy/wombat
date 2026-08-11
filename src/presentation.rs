@@ -65,6 +65,14 @@ impl Presenter {
                 .map_or((line, ""), |body| (body, "\n"));
             let styled = if body.starts_with("Create ") || body.starts_with("Adopt ") {
                 self.style_action(body, Role::Success)
+            } else if body.trim_start().starts_with("satisfied ") {
+                self.paint(Role::Success, body)
+            } else if body.trim_start().starts_with("missing ")
+                || body.trim_start().starts_with("outdated ")
+            {
+                self.paint(Role::Warning, body)
+            } else if body.trim_start().starts_with("unavailable ") {
+                self.paint(Role::Error, body)
             } else if body.starts_with("Update ")
                 || body.starts_with("AdvanceState ")
                 || body.starts_with("Forget ")
@@ -92,6 +100,8 @@ impl Presenter {
                 || body == "Repository build inputs"
                 || body == "Options:"
                 || body.starts_with("Usage:")
+                || body.starts_with("requirements for ")
+                || body.starts_with("bootstrap will reconcile:")
             {
                 self.paint(Role::Heading, body)
             } else if body.trim_start().starts_with('-') && body.contains("--") {

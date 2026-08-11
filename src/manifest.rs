@@ -5,7 +5,7 @@ use crate::frozen::FrozenValue;
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 7;
+pub const MANIFEST_FORMAT_VERSION: u32 = 9;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -64,7 +64,151 @@ pub struct Manifest {
     pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub providers: Vec<Provider>,
+    pub requirements: Vec<Requirement>,
+    pub preparations: Vec<ProviderPreparation>,
     pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    pub name: String,
+    pub priority: u32,
+    pub config: FrozenValue,
+    pub origin: ProviderOrigin,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderOrigin {
+    Builtin {
+        contract_version: u32,
+    },
+    Custom {
+        entrypoint: String,
+        files: Vec<ProviderFile>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderFile {
+    pub source: String,
+    pub payload: String,
+    pub digest: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Requirement {
+    pub kind: RequirementKind,
+    pub owner: String,
+    pub declared_at: SourceTrace,
+    pub candidates: Vec<RequirementCandidate>,
+    pub attempts: Vec<ResolutionAttempt>,
+    pub selected: u32,
+    pub choice: RequirementChoice,
+    pub binding: ProviderBinding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementKind {
+    Command,
+    Package,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RequirementCandidate {
+    Command {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        minimum: Option<String>,
+    },
+    Package {
+        name: String,
+        provider: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        minimum: Option<String>,
+        publications: Publications,
+        with: FrozenValue,
+    },
+}
+
+impl RequirementCandidate {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Command { name, .. } | Self::Package { name, .. } => name,
+        }
+    }
+
+    pub fn minimum(&self) -> Option<&str> {
+        match self {
+            Self::Command { minimum, .. } | Self::Package { minimum, .. } => minimum.as_deref(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Publications {
+    pub commands: Vec<String>,
+}
+
+impl Publications {
+    pub fn command(name: impl Into<String>) -> Self {
+        Self {
+            commands: vec![name.into()],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionAttempt {
+    pub candidate: u32,
+    pub provider: String,
+    pub outcome: ResolutionOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolutionOutcome {
+    Selected,
+    Unsupported { reason: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementChoice {
+    Required,
+    Preferred,
+    Accepted,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderBinding {
+    pub provider: String,
+    pub identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    pub publications: Publications,
+    pub data: FrozenValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPreparation {
+    pub provider: String,
+    pub identity: String,
+    pub description: String,
+    pub elevated: bool,
+    pub data: FrozenValue,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -180,6 +324,9 @@ pub(crate) struct EvaluatedManifest {
     pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub providers: Vec<Provider>,
+    pub requirements: Vec<Requirement>,
+    pub preparations: Vec<ProviderPreparation>,
     pub artifacts: Vec<EvaluatedArtifact>,
     pub directories: Vec<EvaluatedDirectory>,
 }

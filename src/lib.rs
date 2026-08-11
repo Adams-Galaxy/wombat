@@ -13,6 +13,8 @@ pub mod manifest;
 mod path;
 pub mod presentation;
 pub mod reconcile;
+pub mod repository;
+pub mod requirements;
 pub mod runtime;
 mod source;
 mod state;
@@ -36,3 +38,10 @@ pub use inspection::{InspectSection, compare, explain, inspect};
 pub use manifest::Manifest;
 pub use presentation::{ColorPolicy, Presenter, Role};
 pub use reconcile::{ReconciliationAction, ReconciliationItem, ReconciliationPlan};
+pub use repository::{
+    AcquisitionOutcome, AcquisitionStatus, RepositoryIdentity, RepositoryLocator,
+    acquire_repository,
+};
+pub use requirements::{
+    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, bootstrap, bootstrap_exact, check,
+};

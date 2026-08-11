@@ -16,6 +16,7 @@ similar = "=3.1.1"
 tempfile = "3"
 thiserror = "2.0"
 toml = "0.9"
+url = "2"
 
 [lints.rust]
 unsafe_code = "forbid"

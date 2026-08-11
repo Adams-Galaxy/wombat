@@ -129,6 +129,9 @@ struct IdentityPayload<'a> {
     observations: &'a [crate::manifest::Observation],
     modules: &'a [crate::manifest::ManifestModule],
     dependencies: &'a [crate::manifest::Dependency],
+    providers: &'a [crate::manifest::Provider],
+    requirements: &'a [crate::manifest::Requirement],
+    preparations: &'a [crate::manifest::ProviderPreparation],
     artifacts: &'a [Artifact],
 }
 
@@ -332,7 +335,15 @@ fn copy_functional_product(source: &Path, destination: &Path) -> Result<()> {
     ensure_plain_file(&manifest)?;
     fs::copy(&manifest, destination.join("manifest.json"))
         .map_err(|error| WombatError::io(&manifest, error))?;
-    copy_product_directory(&source.join("tree"), &destination.join("tree"))
+    copy_product_directory(&source.join("tree"), &destination.join("tree"))?;
+    let providers = source.join("providers");
+    if providers
+        .try_exists()
+        .map_err(|error| WombatError::io(&providers, error))?
+    {
+        copy_product_directory(&providers, &destination.join("providers"))?;
+    }
+    Ok(())
 }
 
 fn copy_product_directory(source: &Path, destination: &Path) -> Result<()> {
@@ -614,6 +625,7 @@ fn materialise_with_hook(
         artifacts.push(materialise_artifact(source_root, &tree, artifact)?);
         hook(MaterialisationPoint::AfterArtifact(index));
     }
+    materialise_provider_payloads(source_root, product_root, &desired.providers)?;
     hook(MaterialisationPoint::BeforeFinalValidation);
     revalidate_sources(source_root, &desired.artifacts, &desired.directories)?;
     revalidate_lua_sources(source_root, &desired.sources)?;
@@ -627,11 +639,63 @@ fn materialise_with_hook(
         observations: desired.observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
+        providers: desired.providers,
+        requirements: desired.requirements,
+        preparations: desired.preparations,
         artifacts,
     };
     manifest.build_id = compute_build_id(&manifest)?;
     write_manifest(&product_root.join("manifest.json"), &manifest)?;
     Ok(manifest)
+}
+
+fn materialise_provider_payloads(
+    source_root: &Path,
+    product_root: &Path,
+    providers: &[crate::manifest::Provider],
+) -> Result<()> {
+    let custom = providers
+        .iter()
+        .filter_map(|provider| match &provider.origin {
+            crate::manifest::ProviderOrigin::Custom { files, .. } => Some(files.as_slice()),
+            crate::manifest::ProviderOrigin::Builtin { .. } => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if custom.is_empty() {
+        return Ok(());
+    }
+    let payload_root = product_root.join("providers");
+    fs::create_dir(&payload_root).map_err(|error| WombatError::io(&payload_root, error))?;
+    for file in custom {
+        let source = source_root.join(&file.source);
+        reject_source_symlinks(source_root, &source)?;
+        let bytes = fs::read(&source).map_err(|error| WombatError::io(&source, error))?;
+        if digest_string(Sha256::digest(&bytes)) != file.digest
+            || u64::try_from(bytes.len()).ok() != Some(file.size)
+        {
+            return Err(WombatError::configuration(format!(
+                "provider source `{}` changed during materialisation",
+                file.source
+            )));
+        }
+        let destination = payload_root.join(&file.payload);
+        let parent = destination
+            .parent()
+            .expect("provider payload files have a parent");
+        fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
+        write_bytes(&destination, &bytes)?;
+        set_normalized_permissions(
+            &OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&destination)
+                .map_err(|error| WombatError::io(&destination, error))?,
+            false,
+            &destination,
+        )?;
+    }
+    Ok(())
 }
 
 fn revalidate_lua_sources(
@@ -1154,6 +1218,9 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
         observations: &manifest.observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
+        providers: &manifest.providers,
+        requirements: &manifest.requirements,
+        preparations: &manifest.preparations,
         artifacts: &manifest.artifacts,
     };
     let bytes = serde_json::to_vec(&payload)?;
@@ -1213,13 +1280,14 @@ fn verify_product(root: &Path) -> Result<Manifest> {
         )));
     }
     verify_tree(&root.join("tree"), &manifest)?;
+    verify_provider_payloads(root, &manifest)?;
     Ok(manifest)
 }
 
 pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.format_version != MANIFEST_FORMAT_VERSION {
         return Err(WombatError::configuration(format!(
-            "unsupported manifest format version {}; expected {MANIFEST_FORMAT_VERSION}",
+            "unsupported manifest format version {}; expected {MANIFEST_FORMAT_VERSION}; rebuild this product with the current Wombat",
             manifest.format_version
         )));
     }
@@ -1377,6 +1445,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest dependency declaration",
         )?;
     }
+    validate_provider_manifest(manifest, &source_paths)?;
     if !manifest.artifacts.windows(2).all(|pair| {
         pair[0]
             .target
@@ -1567,6 +1636,302 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn validate_provider_manifest(
+    manifest: &Manifest,
+    source_paths: &std::collections::BTreeSet<&str>,
+) -> Result<()> {
+    let mut provider_names = BTreeSet::new();
+    let mut payloads = BTreeSet::new();
+    for (index, provider) in manifest.providers.iter().enumerate() {
+        if !valid_provider_name(&provider.name) || !provider_names.insert(provider.name.as_str()) {
+            return Err(WombatError::configuration(format!(
+                "manifest provider name `{}` is invalid or duplicated",
+                provider.name
+            )));
+        }
+        if usize::try_from(provider.priority).ok() != Some(index) {
+            return Err(WombatError::configuration(
+                "manifest provider priorities must be contiguous and ordered",
+            ));
+        }
+        if !matches!(provider.config, crate::frozen::FrozenValue::Map(_)) {
+            return Err(WombatError::configuration(format!(
+                "manifest provider `{}` config must be a map",
+                provider.name
+            )));
+        }
+        validate_source_trace(
+            &provider.declared_at,
+            source_paths,
+            "manifest provider declaration",
+        )?;
+        match &provider.origin {
+            crate::manifest::ProviderOrigin::Builtin { contract_version } => {
+                if !matches!(provider.name.as_str(), "brew" | "apt") || *contract_version != 1 {
+                    return Err(WombatError::configuration(format!(
+                        "unsupported built-in provider contract `{}-v{contract_version}`",
+                        provider.name
+                    )));
+                }
+            }
+            crate::manifest::ProviderOrigin::Custom { entrypoint, files } => {
+                validate_relative_path(entrypoint, "manifest provider entrypoint")?;
+                if files.is_empty()
+                    || !files
+                        .windows(2)
+                        .all(|pair| pair[0].payload < pair[1].payload)
+                    || !files.iter().any(|file| file.payload == *entrypoint)
+                {
+                    return Err(WombatError::configuration(format!(
+                        "manifest custom provider `{}` has an invalid payload catalog",
+                        provider.name
+                    )));
+                }
+                for file in files {
+                    validate_relative_path(&file.source, "manifest provider source")?;
+                    validate_relative_path(&file.payload, "manifest provider payload")?;
+                    validate_sha256(&file.digest, "manifest provider payload digest")?;
+                    if file.size == 0
+                        || !source_paths.contains(file.source.as_str())
+                        || !payloads.insert(file.payload.as_str())
+                    {
+                        return Err(WombatError::configuration(format!(
+                            "manifest custom provider `{}` has an invalid or overlapping payload",
+                            provider.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    for requirement in &manifest.requirements {
+        validate_source_trace(
+            &requirement.declared_at,
+            source_paths,
+            "manifest requirement declaration",
+        )?;
+        if requirement.candidates.is_empty()
+            || usize::try_from(requirement.selected)
+                .ok()
+                .is_none_or(|selected| selected >= requirement.candidates.len())
+        {
+            return Err(WombatError::configuration(
+                "manifest requirement has an invalid selected candidate",
+            ));
+        }
+        let selected = &requirement.candidates[requirement.selected as usize];
+        let expected_kind = match selected {
+            crate::manifest::RequirementCandidate::Command { .. } => {
+                crate::manifest::RequirementKind::Command
+            }
+            crate::manifest::RequirementCandidate::Package { .. } => {
+                crate::manifest::RequirementKind::Package
+            }
+        };
+        if requirement.kind != expected_kind
+            || requirement.candidates.iter().any(|candidate| {
+                matches!(
+                    candidate,
+                    crate::manifest::RequirementCandidate::Command { .. }
+                ) != matches!(requirement.kind, crate::manifest::RequirementKind::Command)
+            })
+        {
+            return Err(WombatError::configuration(
+                "manifest requirement candidates are not homogeneous",
+            ));
+        }
+        for candidate in &requirement.candidates {
+            let valid_name = match candidate {
+                crate::manifest::RequirementCandidate::Command { name, .. } => {
+                    valid_product_name(name)
+                }
+                crate::manifest::RequirementCandidate::Package { name, .. } => {
+                    valid_package_name(name)
+                }
+            };
+            if !valid_name
+                || candidate
+                    .minimum()
+                    .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(WombatError::configuration(
+                    "manifest requirement contains an invalid candidate",
+                ));
+            }
+            if let crate::manifest::RequirementCandidate::Package {
+                provider,
+                publications,
+                with,
+                ..
+            } = candidate
+            {
+                if !provider_names.contains(provider.as_str())
+                    || !matches!(with, crate::frozen::FrozenValue::Map(_))
+                {
+                    return Err(WombatError::configuration(
+                        "manifest package candidate has an invalid provider or options",
+                    ));
+                }
+                validate_publications(publications)?;
+            }
+        }
+        validate_publications(&requirement.binding.publications)?;
+        if !provider_names.contains(requirement.binding.provider.as_str())
+            || requirement.binding.identity.trim().is_empty()
+            || !matches!(requirement.binding.data, crate::frozen::FrozenValue::Map(_))
+        {
+            return Err(WombatError::configuration(
+                "manifest requirement has an invalid selected binding",
+            ));
+        }
+        let selected_attempts = requirement
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                matches!(
+                    attempt.outcome,
+                    crate::manifest::ResolutionOutcome::Selected
+                )
+            })
+            .count();
+        if selected_attempts != 1
+            || requirement.attempts.last().is_none_or(|attempt| {
+                !matches!(
+                    attempt.outcome,
+                    crate::manifest::ResolutionOutcome::Selected
+                ) || attempt.candidate != requirement.selected
+                    || attempt.provider != requirement.binding.provider
+            })
+        {
+            return Err(WombatError::configuration(
+                "manifest requirement resolution attempts are inconsistent",
+            ));
+        }
+        let mut expected_attempts = Vec::new();
+        'candidates: for (candidate_index, candidate) in requirement.candidates.iter().enumerate() {
+            for provider in &manifest.providers {
+                if let crate::manifest::RequirementCandidate::Package {
+                    provider: required, ..
+                } = candidate
+                    && provider.name != *required
+                {
+                    continue;
+                }
+                expected_attempts.push((candidate_index as u32, provider.name.as_str()));
+                if candidate_index as u32 == requirement.selected
+                    && provider.name == requirement.binding.provider
+                {
+                    break 'candidates;
+                }
+            }
+        }
+        if requirement.attempts.len() != expected_attempts.len()
+            || requirement
+                .attempts
+                .iter()
+                .zip(expected_attempts)
+                .any(|(attempt, expected)| {
+                    (attempt.candidate, attempt.provider.as_str()) != expected
+                        || matches!(
+                            &attempt.outcome,
+                            crate::manifest::ResolutionOutcome::Unsupported { reason }
+                                if reason.trim().is_empty()
+                        )
+                })
+        {
+            return Err(WombatError::configuration(
+                "manifest requirement attempts do not follow candidate/provider precedence",
+            ));
+        }
+        let expected_choice = if requirement.selected == 0 {
+            match requirement.choice {
+                crate::manifest::RequirementChoice::Required => {
+                    crate::manifest::RequirementChoice::Required
+                }
+                _ => crate::manifest::RequirementChoice::Preferred,
+            }
+        } else {
+            crate::manifest::RequirementChoice::Accepted
+        };
+        if requirement.choice != expected_choice {
+            return Err(WombatError::configuration(
+                "manifest requirement choice is inconsistent with its selection",
+            ));
+        }
+    }
+    let mut preparation_identities = BTreeSet::new();
+    let mut previous_priority = None;
+    for preparation in &manifest.preparations {
+        let priority = manifest
+            .providers
+            .iter()
+            .find(|provider| provider.name == preparation.provider)
+            .map(|provider| provider.priority)
+            .ok_or_else(|| {
+                WombatError::configuration("manifest preparation references an absent provider")
+            })?;
+        if previous_priority.is_some_and(|previous| priority < previous) {
+            return Err(WombatError::configuration(
+                "manifest preparations do not follow provider priority",
+            ));
+        }
+        previous_priority = Some(priority);
+        if preparation.identity.trim().is_empty()
+            || preparation.description.trim().is_empty()
+            || !matches!(preparation.data, crate::frozen::FrozenValue::Map(_))
+            || !preparation_identities
+                .insert((preparation.provider.as_str(), preparation.identity.as_str()))
+        {
+            return Err(WombatError::configuration(
+                "manifest contains an invalid or duplicate provider preparation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+        && name.as_bytes()[0].is_ascii_lowercase()
+}
+
+fn valid_product_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+' | b'@')
+        })
+}
+
+fn valid_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+}
+
+fn validate_publications(publications: &crate::manifest::Publications) -> Result<()> {
+    if !publications
+        .commands
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+        || publications
+            .commands
+            .iter()
+            .any(|command| !valid_product_name(command))
+    {
+        return Err(WombatError::configuration(
+            "manifest command publications must be valid and uniquely sorted",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_sha256(value: &str, label: &str) -> Result<()> {
     if value.len() != 71
         || !value.starts_with("sha256:")
@@ -1685,6 +2050,100 @@ fn verify_tree(tree: &Path, manifest: &Manifest) -> Result<()> {
         return Err(WombatError::configuration(
             "build tree is missing manifest-required entries",
         ));
+    }
+    Ok(())
+}
+
+fn verify_provider_payloads(root: &Path, manifest: &Manifest) -> Result<()> {
+    let providers_root = root.join("providers");
+    let mut expected = BTreeMap::new();
+    for provider in &manifest.providers {
+        if let crate::manifest::ProviderOrigin::Custom { files, .. } = &provider.origin {
+            for file in files {
+                expected.insert(file.payload.as_str(), file);
+            }
+        }
+    }
+    if expected.is_empty() {
+        if providers_root
+            .try_exists()
+            .map_err(|error| WombatError::io(&providers_root, error))?
+        {
+            return Err(WombatError::configuration(
+                "build product contains an unexpected provider payload tree",
+            ));
+        }
+        return Ok(());
+    }
+    ensure_plain_directory(&providers_root)?;
+    let mut seen = BTreeSet::new();
+    verify_provider_directory(&providers_root, &providers_root, &expected, &mut seen)?;
+    if seen.len() != expected.len() {
+        return Err(WombatError::configuration(
+            "provider payload tree is missing manifest-required files",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_provider_directory<'a>(
+    root: &Path,
+    directory: &Path,
+    expected: &BTreeMap<&'a str, &'a crate::manifest::ProviderFile>,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| WombatError::io(directory, error))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| WombatError::io(directory, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("provider payload remains under its root")
+            .to_str()
+            .ok_or_else(|| WombatError::configuration("provider payload path is not UTF-8"))?
+            .replace('\\', "/");
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(WombatError::configuration(format!(
+                "provider payload `{relative}` must not be a symbolic link"
+            )));
+        }
+        if metadata.file_type().is_dir() {
+            let prefix = format!("{relative}/");
+            if !expected
+                .keys()
+                .any(|candidate| candidate.starts_with(&prefix))
+            {
+                return Err(WombatError::configuration(format!(
+                    "provider payload tree contains extra directory `{relative}`"
+                )));
+            }
+            verify_provider_directory(root, &path, expected, seen)?;
+        } else if metadata.file_type().is_file() {
+            let file = expected.get(relative.as_str()).ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "provider payload tree contains extra file `{relative}`"
+                ))
+            })?;
+            let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+            if u64::try_from(bytes.len()).ok() != Some(file.size)
+                || digest_string(Sha256::digest(&bytes)) != file.digest
+                || executable_intent(&metadata)
+            {
+                return Err(WombatError::configuration(format!(
+                    "provider payload `{relative}` does not match its manifest identity"
+                )));
+            }
+            seen.insert(relative);
+        } else {
+            return Err(WombatError::configuration(format!(
+                "provider payload `{relative}` must be a regular file or directory"
+            )));
+        }
     }
     Ok(())
 }
@@ -1865,7 +2324,7 @@ fn publish_with_hook(
     let mut product_was_mutated = false;
     let result = (|| {
         after_step(PublicationStep::BeforeBackup)?;
-        for name in ["tree", "manifest.json"] {
+        for name in ["tree", "providers", "manifest.json"] {
             let current = build_dir.join(name);
             if current
                 .try_exists()
@@ -1879,6 +2338,14 @@ fn publish_with_hook(
         after_step(PublicationStep::PreviousBackedUp)?;
         fs::rename(staged.join("tree"), build_dir.join("tree"))
             .map_err(|error| WombatError::io(build_dir.join("tree"), error))?;
+        let staged_providers = staged.join("providers");
+        if staged_providers
+            .try_exists()
+            .map_err(|error| WombatError::io(&staged_providers, error))?
+        {
+            fs::rename(&staged_providers, build_dir.join("providers"))
+                .map_err(|error| WombatError::io(build_dir.join("providers"), error))?;
+        }
         product_was_mutated = true;
         after_step(PublicationStep::TreePublished)?;
         fs::rename(
@@ -1903,7 +2370,7 @@ fn publish_with_hook(
 }
 
 fn restore_rollback(build_dir: &Path, rollback: &Path) -> Result<()> {
-    for name in ["tree", "manifest.json"] {
+    for name in ["tree", "providers", "manifest.json"] {
         let source = rollback.join(name);
         if source
             .try_exists()
@@ -1918,7 +2385,8 @@ fn restore_rollback(build_dir: &Path, rollback: &Path) -> Result<()> {
 
 fn remove_reserved_product(build_dir: &Path) -> Result<()> {
     remove_entry_if_exists(&build_dir.join("manifest.json"))?;
-    remove_entry_if_exists(&build_dir.join("tree"))
+    remove_entry_if_exists(&build_dir.join("tree"))?;
+    remove_entry_if_exists(&build_dir.join("providers"))
 }
 
 fn clear_directory_contents(directory: &Path) -> Result<()> {

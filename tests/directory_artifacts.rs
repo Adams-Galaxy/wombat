@@ -61,7 +61,7 @@ fn anchored_directories_expand_hidden_nested_and_dot_local_files() {
 
     let outcome = repository.build().unwrap();
     let manifest = outcome.manifest;
-    assert_eq!(manifest.format_version, 7);
+    assert_eq!(manifest.format_version, 9);
     assert_eq!(manifest.artifacts.len(), 4);
     assert!(
         manifest

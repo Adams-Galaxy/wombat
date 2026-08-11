@@ -1,7 +1,7 @@
 {
-  "format_version": 7,
+  "format_version": 9,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:3f0d308f0118946b4a2604595e6627f9c82807c57514104204d6d338db99c215",
+  "build_id": "sha256:27b67b8556d879377f87dd6802f1658cbc3e33fc425b2d3bd215747acf02ef75",
   "sources": [
     {
       "path": "modules/dot_config/config.lua",
@@ -64,6 +64,9 @@
       }
     }
   ],
+  "providers": [],
+  "requirements": [],
+  "preparations": [],
   "artifacts": [
     {
       "kind": "file",

@@ -26,6 +26,43 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Acquire a dotfiles repository, build it, bootstrap it, and deploy it.
+    Setup {
+        /// Repository owner shorthand, owner/repository, URL, or explicit local path.
+        repository: String,
+
+        /// Expand GitHub shorthand using SSH instead of HTTPS.
+        #[arg(long)]
+        ssh: bool,
+
+        /// Build workspace, relative to the acquired source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+
+        /// Home directory to mutate. Defaults to the current user's home.
+        #[arg(long)]
+        target_home: Option<PathBuf>,
+
+        /// Policy for unmanaged collisions and downstream modifications.
+        #[arg(long)]
+        conflict: Option<ConflictArg>,
+
+        /// Confirm package bootstrap non-interactively.
+        #[arg(long)]
+        yes: bool,
+
+        /// Require requirements to be satisfied without changing packages.
+        #[arg(long)]
+        no_bootstrap: bool,
+
+        /// Stop after requirements are satisfied.
+        #[arg(long)]
+        no_deploy: bool,
+
+        /// Repository-defined build inputs. Values must follow `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
+    },
     /// Evaluate and materialise a completed static build product.
     Build {
         /// Build workspace, relative to the resolved source unless absolute.
@@ -117,6 +154,22 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true)]
         project_arguments: Vec<OsString>,
     },
+    /// Check whether this local environment satisfies a completed build.
+    Check {
+        /// Build product, relative to the resolved source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+    },
+    /// Explicitly reconcile requirements for a completed local build.
+    Bootstrap {
+        /// Build product, relative to the resolved source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+
+        /// Confirm the complete bootstrap plan non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -141,6 +194,8 @@ enum InspectArg {
     Target,
     Modules,
     Dependencies,
+    Providers,
+    Requirements,
     Artifacts,
     Sources,
 }
@@ -153,6 +208,8 @@ impl From<InspectArg> for wombat::InspectSection {
             InspectArg::Target => Self::Target,
             InspectArg::Modules => Self::Modules,
             InspectArg::Dependencies => Self::Dependencies,
+            InspectArg::Providers => Self::Providers,
+            InspectArg::Requirements => Self::Requirements,
             InspectArg::Artifacts => Self::Artifacts,
             InspectArg::Sources => Self::Sources,
         }
@@ -192,8 +249,76 @@ fn main() -> ExitCode {
     let stdout = wombat::Presenter::new(cli.color.into(), io::stdout().is_terminal());
     let stderr = wombat::Presenter::new(cli.color.into(), io::stderr().is_terminal());
     let trace = cli.trace;
+    let check_command = matches!(&cli.command, Command::Check { .. });
 
+    let mut requested_exit = 0u8;
     let result = match cli.command {
+        Command::Setup {
+            repository,
+            ssh,
+            build_dir,
+            target_home,
+            conflict,
+            yes,
+            no_bootstrap,
+            no_deploy,
+            project_arguments,
+        } => (|| -> wombat::Result<()> {
+            let destination = wombat::config::resolve_source_candidate(cli.source.as_deref())?;
+            let locator = wombat::RepositoryLocator::parse(&repository, ssh)?;
+            let acquired = wombat::acquire_repository(locator, &destination)?;
+            println!(
+                "{} repository {} at {}",
+                stdout.paint(
+                    wombat::Role::Success,
+                    match acquired.status {
+                        wombat::AcquisitionStatus::Cloned => "cloned",
+                        wombat::AcquisitionStatus::Reused => "reused",
+                    }
+                ),
+                stdout.paint(wombat::Role::Identity, &repository),
+                stdout.paint(wombat::Role::Path, acquired.destination.to_string_lossy())
+            );
+            let source_root = wombat::config::resolve_source(Some(&acquired.destination))?;
+            let target_home_explicit = target_home.is_some();
+            let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
+            let outcome = wombat::build(
+                wombat::BuildOptions::new(&source_root, build_dir)
+                    .with_project_arguments(project_arguments),
+            )?;
+            print_build_outcome(&outcome, stdout);
+            let initial = wombat::check(&outcome.build_dir)?;
+            print!("{}", stdout.human_output(&initial.display()));
+            if initial.operational_failure() {
+                return Err(wombat::WombatError::configuration(
+                    "setup cannot continue because requirement checking failed operationally",
+                ));
+            }
+            if no_bootstrap && !initial.satisfied() {
+                return Err(wombat::WombatError::configuration(
+                    "setup --no-bootstrap requires every requirement to be satisfied",
+                ));
+            }
+            if !no_bootstrap && !initial.satisfied() {
+                let bootstrapped =
+                    wombat::bootstrap_exact(&outcome.build_dir, yes, &outcome.build_id)?;
+                print!("{}", stdout.human_output(&bootstrapped.display()));
+            }
+            if no_deploy {
+                Ok(())
+            } else {
+                let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_home)
+                    .with_target_home_explicit(target_home_explicit);
+                let prepared = wombat::prepare_apply(&options)?;
+                if prepared.build_id() != outcome.build_id {
+                    Err(wombat::WombatError::configuration(
+                        "setup built and prepared different products; refusing deployment",
+                    ))
+                } else {
+                    apply_prepared(prepared, effective_policy(conflict), stdout, stderr)
+                }
+            }
+        })(),
         Command::Build {
             build_dir,
             project_arguments,
@@ -315,13 +440,30 @@ fn main() -> ExitCode {
             }
             apply_prepared(prepared, effective_policy(conflict), stdout, stderr)
         }),
+        Command::Check { build_dir } => resolve_product_path(cli.source.as_deref(), build_dir)
+            .and_then(|(build_dir, _)| wombat::check(&build_dir))
+            .map(|outcome| {
+                print!("{}", stdout.human_output(&outcome.display()));
+                requested_exit = if outcome.operational_failure() {
+                    2
+                } else if outcome.satisfied() {
+                    0
+                } else {
+                    1
+                };
+            }),
+        Command::Bootstrap { build_dir, yes } => {
+            resolve_product_path(cli.source.as_deref(), build_dir)
+                .and_then(|(build_dir, _)| wombat::bootstrap(&build_dir, yes))
+                .map(|outcome| print!("{}", stdout.human_output(&outcome.display())))
+        }
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(requested_exit),
         Err(error) => {
             eprint!("{}", stderr.human_output(&error.render(trace)));
-            ExitCode::FAILURE
+            ExitCode::from(if check_command { 2 } else { 1 })
         }
     }
 }

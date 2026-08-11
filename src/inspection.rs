@@ -16,6 +16,8 @@ pub enum InspectSection {
     Target,
     Modules,
     Dependencies,
+    Providers,
+    Requirements,
     Artifacts,
     Sources,
 }
@@ -32,6 +34,97 @@ pub fn explain(
     current_home: Option<&Path>,
 ) -> Result<String> {
     let product = open_build(build_dir)?;
+    if let Some(name) = selector.strip_prefix("provider:") {
+        let provider = product
+            .manifest
+            .providers
+            .iter()
+            .find(|provider| provider.name == name)
+            .ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "no provider in build `{}` matches `{selector}`",
+                    product.manifest.build_id
+                ))
+            })?;
+        let mut output = format!(
+            "Provider {}\n  build: {}\n  priority: {}\n  origin: {}\n  config: {}\n  declared at: {}\n",
+            provider.name,
+            product.manifest.build_id,
+            provider.priority,
+            json(&provider.origin),
+            json(&provider.config),
+            provider.declared_at
+        );
+        output.push_str(&render_list(
+            "Preparations",
+            product
+                .manifest
+                .preparations
+                .iter()
+                .filter(|operation| operation.provider == provider.name)
+                .map(|operation| {
+                    format!(
+                        "{}: {} (elevated={})",
+                        operation.identity, operation.description, operation.elevated
+                    )
+                }),
+        ));
+        return Ok(output);
+    }
+    if let Some(identity) = selector.strip_prefix("preparation:") {
+        let operation = product
+            .manifest
+            .preparations
+            .iter()
+            .find(|operation| format!("{}:{}", operation.provider, operation.identity) == identity)
+            .ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "no preparation in build `{}` matches `{selector}`",
+                    product.manifest.build_id
+                ))
+            })?;
+        return Ok(format!(
+            "Preparation {}:{}\n  build: {}\n  description: {}\n  elevated: {}\n  data: {}\n",
+            operation.provider,
+            operation.identity,
+            product.manifest.build_id,
+            operation.description,
+            operation.elevated,
+            json(&operation.data)
+        ));
+    }
+    if let Some((kind, name)) = selector.split_once(':')
+        && matches!(kind, "command" | "package")
+    {
+        let requirements = product
+            .manifest
+            .requirements
+            .iter()
+            .filter(|requirement| {
+                let matches_kind = matches!(
+                    (kind, requirement.kind),
+                    ("command", crate::manifest::RequirementKind::Command)
+                        | ("package", crate::manifest::RequirementKind::Package)
+                );
+                matches_kind
+                    && requirement
+                        .candidates
+                        .iter()
+                        .any(|candidate| candidate.name() == name)
+            })
+            .collect::<Vec<_>>();
+        if requirements.is_empty() {
+            return Err(WombatError::configuration(format!(
+                "no requirement in build `{}` matches `{selector}`",
+                product.manifest.build_id
+            )));
+        }
+        return Ok(render_requirement_explanation(
+            &product.manifest,
+            selector,
+            &requirements,
+        ));
+    }
     let matches = product
         .manifest
         .artifacts
@@ -69,7 +162,7 @@ pub fn compare(left: &Path, right: &Path) -> Result<String> {
 fn render_section(manifest: &Manifest, section: InspectSection) -> String {
     match section {
         InspectSection::Overview => format!(
-            "Build {}\n  manifest: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  artifacts: {}\n",
+            "Build {}\n  manifest: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  artifacts: {}\n",
             manifest.build_id,
             manifest.format_version,
             manifest.wombat_version,
@@ -79,6 +172,9 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
             manifest.inputs.len(),
             manifest.modules.len(),
             manifest.dependencies.len(),
+            manifest.providers.len(),
+            manifest.preparations.len(),
+            manifest.requirements.len(),
             manifest.artifacts.len(),
         ),
         InspectSection::Inputs => render_list(
@@ -136,6 +232,46 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                 )
             }),
         ),
+        InspectSection::Providers => {
+            let mut output = render_list(
+                "Providers",
+                manifest.providers.iter().map(|provider| {
+                    format!(
+                        "{} (priority {})\n  origin: {}\n  config: {}\n  declared at: {}",
+                        provider.name,
+                        provider.priority,
+                        match &provider.origin {
+                            crate::manifest::ProviderOrigin::Builtin { contract_version } => {
+                                format!("built-in contract v{contract_version}")
+                            }
+                            crate::manifest::ProviderOrigin::Custom { entrypoint, files } => {
+                                format!("custom {entrypoint}, {} files", files.len())
+                            }
+                        },
+                        json(&provider.config),
+                        provider.declared_at
+                    )
+                }),
+            );
+            output.push_str(&render_list(
+                "Preparations",
+                manifest.preparations.iter().map(|operation| {
+                    format!(
+                        "{}:{}\n  description: {}\n  elevated: {}\n  data: {}",
+                        operation.provider,
+                        operation.identity,
+                        operation.description,
+                        operation.elevated,
+                        json(&operation.data)
+                    )
+                }),
+            ));
+            output
+        }
+        InspectSection::Requirements => render_list(
+            "Requirements",
+            manifest.requirements.iter().map(render_requirement),
+        ),
         InspectSection::Artifacts => render_list(
             "Artifacts",
             manifest.artifacts.iter().map(|artifact| {
@@ -157,6 +293,44 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                 .map(|source| format!("{}\n  digest: {}", source.path, source.digest)),
         ),
     }
+}
+
+fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
+    let selected = &requirement.candidates[requirement.selected as usize];
+    format!(
+        "{}:{}\n  owner: {}\n  choice: {:?}\n  provider: {}\n  binding: {}\n  candidates: {}\n  declared at: {}",
+        match requirement.kind {
+            crate::manifest::RequirementKind::Command => "command",
+            crate::manifest::RequirementKind::Package => "package",
+        },
+        selected.name(),
+        requirement.owner,
+        requirement.choice,
+        requirement.binding.provider,
+        requirement.binding.identity,
+        requirement.candidates.len(),
+        requirement.declared_at
+    )
+}
+
+fn render_requirement_explanation(
+    manifest: &Manifest,
+    selector: &str,
+    requirements: &[&crate::manifest::Requirement],
+) -> String {
+    let mut output = format!("Requirement {selector}\n  build: {}\n", manifest.build_id);
+    for requirement in requirements {
+        output.push_str(&format!(
+            "  {}\n",
+            render_requirement(requirement).replace('\n', "\n  ")
+        ));
+        output.push_str(&format!("  attempts: {}\n", json(&requirement.attempts)));
+        output.push_str(&format!(
+            "  publications: {}\n",
+            json(&requirement.binding.publications)
+        ));
+    }
+    output
 }
 
 fn render_list(title: &str, items: impl IntoIterator<Item = String>) -> String {
@@ -356,6 +530,42 @@ fn render_comparison(left: &Manifest, right: &Manifest) -> String {
                 dependency.to,
                 json(&dependency.declared_at)
             )
+        }),
+    );
+    compare_map(
+        &mut output,
+        "Providers",
+        keyed(&left.providers, |provider| provider.name.clone()),
+        keyed(&right.providers, |provider| provider.name.clone()),
+    );
+    compare_map(
+        &mut output,
+        "Requirements",
+        keyed(&left.requirements, |requirement| {
+            format!(
+                "{:?}:{}@{}",
+                requirement.kind,
+                requirement.candidates[requirement.selected as usize].name(),
+                requirement.declared_at
+            )
+        }),
+        keyed(&right.requirements, |requirement| {
+            format!(
+                "{:?}:{}@{}",
+                requirement.kind,
+                requirement.candidates[requirement.selected as usize].name(),
+                requirement.declared_at
+            )
+        }),
+    );
+    compare_map(
+        &mut output,
+        "Preparations",
+        keyed(&left.preparations, |operation| {
+            format!("{}:{}", operation.provider, operation.identity)
+        }),
+        keyed(&right.preparations, |operation| {
+            format!("{}:{}", operation.provider, operation.identity)
         }),
     );
     compare_map(

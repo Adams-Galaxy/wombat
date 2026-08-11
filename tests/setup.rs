@@ -1,0 +1,201 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn run(command: &mut Command) -> Output {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn copy_source(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == "target" {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_source(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn example_remote(root: &Path) -> PathBuf {
+    let checkout = root.join("example-checkout");
+    let remote = root.join("example.git");
+    copy_source(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/dotfiles"),
+        &checkout,
+    );
+    run(Command::new("git")
+        .args(["init", "-b", "main"])
+        .arg(&checkout));
+    run(Command::new("git").args(["-C"]).arg(&checkout).args([
+        "config",
+        "user.email",
+        "tests@example.invalid",
+    ]));
+    run(Command::new("git").args(["-C"]).arg(&checkout).args([
+        "config",
+        "user.name",
+        "Wombat Tests",
+    ]));
+    run(Command::new("git")
+        .args(["-C"])
+        .arg(&checkout)
+        .args(["add", "."]));
+    run(Command::new("git")
+        .args(["-C"])
+        .arg(&checkout)
+        .args(["commit", "-m", "example"]));
+    run(Command::new("git")
+        .arg("clone")
+        .arg("--bare")
+        .arg(&checkout)
+        .arg(&remote));
+    remote
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_clones_builds_checks_deploys_and_converges_without_pulling() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let remote = example_remote(temporary.path());
+    let source = temporary.path().join("source");
+    let home = temporary.path().join("home");
+    let bin = temporary.path().join("bin");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("rg"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(bin.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let locator = url::Url::from_file_path(&remote).unwrap().to_string();
+    let execute = || {
+        Command::new(env!("CARGO_BIN_EXE_wombat"))
+            .arg("--source")
+            .arg(&source)
+            .arg("setup")
+            .arg(&locator)
+            .arg("--no-bootstrap")
+            .arg("--yes")
+            .arg("--target-home")
+            .arg(&home)
+            .arg("--")
+            .args(["--name", "Setup User", "--email", "setup@example.invalid"])
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", temporary.path().join("state"))
+            .output()
+            .unwrap()
+    };
+
+    let first = execute();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(String::from_utf8_lossy(&first.stdout).contains("cloned repository"));
+    assert!(
+        fs::read_to_string(home.join(".gitconfig"))
+            .unwrap()
+            .contains("Setup User")
+    );
+    assert!(home.join(".config/wombat-editor.toml").is_file());
+    assert!(home.join(".local/wombat-tools/bin/wombat-info").is_file());
+
+    let original_head = String::from_utf8_lossy(
+        &run(Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(["rev-parse", "HEAD"]))
+        .stdout,
+    )
+    .trim()
+    .to_string();
+    let checkout = temporary.path().join("example-checkout");
+    fs::write(checkout.join("NEW-REMOTE-COMMIT"), "not pulled\n").unwrap();
+    run(Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["add", "NEW-REMOTE-COMMIT"]));
+    run(Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["commit", "-m", "new remote state"]));
+    run(Command::new("git").arg("-C").arg(&checkout).args([
+        "push",
+        remote.to_str().unwrap(),
+        "main",
+    ]));
+
+    let second = execute();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stdout).contains("reused repository"));
+    let current_head = String::from_utf8_lossy(
+        &run(Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(["rev-parse", "HEAD"]))
+        .stdout,
+    )
+    .trim()
+    .to_string();
+    assert_eq!(
+        current_head, original_head,
+        "setup must never pull implicitly"
+    );
+
+    fs::write(home.join(".gitconfig"), "downstream change\n").unwrap();
+    let conflicted = execute();
+    assert!(!conflicted.status.success());
+    assert!(String::from_utf8_lossy(&conflicted.stderr).contains("conflict"));
+    assert_eq!(
+        fs::read_to_string(home.join(".gitconfig")).unwrap(),
+        "downstream change\n",
+        "setup --yes must not authorize artifact overwrite"
+    );
+}
+
+#[test]
+fn setup_refuses_an_unrelated_nonempty_destination() {
+    let temporary = tempfile::tempdir().unwrap();
+    let remote = example_remote(temporary.path());
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("keep"), "user data\n").unwrap();
+    let locator = url::Url::from_file_path(remote).unwrap().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .arg("--source")
+        .arg(&source)
+        .arg("setup")
+        .arg(locator)
+        .arg("--no-bootstrap")
+        .arg("--no-deploy")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(source.join("keep").is_file());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("remote.origin.url"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

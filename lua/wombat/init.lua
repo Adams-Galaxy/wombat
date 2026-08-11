@@ -51,6 +51,42 @@ function wombat.using(name)
     return native.using_module(name)
 end
 
+function wombat.providers(entries)
+    if type(entries) ~= "table" then
+        error("w.providers() requires an array", 2)
+    end
+    return native.configure_providers(entries)
+end
+
+local function requirement(namespace, kind, name, options, preferred)
+    if type(name) ~= "string" then
+        error("w." .. namespace .. "." .. kind .. "() requires a string name", 3)
+    end
+    if options ~= nil and type(options) ~= "table" then
+        error("w." .. namespace .. "." .. kind .. "() options must be a table", 3)
+    end
+    return native.declare_requirement(kind, name, options, preferred)
+end
+
+wombat.need = {}
+wombat.prefer = {}
+
+function wombat.need.command(name, options)
+    return requirement("need", "command", name, options, false)
+end
+
+function wombat.need.package(name, options)
+    return requirement("need", "package", name, options, false)
+end
+
+function wombat.prefer.command(name, options)
+    return requirement("prefer", "command", name, options, true)
+end
+
+function wombat.prefer.package(name, options)
+    return requirement("prefer", "package", name, options, true)
+end
+
 local function validate_install(source_path, options, explicit_kind)
     if type(source_path) ~= "string" then
         error("install() requires a string source path", 2)

@@ -7,7 +7,9 @@ takes place.
 The project is in early vertical-slice development. `init` creates the smallest
 conventional source repository, and `build` evaluates
 configuration and materialises a deterministic, self-contained build product
-without changing a target. `diff`, `apply`, and `deploy` then inspect or
+without changing a target. `setup` acquires a repository and carries one exact
+product through requirement bootstrap and guarded deployment. `diff`, `apply`,
+and `deploy` then inspect or
 guardedly reconcile that exact product with a target home. `inspect`, `explain`,
 and `compare` make exact completed products understandable without evaluating
 Lua. `add` is an explicit authoring command that copies one existing home file
@@ -217,7 +219,7 @@ end
 
 Only facts actually consulted during evaluation enter manifest provenance.
 Resolved inputs, the concrete target, consulted observations, and typed Lua
-source provenance are stored in manifest v7 and participate in build identity.
+source provenance are stored in manifest v9 and participate in build identity.
 Every Wombat-owned root, module, and repository `require()` load contributes its
 repository-relative path and digest. Consequently a comment or declaration
 line movement can produce a new exact build identity even when artifact bytes
@@ -254,6 +256,56 @@ Relative product paths remain relative to the selected source. Absolute
 relocated products can be inspected and compared without their original
 repository. The manifest remains the machine-readable product contract; these
 commands intentionally provide human views rather than a second JSON schema.
+
+## Requirements, bootstrap, and fresh-machine setup
+
+Modules declare products rather than embedding package-manager commands:
+
+```lua
+local w = require("wombat")
+
+w.need.command("git")
+w.prefer.command("rg", { accept = { "grep" } })
+```
+
+Root policy selects ordered providers. Wombat currently includes Homebrew for
+macOS and Apt for Debian-family Linux; custom providers are ordinary tracked
+Lua. `check` is read-only, while `bootstrap` preflights, displays, confirms, and
+post-checks explicit provider work:
+
+```sh
+wombat check
+wombat bootstrap
+```
+
+For a fresh machine, `setup` safely clones or reuses a matching Git repository,
+builds once, checks and optionally bootstraps requirements, then guardedly
+deploys that exact build ID:
+
+```sh
+wombat setup Adams-Galaxy
+wombat setup owner/repository --ssh
+wombat setup https://github.com/owner/dotfiles.git -- --theme gruvbox
+```
+
+A single GitHub owner expands to `owner/dotfiles`; `owner/repository` also uses
+GitHub HTTPS unless `--ssh` changes the shorthand. Explicit HTTPS, SSH/SCP,
+`git+`, `file://`, and local paths are preserved. Setup never pulls, switches
+branches, changes remotes, or cleans an existing checkout.
+
+The development installer can obtain Wombat and forward directly into setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Adams-Galaxy/wombat/main/install.sh \
+  | sh -s -- setup Adams-Galaxy
+```
+
+Missing host build prerequisites require a separate interactive confirmation,
+or leading `--install-prerequisites` in automation. Setup's `--yes` confirms
+only the displayed bootstrap plan; deployment conflicts still use
+`--conflict ask|fail|skip|overwrite`. The installer tracks `main` while Wombat
+is pre-release; a stable `get.wombat.sh` endpoint and release binaries are
+future distribution work.
 
 ## Diffing and deployment
 
