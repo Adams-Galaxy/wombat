@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -126,7 +128,7 @@ fn default_source_uses_local_share_wombat_and_its_build_directory() {
 }
 
 #[test]
-fn explicit_source_bypasses_malformed_configuration_and_home() {
+fn explicit_source_still_loads_task_configuration() {
     let fixture = CliFixture::new();
     fixture.write_config("this is not TOML [[[");
     let build_dir = fixture.temporary.path().join("explicit-build");
@@ -143,8 +145,55 @@ fn explicit_source_bypasses_malformed_configuration_and_home() {
         .env("XDG_CONFIG_HOME", &fixture.xdg)
         .output()
         .unwrap();
-    assert_success(&output);
-    assert!(build_dir.join("manifest.json").is_file());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to parse Wombat config"));
+    assert!(!build_dir.join("manifest.json").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_source_uses_configured_task_interpreter() {
+    let fixture = CliFixture::new();
+    fs::create_dir_all(fixture.repository.join("tasks")).unwrap();
+    fs::write(
+        fixture.repository.join("modules/dot_config/app.lua"),
+        "local w = require('wombat')\nw.build.task('generate.py')\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repository.join("tasks/generate.py"),
+        "from wombat import output\n(output / 'configured').write_text('yes\\n')\n",
+    )
+    .unwrap();
+    let wrapper = fixture.temporary.path().join("python-wrapper");
+    fs::write(&wrapper, "#!/bin/sh\nexec python3 \"$@\"\n").unwrap();
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+    fixture.write_config(&format!(
+        "format_version = 1\nrepository = {:?}\n[tasks.interpreters.python]\ncommand = {:?}\n",
+        fixture.repository.to_str().unwrap(),
+        wrapper.to_str().unwrap(),
+    ));
+
+    let output = fixture.run(&["--source", fixture.repository.to_str().unwrap(), "build"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("generate.py: running"));
+    assert_eq!(
+        fs::read_to_string(fixture.repository.join("build/tree/config/configured")).unwrap(),
+        "yes\n"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.repository.join("build/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["tasks"][0]["runner"]["command"],
+        wrapper.to_str().unwrap()
+    );
 }
 
 #[test]

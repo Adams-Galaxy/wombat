@@ -598,6 +598,8 @@ fn render_item(
         let producer = match artifact.production {
             Production::Static => "static",
             Production::Template { .. } => "template",
+            Production::GeneratedLua { .. } => "generated Lua",
+            Production::Task { .. } => "task",
         };
         writeln!(
             output,

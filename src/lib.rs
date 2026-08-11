@@ -1,5 +1,6 @@
 pub mod add;
 pub mod build;
+mod cache;
 #[doc(hidden)]
 pub mod config;
 pub mod context;
@@ -11,6 +12,7 @@ mod inputs;
 pub mod inspection;
 pub mod manifest;
 mod path;
+pub mod plan;
 pub mod presentation;
 pub mod reconcile;
 pub mod repository;
@@ -18,11 +20,13 @@ pub mod requirements;
 pub mod runtime;
 mod source;
 mod state;
+mod tasks;
 
 pub use add::{AddMethod, AddOutcome, AddStatus, add};
 pub use build::{
-    BuildOptions, BuildOutcome, BuildStatus, OpenedBuild, VerifiedBuild, build, open_build,
-    project_help, verify_build,
+    BuildOptions, BuildOutcome, BuildStatus, OpenedBuild, PlanOutcome, PrepareOutcome,
+    VerifiedBuild, build, open_build, plan, prepare, project_help, project_help_with_options,
+    verify_build,
 };
 pub use context::{
     Architecture, Distribution, HostContext, Kernel, LooseVersion, OperatingSystem,
@@ -34,7 +38,7 @@ pub use deploy::{
 };
 pub use error::{Diagnostic, Result, WombatError};
 pub use initialize::{InitOutcome, InitStatus, initialize};
-pub use inspection::{InspectSection, compare, explain, inspect};
+pub use inspection::{InspectSection, PlanInspectSection, compare, explain, inspect, inspect_plan};
 pub use manifest::Manifest;
 pub use presentation::{ColorPolicy, Presenter, Role};
 pub use reconcile::{ReconciliationAction, ReconciliationItem, ReconciliationPlan};
@@ -44,4 +48,5 @@ pub use repository::{
 };
 pub use requirements::{
     BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, bootstrap, bootstrap_exact, check,
+    check_plan, check_target_plan, prepare_plan,
 };

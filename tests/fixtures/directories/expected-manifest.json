@@ -1,7 +1,8 @@
 {
-  "format_version": 9,
+  "format_version": 10,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:27b67b8556d879377f87dd6802f1658cbc3e33fc425b2d3bd215747acf02ef75",
+  "build_id": "sha256:b2f61f3e03a771ecbb025d1c83d6355bd29546d4645c491e2f09a843d526707d",
+  "plan_id": "sha256:b8c99eb80d2c4b84d806d5f9058e8305ea548771150b985654502cbc98e92788",
   "sources": [
     {
       "path": "modules/dot_config/config.lua",
@@ -64,9 +65,13 @@
       }
     }
   ],
+  "build_providers": [],
+  "build_requirements": [],
+  "build_preparations": [],
   "providers": [],
   "requirements": [],
   "preparations": [],
+  "tasks": [],
   "artifacts": [
     {
       "kind": "file",

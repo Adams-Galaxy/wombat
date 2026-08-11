@@ -11,13 +11,53 @@ use crate::build::{OpenedBuild, open_build};
 use crate::context::HostContext;
 use crate::frozen::FrozenValue;
 use crate::manifest::{
-    Manifest, Provider, ProviderBinding, ProviderOrigin, ProviderPreparation, Requirement,
-    RequirementCandidate, RequirementKind,
+    BuildPlan, Manifest, Provider, ProviderBinding, ProviderOrigin, ProviderPreparation,
+    Requirement, RequirementCandidate, RequirementKind,
 };
 use crate::{Result, WombatError};
 
 const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 type ProcessSpec = (String, Vec<String>, BTreeMap<String, String>, bool);
+
+struct RequirementContext<'a> {
+    id: &'a str,
+    providers: &'a [Provider],
+    requirements: &'a [Requirement],
+    preparations: &'a [ProviderPreparation],
+    payload_root: PathBuf,
+}
+
+impl<'a> RequirementContext<'a> {
+    fn target(opened: &'a OpenedBuild) -> Self {
+        Self {
+            id: &opened.manifest.build_id,
+            providers: &opened.manifest.providers,
+            requirements: &opened.manifest.requirements,
+            preparations: &opened.manifest.preparations,
+            payload_root: opened.product_dir.join("providers"),
+        }
+    }
+
+    fn build(plan: &'a BuildPlan, build_dir: &Path) -> Self {
+        Self {
+            id: &plan.plan_id,
+            providers: &plan.build_providers,
+            requirements: &plan.build_requirements,
+            preparations: &plan.build_preparations,
+            payload_root: build_dir.join(".wombat/plan/payloads/providers/build"),
+        }
+    }
+
+    fn target_plan(plan: &'a BuildPlan, build_dir: &Path) -> Self {
+        Self {
+            id: &plan.plan_id,
+            providers: &plan.providers,
+            requirements: &plan.requirements,
+            preparations: &plan.preparations,
+            payload_root: build_dir.join(".wombat/plan/payloads/providers/target"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckStatus {
@@ -102,7 +142,23 @@ pub fn check(build_dir: &Path) -> Result<CheckOutcome> {
     let opened = open_build(build_dir)?;
     let _environment_lock = EnvironmentLock::shared()?;
     ensure_compatible_host(&opened.manifest)?;
-    check_opened(&opened)
+    check_context(&RequirementContext::target(&opened))
+}
+
+pub fn check_plan(build_dir: &Path, plan: &BuildPlan) -> Result<CheckOutcome> {
+    let _environment_lock = EnvironmentLock::shared()?;
+    check_context(&RequirementContext::build(plan, build_dir))
+}
+
+pub fn check_target_plan(build_dir: &Path, plan: &BuildPlan) -> Result<CheckOutcome> {
+    ensure_compatible_platform(&plan.target.platform)?;
+    let _environment_lock = EnvironmentLock::shared()?;
+    check_context(&RequirementContext::target_plan(plan, build_dir))
+}
+
+pub fn prepare_plan(build_dir: &Path, plan: &BuildPlan, yes: bool) -> Result<BootstrapOutcome> {
+    let _environment_lock = EnvironmentLock::exclusive()?;
+    reconcile_context(&RequirementContext::build(plan, build_dir), yes, "prepare")
 }
 
 pub fn bootstrap(build_dir: &Path, yes: bool) -> Result<BootstrapOutcome> {
@@ -133,7 +189,16 @@ fn bootstrap_opened(
     }
     let _environment_lock = EnvironmentLock::exclusive()?;
     ensure_compatible_host(&opened.manifest)?;
-    let initial = check_opened(&opened)?;
+    let context = RequirementContext::target(&opened);
+    reconcile_context(&context, yes, "bootstrap")
+}
+
+fn reconcile_context(
+    context: &RequirementContext<'_>,
+    yes: bool,
+    operation_name: &str,
+) -> Result<BootstrapOutcome> {
+    let initial = check_context(context)?;
     if initial.operational_failure() {
         return Err(WombatError::configuration(initial.display()));
     }
@@ -145,7 +210,7 @@ fn bootstrap_opened(
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return Ok(BootstrapOutcome {
-            build_id: opened.manifest.build_id.clone(),
+            build_id: context.id.to_string(),
             completed: Vec::new(),
             already_satisfied: initial
                 .items
@@ -158,14 +223,13 @@ fn bootstrap_opened(
         .iter()
         .map(|(_, item)| item.provider.as_str())
         .collect::<BTreeSet<_>>();
-    let preparations = opened
-        .manifest
+    let preparations = context
         .preparations
         .iter()
         .filter(|operation| pending_providers.contains(operation.provider.as_str()))
         .collect::<Vec<_>>();
-    preflight(&opened, &preparations, &pending)?;
-    eprintln!("bootstrap will reconcile:");
+    preflight(context, &preparations, &pending)?;
+    eprintln!("{operation_name} will reconcile:");
     let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
     for (_, item) in &pending {
         grouped.entry(&item.provider).or_default().push(item);
@@ -192,9 +256,9 @@ fn bootstrap_opened(
     }
     if !yes {
         if !std::io::stdin().is_terminal() {
-            return Err(WombatError::configuration(
-                "bootstrap requires --yes when standard input is not a terminal",
-            ));
+            return Err(WombatError::configuration(format!(
+                "{operation_name} requires --yes when standard input is not a terminal"
+            )));
         }
         eprint!("continue? [y/N] ");
         let mut answer = String::new();
@@ -202,21 +266,23 @@ fn bootstrap_opened(
             .read_line(&mut answer)
             .map_err(|error| WombatError::io("standard input", error))?;
         if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-            return Err(WombatError::configuration("bootstrap cancelled"));
+            return Err(WombatError::configuration(format!(
+                "{operation_name} cancelled"
+            )));
         }
     }
 
     let requires_elevation = preparations.iter().any(|operation| operation.elevated)
         || pending
             .iter()
-            .any(|(index, _)| opened.manifest.requirements[*index].binding.provider == "apt");
+            .any(|(index, _)| context.requirements[*index].binding.provider == "apt");
     if requires_elevation {
         authorize_elevation(yes)?;
     }
 
     let mut completed = Vec::new();
     for (index, operation) in preparations.iter().enumerate() {
-        if let Err(error) = prepare_provider(&opened, operation, yes) {
+        if let Err(error) = prepare_provider(context, operation, yes) {
             let remaining = preparations[index..]
                 .iter()
                 .map(|operation| format!("prepare:{}:{}", operation.provider, operation.identity))
@@ -238,8 +304,8 @@ fn bootstrap_opened(
         ));
     }
     for (pending_index, (index, item)) in pending.iter().enumerate() {
-        let requirement = &opened.manifest.requirements[*index];
-        if let Err(error) = reconcile_requirement(&opened, requirement, item.status, yes) {
+        let requirement = &context.requirements[*index];
+        if let Err(error) = reconcile_requirement(context, requirement, item.status, yes) {
             let remaining = pending[pending_index..]
                 .iter()
                 .map(|(_, item)| item.requirement.as_str())
@@ -254,10 +320,10 @@ fn bootstrap_opened(
                 }
             )));
         }
-        let post = check_requirement(&opened, requirement)?;
+        let post = check_requirement(context, requirement)?;
         if post.status != CheckStatus::Satisfied {
             return Err(WombatError::configuration(format!(
-                "bootstrap reconciled `{}` but post-check reported {}: {}; completed: {}",
+                "{operation_name} reconciled `{}` but post-check reported {}: {}; completed: {}",
                 item.requirement,
                 post.status.as_str(),
                 post.detail,
@@ -271,7 +337,7 @@ fn bootstrap_opened(
         completed.push(item.requirement.clone());
     }
     Ok(BootstrapOutcome {
-        build_id: opened.manifest.build_id.clone(),
+        build_id: context.id.to_string(),
         completed,
         already_satisfied: initial
             .items
@@ -282,20 +348,22 @@ fn bootstrap_opened(
     })
 }
 
-fn check_opened(opened: &OpenedBuild) -> Result<CheckOutcome> {
-    let items = opened
-        .manifest
+fn check_context(context: &RequirementContext<'_>) -> Result<CheckOutcome> {
+    let items = context
         .requirements
         .iter()
-        .map(|requirement| check_requirement(opened, requirement))
+        .map(|requirement| check_requirement(context, requirement))
         .collect::<Result<Vec<_>>>()?;
     Ok(CheckOutcome {
-        build_id: opened.manifest.build_id.clone(),
+        build_id: context.id.to_string(),
         items,
     })
 }
 
-fn check_requirement(opened: &OpenedBuild, requirement: &Requirement) -> Result<CheckItem> {
+fn check_requirement(
+    context: &RequirementContext<'_>,
+    requirement: &Requirement,
+) -> Result<CheckItem> {
     let selected = selected_candidate(requirement)?;
     let label = requirement_label(requirement);
     if requirement.kind == RequirementKind::Command {
@@ -326,7 +394,7 @@ fn check_requirement(opened: &OpenedBuild, requirement: &Requirement) -> Result<
             });
         }
     }
-    let provider = provider_for(&opened.manifest, &requirement.binding.provider)?;
+    let provider = provider_for(context.providers, &requirement.binding.provider)?;
     let mut result = match &provider.origin {
         ProviderOrigin::Builtin { .. } => match provider.name.as_str() {
             "brew" => check_brew(&requirement.binding, selected.minimum())?,
@@ -337,7 +405,7 @@ fn check_requirement(opened: &OpenedBuild, requirement: &Requirement) -> Result<
                 )));
             }
         },
-        ProviderOrigin::Custom { .. } => check_custom(opened, provider, requirement)?,
+        ProviderOrigin::Custom { .. } => check_custom(context, provider, requirement)?,
     };
     result.requirement = label;
     if result.status == CheckStatus::Satisfied {
@@ -491,11 +559,11 @@ fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Result<CheckIt
 }
 
 fn check_custom(
-    opened: &OpenedBuild,
+    context: &RequirementContext<'_>,
     provider: &Provider,
     requirement: &Requirement,
 ) -> Result<CheckItem> {
-    let runtime = CustomRuntime::load(opened, provider, false, false, false)?;
+    let runtime = CustomRuntime::load(context, provider, false, false, false)?;
     let check: Function = runtime.definition.get("check").map_err(|error| {
         WombatError::configuration(format!(
             "provider `{}` requires check(): {error}",
@@ -517,11 +585,11 @@ fn check_custom(
 }
 
 fn prepare_provider(
-    opened: &OpenedBuild,
+    context: &RequirementContext<'_>,
     operation: &ProviderPreparation,
     noninteractive: bool,
 ) -> Result<()> {
-    let provider = provider_for(&opened.manifest, &operation.provider)?;
+    let provider = provider_for(context.providers, &operation.provider)?;
     match &provider.origin {
         ProviderOrigin::Builtin { .. } if provider.name == "apt" => {
             if operation.identity != "update-index" {
@@ -545,7 +613,7 @@ fn prepare_provider(
         ))),
         ProviderOrigin::Custom { .. } => {
             let runtime =
-                CustomRuntime::load(opened, provider, true, operation.elevated, noninteractive)?;
+                CustomRuntime::load(context, provider, true, operation.elevated, noninteractive)?;
             let prepare: Function = runtime.definition.get("prepare").map_err(|error| {
                 WombatError::configuration(format!(
                     "provider `{}` requires prepare(): {error}",
@@ -569,12 +637,12 @@ fn prepare_provider(
 }
 
 fn preflight(
-    opened: &OpenedBuild,
+    context: &RequirementContext<'_>,
     preparations: &[&ProviderPreparation],
     pending: &[(usize, &CheckItem)],
 ) -> Result<()> {
     for operation in preparations {
-        let provider = provider_for(&opened.manifest, &operation.provider)?;
+        let provider = provider_for(context.providers, &operation.provider)?;
         match &provider.origin {
             ProviderOrigin::Builtin { .. } if provider.name == "apt" => {
                 require_command("apt-get", "Apt preparation")?;
@@ -587,7 +655,7 @@ fn preflight(
                 )));
             }
             ProviderOrigin::Custom { .. } => {
-                let runtime = CustomRuntime::load(opened, provider, false, false, false)?;
+                let runtime = CustomRuntime::load(context, provider, false, false, false)?;
                 runtime
                     .definition
                     .get::<Function>("prepare")
@@ -602,8 +670,8 @@ fn preflight(
         }
     }
     for (index, _item) in pending {
-        let requirement = &opened.manifest.requirements[*index];
-        let provider = provider_for(&opened.manifest, &requirement.binding.provider)?;
+        let requirement = &context.requirements[*index];
+        let provider = provider_for(context.providers, &requirement.binding.provider)?;
         match &provider.origin {
             ProviderOrigin::Builtin { .. } if provider.name == "brew" => {
                 let (kind, name) = brew_identity(&requirement.binding)?;
@@ -642,7 +710,7 @@ fn preflight(
             ProviderOrigin::Builtin { .. } => unreachable!(),
             ProviderOrigin::Custom { .. } => {
                 // Loading validates the exact payload and provider surface before confirmation.
-                let _ = CustomRuntime::load(opened, provider, false, false, false)?;
+                let _ = CustomRuntime::load(context, provider, false, false, false)?;
             }
         }
     }
@@ -650,12 +718,12 @@ fn preflight(
 }
 
 fn reconcile_requirement(
-    opened: &OpenedBuild,
+    context: &RequirementContext<'_>,
     requirement: &Requirement,
     status: CheckStatus,
     noninteractive: bool,
 ) -> Result<()> {
-    let provider = provider_for(&opened.manifest, &requirement.binding.provider)?;
+    let provider = provider_for(context.providers, &requirement.binding.provider)?;
     match &provider.origin {
         ProviderOrigin::Builtin { .. } if provider.name == "brew" => {
             let (kind, name) = brew_identity(&requirement.binding)?;
@@ -690,7 +758,7 @@ fn reconcile_requirement(
         }
         ProviderOrigin::Builtin { .. } => unreachable!(),
         ProviderOrigin::Custom { .. } => {
-            let runtime = CustomRuntime::load(opened, provider, true, false, noninteractive)?;
+            let runtime = CustomRuntime::load(context, provider, true, false, noninteractive)?;
             let reconcile: Function = runtime.definition.get("reconcile").map_err(|error| {
                 WombatError::configuration(format!(
                     "provider `{}` requires reconcile(): {error}",
@@ -726,7 +794,7 @@ struct CustomRuntime {
 
 impl CustomRuntime {
     fn load(
-        opened: &OpenedBuild,
+        context: &RequirementContext<'_>,
         provider: &Provider,
         mutable: bool,
         elevation_allowed: bool,
@@ -740,15 +808,13 @@ impl CustomRuntime {
             lua.globals().set(name, Value::Nil)?;
         }
         let api = runtime_provider_api(&lua)?;
-        install_product_require(&lua, opened, provider, api)?;
+        install_product_require(&lua, context, provider, api)?;
         let entrypoint = match &provider.origin {
             ProviderOrigin::Custom { entrypoint, .. } => entrypoint,
             ProviderOrigin::Builtin { .. } => unreachable!(),
         };
-        let source = fs::read_to_string(opened.product_dir.join("providers").join(entrypoint))
-            .map_err(|error| {
-                WombatError::io(opened.product_dir.join("providers").join(entrypoint), error)
-            })?;
+        let source = fs::read_to_string(context.payload_root.join(entrypoint))
+            .map_err(|error| WombatError::io(context.payload_root.join(entrypoint), error))?;
         let definition: Table = lua
             .load(&source)
             .set_name(format!("@providers/{entrypoint}"))
@@ -817,7 +883,7 @@ fn runtime_provider_api(lua: &Lua) -> Result<Table> {
 
 fn install_product_require(
     lua: &Lua,
-    opened: &OpenedBuild,
+    context: &RequirementContext<'_>,
     provider: &Provider,
     api: Table,
 ) -> Result<()> {
@@ -830,7 +896,7 @@ fn install_product_require(
         .map(|file| {
             (
                 file.payload.clone(),
-                opened.product_dir.join("providers").join(&file.payload),
+                context.payload_root.join(&file.payload),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -1001,13 +1067,15 @@ fn parse_custom_status(binding: &ProviderBinding, value: FrozenValue) -> Result<
 }
 
 fn ensure_compatible_host(manifest: &Manifest) -> Result<()> {
+    ensure_compatible_platform(&manifest.target.platform)
+}
+
+fn ensure_compatible_platform(platform: &crate::context::TargetPlatform) -> Result<()> {
     let host = HostContext::observe()?;
-    if host.platform.os.name != manifest.target.platform.os.name
-        || host.platform.arch != manifest.target.platform.arch
-    {
+    if host.platform.os.name != platform.os.name || host.platform.arch != platform.arch {
         return Err(WombatError::configuration(format!(
             "requirements target {}, but this execution environment is {}; check and bootstrap require an exact local OS and architecture",
-            manifest.target.platform.compact(),
+            platform.compact(),
             host.platform.compact()
         )));
     }
@@ -1034,9 +1102,8 @@ fn requirement_label(requirement: &Requirement) -> String {
     )
 }
 
-fn provider_for<'a>(manifest: &'a Manifest, name: &str) -> Result<&'a Provider> {
-    manifest
-        .providers
+fn provider_for<'a>(providers: &'a [Provider], name: &str) -> Result<&'a Provider> {
+    providers
         .iter()
         .find(|provider| provider.name == name)
         .ok_or_else(|| WombatError::configuration(format!("selected provider `{name}` is absent")))

@@ -5,7 +5,8 @@ use crate::frozen::FrozenValue;
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 9;
+pub const MANIFEST_FORMAT_VERSION: u32 = 10;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 1;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -58,16 +59,43 @@ pub struct Manifest {
     pub format_version: u32,
     pub wombat_version: String,
     pub build_id: String,
+    pub plan_id: String,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub build_providers: Vec<Provider>,
+    pub build_requirements: Vec<Requirement>,
+    pub build_preparations: Vec<ProviderPreparation>,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
+    pub tasks: Vec<Task>,
     pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPlan {
+    pub format_version: u32,
+    pub wombat_version: String,
+    pub plan_id: String,
+    pub sources: Vec<SourceFile>,
+    pub inputs: Vec<BuildInput>,
+    pub target: ResolvedTarget,
+    pub observations: Vec<Observation>,
+    pub modules: Vec<ManifestModule>,
+    pub dependencies: Vec<Dependency>,
+    pub build_providers: Vec<Provider>,
+    pub build_requirements: Vec<Requirement>,
+    pub build_preparations: Vec<ProviderPreparation>,
+    pub providers: Vec<Provider>,
+    pub requirements: Vec<Requirement>,
+    pub preparations: Vec<ProviderPreparation>,
+    pub tasks: Vec<Task>,
+    pub artifacts: Vec<PlannedArtifact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -299,6 +327,116 @@ pub enum Production {
         source_digest: String,
         context: FrozenValue,
     },
+    GeneratedLua {
+        contract_version: u32,
+    },
+    Task {
+        contract_version: u32,
+        identity: String,
+        output: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedArtifact {
+    pub source: String,
+    pub source_origin: SourceOrigin,
+    pub production: PlannedProduction,
+    pub target: TargetPath,
+    pub owner: String,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlannedProduction {
+    Static {
+        source_digest: String,
+        executable: bool,
+    },
+    Template {
+        renderer: RendererIdentity,
+        source_digest: String,
+        context: FrozenValue,
+        executable: bool,
+    },
+    GeneratedLua {
+        contract_version: u32,
+        content_digest: String,
+        size: u64,
+        executable: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Task {
+    pub identity: String,
+    pub owner: String,
+    pub entrypoint: String,
+    pub entrypoint_digest: String,
+    pub params: FrozenValue,
+    pub runner: TaskRunner,
+    pub python_helper: bool,
+    pub logs: TaskLogPolicy,
+    pub cache: TaskCachePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_root: Option<TaskTargetRoot>,
+    pub declared_at: SourceTrace,
+    pub outputs: Vec<TaskOutput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRunner {
+    pub contract_version: u32,
+    pub family: TaskRunnerFamily,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRunnerFamily {
+    Python,
+    PosixShell,
+    Bash,
+    EmbeddedLua,
+    Direct,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLogPolicy {
+    Failure,
+    Always,
+    Never,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCachePolicy {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskTargetRoot {
+    pub anchor: TargetAnchor,
+    pub path: String,
+    pub origin: EvaluatedTargetOrigin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskOutput {
+    pub relative: String,
+    pub content: FileContent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -318,15 +456,20 @@ pub struct FileContent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EvaluatedManifest {
+    pub plan_id: String,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub build_providers: Vec<Provider>,
+    pub build_requirements: Vec<Requirement>,
+    pub build_preparations: Vec<ProviderPreparation>,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
+    pub tasks: Vec<EvaluatedTask>,
     pub artifacts: Vec<EvaluatedArtifact>,
     pub directories: Vec<EvaluatedDirectory>,
 }
@@ -338,7 +481,7 @@ pub(crate) struct EvaluatedArtifact {
     pub source_origin: SourceOrigin,
     pub production: EvaluatedProduction,
     pub target: TargetPath,
-    pub fingerprint: SourceFingerprint,
+    pub fingerprint: Option<SourceFingerprint>,
     pub owner: String,
     pub declared_at: SourceTrace,
 }
@@ -346,7 +489,25 @@ pub(crate) struct EvaluatedArtifact {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum EvaluatedProduction {
     Static,
-    Template { context: FrozenValue },
+    Template {
+        context: FrozenValue,
+    },
+    GeneratedLua {
+        content: Vec<u8>,
+        executable: bool,
+    },
+    Task {
+        identity: String,
+        output: String,
+        content: Vec<u8>,
+        executable: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EvaluatedTask {
+    pub task: Task,
+    pub fingerprint: SourceFingerprint,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -366,8 +527,9 @@ pub(crate) struct EvaluatedTargetRoot {
     pub origin: EvaluatedTargetOrigin,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum EvaluatedTargetOrigin {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvaluatedTargetOrigin {
     Explicit {
         declared: String,
     },
@@ -392,6 +554,13 @@ pub enum SourceOrigin {
     Directory {
         declared: String,
         root: String,
+        relative: String,
+    },
+    Generated {
+        name: String,
+    },
+    Task {
+        identity: String,
         relative: String,
     },
 }

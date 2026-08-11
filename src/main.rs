@@ -55,6 +55,10 @@ enum Command {
         #[arg(long)]
         no_bootstrap: bool,
 
+        /// Require host construction tools to exist without preparing them.
+        #[arg(long)]
+        no_prepare: bool,
+
         /// Stop after requirements are satisfied.
         #[arg(long)]
         no_deploy: bool,
@@ -73,6 +77,20 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true)]
         project_arguments: Vec<OsString>,
     },
+    /// Explicitly reconcile host tools required to construct the current plan.
+    Prepare {
+        /// Build workspace, relative to the resolved source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+
+        /// Confirm the complete host preparation plan non-interactively.
+        #[arg(long)]
+        yes: bool,
+
+        /// Repository-defined build inputs. Values must follow `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
+    },
     /// Create the smallest conventional Wombat source repository.
     Init {
         /// Repository path. Defaults to the selected configured/default source.
@@ -83,15 +101,23 @@ enum Command {
         /// Absolute existing file beneath the target home.
         target: PathBuf,
     },
-    /// Inspect one exact completed build product without evaluating Lua.
+    /// Inspect a pending construction plan or one exact completed product.
     Inspect {
         /// Focused product section. Defaults to the overview.
         #[arg(value_enum, default_value = "overview")]
         section: InspectArg,
 
-        /// Build product, relative to the resolved source unless absolute.
+        /// Focused pending-plan section when `section` is `plan`.
+        #[arg(value_enum)]
+        plan_section: Option<PlanInspectArg>,
+
+        /// Build workspace or product, relative to the resolved source unless absolute.
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
+
+        /// Repository-defined build inputs for pending-plan inspection.
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
     },
     /// Explain one artifact in an exact completed build product.
     Explain {
@@ -189,6 +215,7 @@ enum ColorArg {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum InspectArg {
+    Plan,
     Overview,
     Inputs,
     Target,
@@ -196,6 +223,7 @@ enum InspectArg {
     Dependencies,
     Providers,
     Requirements,
+    Tasks,
     Artifacts,
     Sources,
 }
@@ -203,6 +231,7 @@ enum InspectArg {
 impl From<InspectArg> for wombat::InspectSection {
     fn from(value: InspectArg) -> Self {
         match value {
+            InspectArg::Plan => unreachable!("plan inspection has a distinct surface"),
             InspectArg::Overview => Self::Overview,
             InspectArg::Inputs => Self::Inputs,
             InspectArg::Target => Self::Target,
@@ -210,8 +239,32 @@ impl From<InspectArg> for wombat::InspectSection {
             InspectArg::Dependencies => Self::Dependencies,
             InspectArg::Providers => Self::Providers,
             InspectArg::Requirements => Self::Requirements,
+            InspectArg::Tasks => Self::Tasks,
             InspectArg::Artifacts => Self::Artifacts,
             InspectArg::Sources => Self::Sources,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PlanInspectArg {
+    Overview,
+    Providers,
+    Requirements,
+    Tasks,
+    Artifacts,
+    Sources,
+}
+
+impl From<PlanInspectArg> for wombat::PlanInspectSection {
+    fn from(value: PlanInspectArg) -> Self {
+        match value {
+            PlanInspectArg::Overview => Self::Overview,
+            PlanInspectArg::Providers => Self::Providers,
+            PlanInspectArg::Requirements => Self::Requirements,
+            PlanInspectArg::Tasks => Self::Tasks,
+            PlanInspectArg::Artifacts => Self::Artifacts,
+            PlanInspectArg::Sources => Self::Sources,
         }
     }
 }
@@ -261,6 +314,7 @@ fn main() -> ExitCode {
             conflict,
             yes,
             no_bootstrap,
+            no_prepare,
             no_deploy,
             project_arguments,
         } => (|| -> wombat::Result<()> {
@@ -282,10 +336,80 @@ fn main() -> ExitCode {
             let source_root = wombat::config::resolve_source(Some(&acquired.destination))?;
             let target_home_explicit = target_home.is_some();
             let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
-            let outcome = wombat::build(
-                wombat::BuildOptions::new(&source_root, build_dir)
-                    .with_project_arguments(project_arguments),
-            )?;
+            let build_options =
+                configured_build_options(&source_root, build_dir, project_arguments)?;
+            let planned = wombat::plan(build_options.clone())?;
+            let host_requirements = wombat::check_plan(&planned.build_dir, &planned.plan)?;
+            let target_requirements = wombat::check_target_plan(&planned.build_dir, &planned.plan)?;
+            println!(
+                "{}",
+                stdout.paint(
+                    wombat::Role::Heading,
+                    format!("setup plan {}", planned.plan.plan_id)
+                )
+            );
+            println!(
+                "{}",
+                stdout.paint(wombat::Role::Heading, "host construction requirements")
+            );
+            print!("{}", stdout.human_output(&host_requirements.display()));
+            println!(
+                "{}",
+                stdout.paint(wombat::Role::Heading, "target environment requirements")
+            );
+            print!("{}", stdout.human_output(&target_requirements.display()));
+            println!(
+                "  deployment: {} ({})",
+                stdout.paint(wombat::Role::Path, target_home.to_string_lossy()),
+                if no_deploy { "disabled" } else { "guarded" }
+            );
+            if host_requirements.operational_failure() || target_requirements.operational_failure()
+            {
+                return Err(wombat::WombatError::configuration(
+                    "setup cannot continue because requirement checking failed operationally",
+                ));
+            }
+            if no_prepare && !host_requirements.satisfied() {
+                return Err(wombat::WombatError::configuration(
+                    "setup --no-prepare requires every host build requirement to be satisfied",
+                ));
+            }
+            if no_bootstrap && !target_requirements.satisfied() {
+                return Err(wombat::WombatError::configuration(
+                    "setup --no-bootstrap requires every target requirement to be satisfied",
+                ));
+            }
+            let will_mutate = (!no_prepare && !host_requirements.satisfied())
+                || (!no_bootstrap && !target_requirements.satisfied());
+            if will_mutate && !yes {
+                confirm_setup()?;
+            }
+            if !no_prepare && !host_requirements.satisfied() {
+                let prepared = wombat::prepare_plan(&planned.build_dir, &planned.plan, true)?;
+                print!(
+                    "{}",
+                    stdout.human_output(&format!(
+                        "prepare complete for {} ({} changed, {} already satisfied)\n",
+                        prepared.build_id,
+                        prepared.completed.len(),
+                        prepared.already_satisfied.len()
+                    ))
+                );
+                let current = wombat::plan(build_options.clone())?;
+                if current.plan.plan_id != planned.plan.plan_id {
+                    return Err(wombat::WombatError::configuration(format!(
+                        "setup plan changed during host preparation: `{}` became `{}`; no rollback was attempted",
+                        planned.plan.plan_id, current.plan.plan_id
+                    )));
+                }
+            }
+            let outcome = wombat::build(build_options)?;
+            if outcome.manifest.plan_id != planned.plan.plan_id {
+                return Err(wombat::WombatError::configuration(format!(
+                    "setup planned `{}` but built `{}`; refusing further mutation",
+                    planned.plan.plan_id, outcome.manifest.plan_id
+                )));
+            }
             print_build_outcome(&outcome, stdout);
             let initial = wombat::check(&outcome.build_dir)?;
             print!("{}", stdout.human_output(&initial.display()));
@@ -294,14 +418,9 @@ fn main() -> ExitCode {
                     "setup cannot continue because requirement checking failed operationally",
                 ));
             }
-            if no_bootstrap && !initial.satisfied() {
-                return Err(wombat::WombatError::configuration(
-                    "setup --no-bootstrap requires every requirement to be satisfied",
-                ));
-            }
             if !no_bootstrap && !initial.satisfied() {
                 let bootstrapped =
-                    wombat::bootstrap_exact(&outcome.build_dir, yes, &outcome.build_id)?;
+                    wombat::bootstrap_exact(&outcome.build_dir, true, &outcome.build_id)?;
                 print!("{}", stdout.human_output(&bootstrapped.display()));
             }
             if no_deploy {
@@ -324,16 +443,32 @@ fn main() -> ExitCode {
             project_arguments,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
             if project_arguments == [OsString::from("--help")] {
-                let help = wombat::project_help(&source_root, None)?;
+                let help = wombat::project_help_with_options(configured_build_options(
+                    &source_root,
+                    build_dir,
+                    std::iter::empty::<OsString>(),
+                )?)?;
                 print!("{}", stdout.human_output(&help));
                 Ok(())
             } else {
-                wombat::build(
-                    wombat::BuildOptions::new(source_root, build_dir)
-                        .with_project_arguments(project_arguments),
-                )
+                wombat::build(configured_build_options(
+                    source_root,
+                    build_dir,
+                    project_arguments,
+                )?)
                 .map(|outcome| print_build_outcome(&outcome, stdout))
             }
+        }),
+        Command::Prepare {
+            build_dir,
+            yes,
+            project_arguments,
+        } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
+            wombat::prepare(
+                configured_build_options(source_root, build_dir, project_arguments)?,
+                yes,
+            )
+            .map(|outcome| print!("{}", stdout.human_output(&outcome.display())))
         }),
         Command::Init { path } => {
             let selected = match (cli.source.as_deref(), path.as_deref()) {
@@ -358,11 +493,39 @@ fn main() -> ExitCode {
             .and_then(|source_root| wombat::config::resolve_home().map(|home| (source_root, home)))
             .and_then(|(source_root, home)| wombat::add(&source_root, &home, &target))
             .map(|outcome| println!("{}", stdout.paint(wombat::Role::Success, outcome.display()))),
-        Command::Inspect { section, build_dir } => {
-            resolve_product_path(cli.source.as_deref(), build_dir)
-                .and_then(|(build_dir, _)| wombat::inspect(&build_dir, section.into()))
-                .map(|output| print!("{}", stdout.human_output(&output)))
-        }
+        Command::Inspect {
+            section,
+            plan_section,
+            build_dir,
+            project_arguments,
+        } => match section {
+            InspectArg::Plan => wombat::config::resolve_source(cli.source.as_deref())
+                .and_then(|source_root| {
+                    wombat::plan(configured_build_options(
+                        source_root,
+                        build_dir,
+                        project_arguments,
+                    )?)
+                })
+                .map(|outcome| {
+                    let output = wombat::inspect_plan(
+                        &outcome.plan,
+                        plan_section.unwrap_or(PlanInspectArg::Overview).into(),
+                    );
+                    print!("{}", stdout.human_output(&output));
+                }),
+            section => {
+                if plan_section.is_some() || !project_arguments.is_empty() {
+                    Err(wombat::WombatError::configuration(
+                        "completed-product inspection does not accept a plan section or project arguments",
+                    ))
+                } else {
+                    resolve_product_path(cli.source.as_deref(), build_dir)
+                        .and_then(|(build_dir, _)| wombat::inspect(&build_dir, section.into()))
+                        .map(|output| print!("{}", stdout.human_output(&output)))
+                }
+            }
+        },
         Command::Explain {
             artifact,
             build_dir,
@@ -417,16 +580,21 @@ fn main() -> ExitCode {
             project_arguments,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
             if project_arguments == [OsString::from("--help")] {
-                let help = wombat::project_help(&source_root, None)?;
+                let help = wombat::project_help_with_options(configured_build_options(
+                    &source_root,
+                    build_dir,
+                    std::iter::empty::<OsString>(),
+                )?)?;
                 print!("{}", stdout.human_output(&help));
                 return Ok(());
             }
             let target_home_explicit = target_home.is_some();
             let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
-            let outcome = wombat::build(
-                wombat::BuildOptions::new(&source_root, build_dir)
-                    .with_project_arguments(project_arguments),
-            )?;
+            let outcome = wombat::build(configured_build_options(
+                &source_root,
+                build_dir,
+                project_arguments,
+            )?)?;
             print_build_outcome(&outcome, stdout);
             let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_home)
                 .with_target_home_explicit(target_home_explicit);
@@ -528,6 +696,16 @@ fn print_build_outcome(outcome: &wombat::BuildOutcome, presenter: wombat::Presen
     );
 }
 
+fn configured_build_options(
+    source_root: impl Into<PathBuf>,
+    build_dir: impl Into<PathBuf>,
+    project_arguments: impl IntoIterator<Item = impl Into<OsString>>,
+) -> wombat::Result<wombat::BuildOptions> {
+    Ok(wombat::BuildOptions::new(source_root, build_dir)
+        .with_project_arguments(project_arguments)
+        .with_task_interpreters(wombat::config::resolve_task_interpreters()?))
+}
+
 fn resolve_deployment_options(
     source: Option<&std::path::Path>,
     build_dir: PathBuf,
@@ -569,6 +747,27 @@ fn effective_policy(explicit: Option<ConflictArg>) -> wombat::ConflictPolicy {
         },
         Into::into,
     )
+}
+
+fn confirm_setup() -> wombat::Result<()> {
+    if !io::stdin().is_terminal() {
+        return Err(wombat::WombatError::configuration(
+            "setup requires --yes for pending host or target requirement changes when standard input is not a terminal",
+        ));
+    }
+    eprint!("continue with this setup plan? [y/N] ");
+    io::stderr()
+        .flush()
+        .map_err(|error| wombat::WombatError::io("<stderr>", error))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| wombat::WombatError::io("<stdin>", error))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(wombat::WombatError::configuration("setup cancelled"))
+    }
 }
 
 fn apply_options(

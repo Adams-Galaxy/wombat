@@ -1,7 +1,8 @@
 {
-  "format_version": 9,
+  "format_version": 10,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:c4119c280569d11c7ca6147d5335fe20d248f196f5189e4b0348e32227c32903",
+  "build_id": "sha256:cc4f25d06677e7f72d5fc4e99a1c2e34c816b70e653a0b7dbee17c75ee3e28f8",
+  "plan_id": "sha256:797a6e2f253868c5d72f1096326cf1236c63db8cc80ea236e625777bfccfb593",
   "sources": [
     {
       "path": "modules/auto.lua",
@@ -106,9 +107,13 @@
       }
     }
   ],
+  "build_providers": [],
+  "build_requirements": [],
+  "build_preparations": [],
   "providers": [],
   "requirements": [],
   "preparations": [],
+  "tasks": [],
   "artifacts": [
     {
       "kind": "file",

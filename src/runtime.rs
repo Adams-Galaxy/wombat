@@ -8,24 +8,28 @@ use std::rc::Rc;
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value};
 use sha2::{Digest, Sha256};
 
-use crate::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
+use crate::context::{
+    HostContext, OperatingSystemName, ResolvedTarget, TargetOrigin, TargetPlatform,
+};
 use crate::frozen::FrozenValue;
 use crate::inputs::{self, InputSpec};
 use crate::manifest::{
     ArtifactKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact, EvaluatedDirectory,
-    EvaluatedManifest, EvaluatedProduction, InferenceBasis, MAX_SOURCE_TRACE_FRAMES,
+    EvaluatedManifest, EvaluatedProduction, EvaluatedTask, InferenceBasis, MAX_SOURCE_TRACE_FRAMES,
     ManifestModule, Observation, ObservationSubject, Provider, ProviderBinding, ProviderOrigin,
     ProviderPreparation, Publications, Requirement, RequirementCandidate, RequirementChoice,
     RequirementKind, ResolutionAttempt, ResolutionOutcome, SourceAnchor, SourceFile,
-    SourceLocation, SourceOrigin, SourceTrace,
+    SourceLocation, SourceOrigin, SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner,
+    TaskRunnerFamily, TaskTargetRoot,
 };
 use crate::path::{
     expand_target_root, infer_target, infer_target_root, parse_explicit_target,
     parse_explicit_target_root, prefixed_source, reject_noncanonical_artifact_trees,
-    validate_declared_source,
+    validate_declared_source, validate_relative_path,
 };
 use crate::source::{
-    SourceFingerprint, join_portable, snapshot_directory, validate_source_components,
+    SourceFingerprint, fingerprint_regular_file, join_portable, snapshot_directory,
+    validate_source_components,
 };
 use crate::{Diagnostic, Result, WombatError};
 
@@ -104,6 +108,11 @@ struct RuntimeState {
     dependencies: BTreeSet<Dependency>,
     providers: Vec<Provider>,
     requirements: Vec<Requirement>,
+    build_providers: Vec<Provider>,
+    build_providers_declared: bool,
+    build_requirements: Vec<Requirement>,
+    task_interpreters: BTreeMap<String, TaskRunner>,
+    tasks: Vec<EvaluatedTask>,
     artifacts: Vec<EvaluatedArtifact>,
     directories: Vec<EvaluatedDirectory>,
     stack: Vec<String>,
@@ -147,6 +156,7 @@ impl RuntimeState {
 pub(crate) struct EvaluationOptions {
     pub project_arguments: Vec<OsString>,
     pub host: HostContext,
+    pub task_interpreters: BTreeMap<String, TaskRunner>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +171,7 @@ pub(crate) fn evaluate(root: &Path) -> Result<EvaluatedManifest> {
         EvaluationOptions {
             project_arguments: Vec::new(),
             host: HostContext::observe()?,
+            task_interpreters: BTreeMap::new(),
         },
     )?;
     match outcome {
@@ -185,6 +196,11 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         dependencies: BTreeSet::new(),
         providers: Vec::new(),
         requirements: Vec::new(),
+        build_providers: Vec::new(),
+        build_providers_declared: false,
+        build_requirements: Vec::new(),
+        task_interpreters: options.task_interpreters,
+        tasks: Vec::new(),
         artifacts: Vec::new(),
         directories: Vec::new(),
         stack: Vec::new(),
@@ -234,10 +250,12 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     evaluate_selected_modules(&lua, &state)?;
     validate_dependency_cycles(&state.borrow())?;
     validate_artifact_conflicts(&state.borrow().artifacts)?;
-    let preparations = plan_provider_preparations(&state)?;
+    let preparations = plan_provider_preparations(&state, false)?;
+    let build_preparations = plan_provider_preparations(&state, true)?;
 
     Ok(EvaluationOutcome::Manifest(Box::new(build_manifest(
         &state.borrow(),
+        build_preparations,
         preparations,
     ))))
 }
@@ -395,7 +413,18 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
         "configure_providers",
         lua.create_function(move |lua, entries: Value| {
             let location = caller_location(lua, &providers_state);
-            configure_providers(&providers_state, entries, location).map_err(mlua::Error::external)
+            configure_providers(&providers_state, entries, location, false)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let build_providers_state = Rc::clone(&state);
+    native.set(
+        "configure_build_providers",
+        lua.create_function(move |lua, entries: Value| {
+            let location = caller_location(lua, &build_providers_state);
+            configure_providers(&build_providers_state, entries, location, true)
+                .map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -408,15 +437,63 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
                 declare_requirement(
                     lua,
                     &requirement_state,
-                    &kind,
-                    &name,
-                    options,
-                    preferred,
-                    location,
+                    RequirementDeclaration {
+                        kind: &kind,
+                        name: &name,
+                        options,
+                        preferred,
+                        location,
+                        build_scope: false,
+                    },
                 )
                 .map_err(mlua::Error::external)
             },
         )?,
+    )?;
+
+    let build_requirement_state = Rc::clone(&state);
+    native.set(
+        "declare_build_requirement",
+        lua.create_function(
+            move |lua, (kind, name, options, preferred): (String, String, Value, bool)| {
+                let location = caller_location(lua, &build_requirement_state);
+                declare_requirement(
+                    lua,
+                    &build_requirement_state,
+                    RequirementDeclaration {
+                        kind: &kind,
+                        name: &name,
+                        options,
+                        preferred,
+                        location,
+                        build_scope: true,
+                    },
+                )
+                .map_err(mlua::Error::external)
+            },
+        )?,
+    )?;
+
+    let task_state = Rc::clone(&state);
+    native.set(
+        "declare_task",
+        lua.create_function(
+            move |lua, (entrypoint, params, options): (String, Value, Value)| {
+                let location = caller_location(lua, &task_state);
+                declare_task(lua, &task_state, &entrypoint, params, options, location)
+                    .map_err(mlua::Error::external)
+            },
+        )?,
+    )?;
+
+    let generated_state = Rc::clone(&state);
+    native.set(
+        "declare_generated",
+        lua.create_function(move |lua, (name, options): (String, Value)| {
+            let location = caller_location(lua, &generated_state);
+            declare_generated(&generated_state, &name, options, location)
+                .map_err(mlua::Error::external)
+        })?,
     )?;
 
     native.set(
@@ -714,6 +791,7 @@ fn configure_providers(
     state: &Rc<RefCell<RuntimeState>>,
     entries: Value,
     location: Location,
+    build_scope: bool,
 ) -> Result<()> {
     let frozen = FrozenValue::from_lua(entries)?;
     let values = match frozen {
@@ -730,23 +808,51 @@ fn configure_providers(
         let mut state = state.borrow_mut();
         if state.active_module().is_some() {
             return Err(WombatError::configuration(format!(
-                "w.providers() belongs to root policy at {}",
+                "{} belongs to root policy at {}",
+                if build_scope {
+                    "w.build.providers()"
+                } else {
+                    "w.providers()"
+                },
                 location.display()
             )));
         }
-        if !state.providers.is_empty() {
+        let already_declared = if build_scope {
+            state.build_providers_declared
+        } else {
+            !state.providers.is_empty()
+        };
+        if already_declared {
             return Err(WombatError::configuration(format!(
-                "w.providers() may be declared only once; repeated at {}",
+                "{} may be declared only once; repeated at {}",
+                if build_scope {
+                    "w.build.providers()"
+                } else {
+                    "w.providers()"
+                },
                 location.display()
             )));
         }
-        if state.root_policy_started {
+        if !state.modules.is_empty()
+            || !state.artifacts.is_empty()
+            || !state.requirements.is_empty()
+            || !state.build_requirements.is_empty()
+            || !state.tasks.is_empty()
+        {
             return Err(WombatError::configuration(format!(
-                "w.providers() must run before use(), using(), install(), or need() at {}",
+                "{} must run before use(), using(), install(), need(), generate(), or build.task() at {}",
+                if build_scope {
+                    "w.build.providers()"
+                } else {
+                    "w.providers()"
+                },
                 location.display()
             )));
         }
         state.root_policy_started = true;
+        if build_scope {
+            state.build_providers_declared = true;
+        }
         state.root.clone()
     };
 
@@ -831,7 +937,11 @@ fn configure_providers(
         .filter(|provider| matches!(provider.origin, ProviderOrigin::Custom { .. }))
         .map(|provider| provider.name.clone())
         .collect::<Vec<_>>();
-    state.borrow_mut().providers = configured;
+    if build_scope {
+        state.borrow_mut().build_providers = configured;
+    } else {
+        state.borrow_mut().providers = configured;
+    }
     for name in custom_names {
         validate_custom_provider(state, &name)?;
         record_provider_sources(state, &name)?;
@@ -839,15 +949,28 @@ fn configure_providers(
     Ok(())
 }
 
-fn declare_requirement(
-    lua: &Lua,
-    state: &Rc<RefCell<RuntimeState>>,
-    kind: &str,
-    name: &str,
+struct RequirementDeclaration<'a> {
+    kind: &'a str,
+    name: &'a str,
     options: Value,
     preferred: bool,
     location: Location,
+    build_scope: bool,
+}
+
+fn declare_requirement(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    declaration: RequirementDeclaration<'_>,
 ) -> Result<Value> {
+    let RequirementDeclaration {
+        kind,
+        name,
+        options,
+        preferred,
+        location,
+        build_scope,
+    } = declaration;
     let options = if options.is_nil() {
         FrozenValue::empty_map()
     } else {
@@ -855,7 +978,8 @@ fn declare_requirement(
     };
     let FrozenValue::Map(mut options) = options else {
         return Err(WombatError::configuration(format!(
-            "w.{}.{}() options must be a table",
+            "w.{}{}.{}() options must be a table",
+            if build_scope { "build." } else { "" },
             if preferred { "prefer" } else { "need" },
             kind
         )));
@@ -928,11 +1052,23 @@ fn declare_requirement(
     }
     reject_unknown_options(&options, "requirement")?;
 
+    ensure_build_provider_defaults(state, &location, build_scope)?;
     let (owner, providers, target) = {
         let mut state = state.borrow_mut();
-        if state.providers.is_empty() {
+        let providers = if build_scope {
+            state.build_providers.clone()
+        } else {
+            state.providers.clone()
+        };
+        if providers.is_empty() {
             return Err(WombatError::configuration(format!(
-                "requirements need root provider policy; call w.providers() before {} at {}",
+                "{} requirements need provider policy; call {} before {} at {}",
+                if build_scope { "build" } else { "target" },
+                if build_scope {
+                    "w.build.providers()"
+                } else {
+                    "w.providers()"
+                },
                 if preferred { "w.prefer()" } else { "w.need()" },
                 location.display()
             )));
@@ -942,8 +1078,12 @@ fn declare_requirement(
         }
         (
             state.active_module().unwrap_or(ROOT_MODULE).to_string(),
-            state.providers.clone(),
-            effective_target(&state),
+            providers,
+            if build_scope {
+                state.host.platform.clone()
+            } else {
+                effective_target(&state)
+            },
         )
     };
 
@@ -1027,8 +1167,64 @@ fn declare_requirement(
         binding,
     };
     let handle = resolved_requirement_handle(&requirement);
-    state.borrow_mut().requirements.push(requirement);
+    if build_scope {
+        state.borrow_mut().build_requirements.push(requirement);
+    } else {
+        state.borrow_mut().requirements.push(requirement);
+    }
     readonly_frozen(lua, handle).map_err(WombatError::from)
+}
+
+fn ensure_build_provider_defaults(
+    state: &Rc<RefCell<RuntimeState>>,
+    location: &Location,
+    build_scope: bool,
+) -> Result<()> {
+    if !build_scope {
+        return Ok(());
+    }
+    let mut state = state.borrow_mut();
+    if state.build_providers_declared || !state.build_providers.is_empty() {
+        return Ok(());
+    }
+    let (name, config) = match state.host.platform.os.name {
+        OperatingSystemName::Macos => ("brew", FrozenValue::empty_map()),
+        OperatingSystemName::Linux => {
+            let debian = state
+                .host
+                .platform
+                .os
+                .distribution
+                .as_ref()
+                .is_some_and(|distribution| {
+                    matches!(distribution.id.as_str(), "debian" | "ubuntu")
+                        || distribution.id_like.iter().any(|id| id == "debian")
+                });
+            if !debian {
+                return Err(WombatError::configuration(format!(
+                    "cannot infer a host build provider for Linux distribution at {}; call w.build.providers() explicitly",
+                    location.display()
+                )));
+            }
+            (
+                "apt",
+                FrozenValue::Map(BTreeMap::from([(
+                    "update".to_string(),
+                    FrozenValue::Boolean(true),
+                )])),
+            )
+        }
+    };
+    state.build_providers.push(Provider {
+        name: name.to_string(),
+        priority: 0,
+        config,
+        origin: ProviderOrigin::Builtin {
+            contract_version: 1,
+        },
+        declared_at: location.trace.clone(),
+    });
+    Ok(())
 }
 
 fn parse_requirement_candidate(
@@ -1264,13 +1460,26 @@ fn validate_custom_provider(state: &Rc<RefCell<RuntimeState>>, name: &str) -> Re
 
 fn plan_provider_preparations(
     state: &Rc<RefCell<RuntimeState>>,
+    build_scope: bool,
 ) -> Result<Vec<ProviderPreparation>> {
     let (providers, requirements, target) = {
         let state = state.borrow();
         (
-            state.providers.clone(),
-            state.requirements.clone(),
-            effective_target(&state),
+            if build_scope {
+                state.build_providers.clone()
+            } else {
+                state.providers.clone()
+            },
+            if build_scope {
+                state.build_requirements.clone()
+            } else {
+                state.requirements.clone()
+            },
+            if build_scope {
+                state.host.platform.clone()
+            } else {
+                effective_target(&state)
+            },
         )
     };
     let mut preparations = Vec::new();
@@ -1499,18 +1708,36 @@ fn record_provider_sources(state: &Rc<RefCell<RuntimeState>>, provider_name: &st
         .collect::<Result<Vec<_>>>()?;
     files.sort_by(|left, right| left.payload.cmp(&right.payload));
     let mut state = state.borrow_mut();
-    let configured = state
+    let mut found = false;
+    if let Some(configured) = state
         .providers
         .iter_mut()
         .find(|provider| provider.name == provider_name)
-        .expect("resolved provider is configured");
-    if let ProviderOrigin::Custom {
-        files: configured_files,
-        ..
-    } = &mut configured.origin
     {
-        *configured_files = files;
+        found = true;
+        if let ProviderOrigin::Custom {
+            files: configured_files,
+            ..
+        } = &mut configured.origin
+        {
+            *configured_files = files.clone();
+        }
     }
+    if let Some(configured) = state
+        .build_providers
+        .iter_mut()
+        .find(|provider| provider.name == provider_name)
+    {
+        found = true;
+        if let ProviderOrigin::Custom {
+            files: configured_files,
+            ..
+        } = &mut configured.origin
+        {
+            *configured_files = files;
+        }
+    }
+    debug_assert!(found, "resolved provider is configured");
     Ok(())
 }
 
@@ -1887,6 +2114,374 @@ fn current_module_config(lua: &Lua, state: &Rc<RefCell<RuntimeState>>) -> Result
     config.to_lua(lua).map_err(WombatError::from)
 }
 
+fn declare_generated(
+    state: &Rc<RefCell<RuntimeState>>,
+    name: &str,
+    options: Value,
+    location: Location,
+) -> Result<()> {
+    validate_relative_path(name, "generated artifact name")?;
+    let Value::Table(options) = options else {
+        return Err(WombatError::configuration(
+            "w.generate() requires an options table",
+        ));
+    };
+    let keys = options
+        .clone()
+        .pairs::<Value, Value>()
+        .map(|pair| pair.map(|(key, _)| key))
+        .collect::<mlua::Result<Vec<_>>>()?;
+    for key in keys {
+        let Value::String(key) = key else {
+            return Err(WombatError::configuration(
+                "w.generate() option names must be strings",
+            ));
+        };
+        let key = key.to_str()?;
+        if !matches!(key.as_ref(), "content" | "to" | "executable") {
+            return Err(WombatError::configuration(format!(
+                "w.generate() does not support option `{key}`"
+            )));
+        }
+    }
+    let content = options.get::<Value>("content")?;
+    let Value::String(content) = content else {
+        return Err(WombatError::configuration(
+            "w.generate() requires binary-safe string `content`",
+        ));
+    };
+    let bytes = content.as_bytes().to_vec();
+    let explicit_target = options.get::<Option<String>>("to")?;
+    let executable = options.get::<Option<bool>>("executable")?.unwrap_or(false);
+
+    let mut state = state.borrow_mut();
+    let (_, module_anchor) = state.active_location();
+    let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
+    let target = match explicit_target.as_deref() {
+        Some(target) => parse_explicit_target(target)?,
+        None => {
+            let anchor = module_anchor.ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "cannot infer a target for generated artifact `{name}` from root policy; provide `to` at {}",
+                    location.display()
+                ))
+            })?;
+            infer_target(anchor, name, InferenceBasis::ModuleAnchor)?
+        }
+    };
+    state.root_policy_started = true;
+    state.artifacts.push(EvaluatedArtifact {
+        kind: ArtifactKind::File,
+        source: format!(
+            "generated/{}/{}",
+            if owner == ROOT_MODULE { "root" } else { &owner },
+            name
+        ),
+        source_origin: SourceOrigin::Generated {
+            name: name.to_string(),
+        },
+        production: EvaluatedProduction::GeneratedLua {
+            content: bytes,
+            executable,
+        },
+        target,
+        fingerprint: None,
+        owner,
+        declared_at: location.trace,
+    });
+    Ok(())
+}
+
+fn declare_task(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    entrypoint: &str,
+    params: Value,
+    options: Value,
+    location: Location,
+) -> Result<()> {
+    validate_relative_path(entrypoint, "task entrypoint")?;
+    let params = FrozenValue::from_lua(params)?;
+    if !matches!(params, FrozenValue::Map(_)) {
+        return Err(WombatError::configuration(
+            "w.build.task() params must be a string-keyed table",
+        ));
+    }
+    let params_json = serde_json::to_vec(&params)?;
+    if params_json.len() > 64 * 1024 {
+        return Err(WombatError::configuration(
+            "w.build.task() params exceed the 64 KiB argv limit; pass large or binary inputs through files",
+        ));
+    }
+    let frozen = FrozenValue::from_lua(options)?;
+    let FrozenValue::Map(mut options) = frozen else {
+        return Err(WombatError::configuration(
+            "w.build.task() options must be a table",
+        ));
+    };
+    let instance = take_optional_string(&mut options, "name", "task")?;
+    if let Some(instance) = &instance
+        && (instance.is_empty()
+            || !instance
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err(WombatError::configuration(format!(
+            "task instance name `{instance}` is invalid; expected ASCII letters, numbers, `-`, or `_`"
+        )));
+    }
+    let explicit_target = take_optional_string(&mut options, "to", "task")?;
+    let python_helper = match options.remove("python_helper") {
+        None => true,
+        Some(FrozenValue::Boolean(value)) => value,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "task `python_helper` must be boolean",
+            ));
+        }
+    };
+    let logs = match options.remove("logs") {
+        None => TaskLogPolicy::Failure,
+        Some(FrozenValue::String(value)) if value == "failure" => TaskLogPolicy::Failure,
+        Some(FrozenValue::String(value)) if value == "always" => TaskLogPolicy::Always,
+        Some(FrozenValue::String(value)) if value == "never" => TaskLogPolicy::Never,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "task `logs` must be `failure`, `always`, or `never`",
+            ));
+        }
+    };
+    let cache = match options.remove("cache") {
+        None | Some(FrozenValue::Boolean(true)) => TaskCachePolicy {
+            enabled: true,
+            revision: None,
+        },
+        Some(FrozenValue::Boolean(false)) => TaskCachePolicy {
+            enabled: false,
+            revision: None,
+        },
+        Some(FrozenValue::Map(mut cache)) => {
+            let revision = take_optional_string(&mut cache, "revision", "task cache")?;
+            reject_unknown_options(&cache, "task cache")?;
+            TaskCachePolicy {
+                enabled: true,
+                revision,
+            }
+        }
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "task `cache` must be boolean or a table containing optional `revision`",
+            ));
+        }
+    };
+
+    let root = state.borrow().root.clone();
+    let absolute = root.join("tasks").join(entrypoint);
+    validate_source_components(&root, &absolute)?;
+    let fingerprint = fingerprint_regular_file(&absolute).map_err(|error| {
+        error.with_note(format!(
+            "task `{entrypoint}` must be a regular file beneath `tasks/`"
+        ))
+    })?;
+    let bytes = fs::read(&absolute).map_err(|error| WombatError::io(&absolute, error))?;
+    let entrypoint_digest = digest_bytes(&bytes);
+    let runner = parse_task_runner(
+        entrypoint,
+        options.remove("interpreter"),
+        &absolute,
+        &state.borrow().task_interpreters,
+    )?;
+    reject_unknown_options(&options, "task")?;
+
+    if let Some(command) = runner.command.as_deref()
+        && runner.family != TaskRunnerFamily::Direct
+        && !command.contains('/')
+        && !command.contains('\\')
+    {
+        let _ = declare_requirement(
+            lua,
+            state,
+            RequirementDeclaration {
+                kind: "command",
+                name: command,
+                options: Value::Nil,
+                preferred: false,
+                location: location.clone(),
+                build_scope: true,
+            },
+        )?;
+    }
+
+    let mut state = state.borrow_mut();
+    let (_, module_anchor) = state.active_location();
+    let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
+    let identity = format!(
+        "{}:{}{}",
+        owner,
+        entrypoint,
+        instance
+            .as_ref()
+            .map(|value| format!("#{value}"))
+            .unwrap_or_default()
+    );
+    if state
+        .tasks
+        .iter()
+        .any(|task| task.task.identity == identity)
+    {
+        return Err(WombatError::configuration(format!(
+            "task `{identity}` is declared more than once; add a unique `name` option"
+        )));
+    }
+    let target_root = match explicit_target.as_deref() {
+        Some(target) => Some(parse_explicit_target_root(target)?),
+        None => module_anchor
+            .map(|anchor| infer_target_root(anchor, "", InferenceBasis::ModuleAnchor))
+            .transpose()?,
+    }
+    .map(|root| TaskTargetRoot {
+        anchor: root.anchor,
+        path: root.path,
+        origin: root.origin,
+    });
+    state.root_policy_started = true;
+    state.tasks.push(EvaluatedTask {
+        task: Task {
+            identity,
+            owner,
+            entrypoint: format!("tasks/{entrypoint}"),
+            entrypoint_digest,
+            params,
+            runner,
+            python_helper,
+            logs,
+            cache,
+            target_root,
+            declared_at: location.trace,
+            outputs: Vec::new(),
+        },
+        fingerprint,
+    });
+    Ok(())
+}
+
+fn parse_task_runner(
+    entrypoint: &str,
+    configured: Option<FrozenValue>,
+    absolute: &Path,
+    configured_defaults: &BTreeMap<String, TaskRunner>,
+) -> Result<TaskRunner> {
+    if let Some(configured) = configured {
+        let (command, args) = match configured {
+            FrozenValue::String(command) if !command.is_empty() => (command, Vec::new()),
+            FrozenValue::Map(mut values) => {
+                let command = take_string(&mut values, "command", "task interpreter")?;
+                let args = match values.remove("args") {
+                    None => Vec::new(),
+                    Some(FrozenValue::Array(values)) => values
+                        .into_iter()
+                        .map(|value| match value {
+                            FrozenValue::String(value) => Ok(value),
+                            _ => Err(WombatError::configuration(
+                                "task interpreter args must be strings",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    Some(_) => {
+                        return Err(WombatError::configuration(
+                            "task interpreter `args` must be an array",
+                        ));
+                    }
+                };
+                reject_unknown_options(&values, "task interpreter")?;
+                (command, args)
+            }
+            _ => {
+                return Err(WombatError::configuration(
+                    "task `interpreter` must be a non-empty command string or table",
+                ));
+            }
+        };
+        validate_interpreter_command(&command)?;
+        return Ok(TaskRunner {
+            contract_version: 1,
+            family: if entrypoint.ends_with(".py") {
+                TaskRunnerFamily::Python
+            } else {
+                TaskRunnerFamily::Custom
+            },
+            command: Some(command),
+            args,
+        });
+    }
+    let configured_name = match Path::new(entrypoint)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("py") => Some("python"),
+        Some("sh") => Some("shell"),
+        Some("bash") => Some("bash"),
+        Some("lua") => Some("lua"),
+        _ => None,
+    };
+    if let Some(runner) = configured_name.and_then(|name| configured_defaults.get(name)) {
+        return Ok(runner.clone());
+    }
+    let (family, command) = match Path::new(entrypoint)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("py") => (TaskRunnerFamily::Python, Some("python3".to_string())),
+        Some("sh") => (TaskRunnerFamily::PosixShell, Some("sh".to_string())),
+        Some("bash") => (TaskRunnerFamily::Bash, Some("bash".to_string())),
+        Some("lua") => (TaskRunnerFamily::EmbeddedLua, None),
+        None if source_executable(absolute)? => (TaskRunnerFamily::Direct, None),
+        None => {
+            return Err(WombatError::configuration(format!(
+                "extensionless task `{entrypoint}` must be executable or declare `interpreter`"
+            )));
+        }
+        Some(extension) => {
+            return Err(WombatError::configuration(format!(
+                "cannot infer an interpreter for task `{entrypoint}` with extension `.{extension}`; declare `interpreter`"
+            )));
+        }
+    };
+    Ok(TaskRunner {
+        contract_version: 1,
+        family,
+        command,
+        args: Vec::new(),
+    })
+}
+
+fn validate_interpreter_command(command: &str) -> Result<()> {
+    if command.is_empty() {
+        return Err(WombatError::configuration(
+            "task interpreter command must not be empty",
+        ));
+    }
+    let path = Path::new(command);
+    if path.components().count() > 1 && !path.is_absolute() {
+        return Err(WombatError::configuration(format!(
+            "task interpreter `{command}` must be a bare command or absolute path"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn source_executable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).map_err(|error| WombatError::io(path, error))?;
+    Ok(metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn source_executable(_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
 fn register_artifact(
     state: &Rc<RefCell<RuntimeState>>,
     source_path: &str,
@@ -1977,7 +2572,7 @@ fn register_artifact(
             },
             production,
             target,
-            fingerprint: SourceFingerprint::from_metadata(&metadata),
+            fingerprint: Some(SourceFingerprint::from_metadata(&metadata)),
             owner,
             declared_at: location.trace,
         });
@@ -2017,7 +2612,7 @@ fn register_artifact(
                 },
                 production: EvaluatedProduction::Static,
                 target: expand_target_root(&target_root, &leaf.relative)?,
-                fingerprint: leaf.fingerprint.clone(),
+                fingerprint: Some(leaf.fingerprint.clone()),
                 owner: owner.clone(),
                 declared_at: location.trace.clone(),
             });
@@ -2254,6 +2849,7 @@ fn visit_dependency<'a>(
 
 fn build_manifest(
     state: &RuntimeState,
+    build_preparations: Vec<ProviderPreparation>,
     preparations: Vec<ProviderPreparation>,
 ) -> EvaluatedManifest {
     let modules = state
@@ -2288,6 +2884,7 @@ fn build_manifest(
     });
 
     EvaluatedManifest {
+        plan_id: String::new(),
         sources: state
             .sources
             .values()
@@ -2298,9 +2895,13 @@ fn build_manifest(
         observations: state.observations.values().cloned().collect(),
         modules,
         dependencies,
+        build_providers: state.build_providers.clone(),
+        build_requirements: state.build_requirements.clone(),
+        build_preparations,
         providers: state.providers.clone(),
         requirements: state.requirements.clone(),
         preparations,
+        tasks: state.tasks.clone(),
         artifacts,
         directories,
     }
@@ -2319,7 +2920,7 @@ fn validate_module_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Result<()> {
+pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Result<()> {
     let mut ordered = artifacts.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         left.target
@@ -2395,6 +2996,13 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
                     relative,
                 } => format!(
                     "`{}` (leaf `{relative}` expanded from directory `{declared}` at `{root}`)",
+                    artifact.source
+                ),
+                SourceOrigin::Generated { name } => {
+                    format!("`{}` (generated value `{name}`)", artifact.source)
+                }
+                SourceOrigin::Task { identity, relative } => format!(
+                    "`{}` (task `{identity}` output `{relative}`)",
                     artifact.source
                 ),
             };

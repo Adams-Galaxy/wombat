@@ -112,7 +112,7 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 }
 
 #[test]
-fn template_fixture_matches_exact_manifest_v9_and_rendered_tree() {
+fn template_fixture_matches_exact_manifest_v10_and_rendered_tree() {
     let root = fixture("templates");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
@@ -322,6 +322,46 @@ fn template_source_and_context_changes_affect_build_identity() {
     repository.write("dot_config/value.tmpl", "value={{ value }}\n");
     let source = repository.build().unwrap();
     assert_ne!(context.build_id, source.build_id);
+}
+
+#[test]
+fn template_cache_corruption_is_recomputed_without_changing_the_product() {
+    let repository = basic_repository(
+        "local w = require('wombat')\nw.install('value.tmpl', { with = { value = 'one' } })\n",
+        "value.tmpl",
+        "{{ value }}\n",
+    );
+    let first = repository.build().unwrap();
+    let derivation = fs::read_dir(
+        repository
+            .root
+            .join("build/.wombat/cache/derivations/templates"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&derivation).unwrap()).unwrap();
+    let digest = record["digest"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    let blob = repository
+        .root
+        .join("build/.wombat/cache/blobs/sha256")
+        .join(digest);
+    fs::write(&blob, "corrupt").unwrap();
+
+    let repaired = repository.build().unwrap();
+    assert_eq!(repaired.build_id, first.build_id);
+    assert_eq!(fs::read(&blob).unwrap(), b"one\n");
+    fs::write(&derivation, "not json").unwrap();
+    let descriptor = repository.build().unwrap();
+    assert_eq!(descriptor.build_id, first.build_id);
+    assert!(serde_json::from_slice::<serde_json::Value>(&fs::read(derivation).unwrap()).is_ok());
 }
 
 #[test]

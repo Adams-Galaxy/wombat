@@ -1,7 +1,8 @@
 {
-  "format_version": 9,
+  "format_version": 10,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:4c317a86a056cc2fb9ed4c6b7e5e90377d75d1ac98065c8543a07e439f16e345",
+  "build_id": "sha256:71f229f25e4fc40a62dbc0e3acad4e11c6bb192fff1ef8c8543cb4fd33c1d77a",
+  "plan_id": "sha256:5471df6c4e456d4e2e283ec21bd2d0bbe15fd8933db1df2cf122f13a3fc2c4ba",
   "sources": [
     {
       "path": "modules/dot_config/starship.lua",
@@ -109,9 +110,13 @@
       }
     }
   ],
+  "build_providers": [],
+  "build_requirements": [],
+  "build_preparations": [],
   "providers": [],
   "requirements": [],
   "preparations": [],
+  "tasks": [],
   "artifacts": [
     {
       "kind": "file",

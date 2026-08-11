@@ -35,6 +35,8 @@ pub struct BuildOptions {
     pub build_dir: PathBuf,
     pub project_arguments: Vec<OsString>,
     pub host: Option<HostContext>,
+    #[doc(hidden)]
+    pub task_interpreters: BTreeMap<String, crate::manifest::TaskRunner>,
 }
 
 impl BuildOptions {
@@ -44,6 +46,7 @@ impl BuildOptions {
             build_dir: build_dir.into(),
             project_arguments: Vec::new(),
             host: None,
+            task_interpreters: BTreeMap::new(),
         }
     }
 
@@ -57,6 +60,15 @@ impl BuildOptions {
 
     pub fn with_host(mut self, host: HostContext) -> Self {
         self.host = Some(host);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_task_interpreters(
+        mut self,
+        interpreters: BTreeMap<String, crate::manifest::TaskRunner>,
+    ) -> Self {
+        self.task_interpreters = interpreters;
         self
     }
 }
@@ -87,6 +99,31 @@ pub struct BuildOutcome {
     pub build_id: String,
     pub artifact_count: usize,
     pub manifest: Manifest,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanOutcome {
+    pub build_dir: PathBuf,
+    pub plan: crate::manifest::BuildPlan,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrepareOutcome {
+    pub build_dir: PathBuf,
+    pub plan_id: String,
+    pub completed: Vec<String>,
+    pub already_satisfied: Vec<String>,
+}
+
+impl PrepareOutcome {
+    pub fn display(&self) -> String {
+        format!(
+            "prepare complete for {} ({} changed, {} already satisfied)\n",
+            self.plan_id,
+            self.completed.len(),
+            self.already_satisfied.len()
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -123,15 +160,20 @@ struct WorkspaceMarker {
 struct IdentityPayload<'a> {
     format_version: u32,
     wombat_version: &'a str,
+    plan_id: &'a str,
     sources: &'a [crate::manifest::SourceFile],
     inputs: &'a [crate::manifest::BuildInput],
     target: &'a crate::context::ResolvedTarget,
     observations: &'a [crate::manifest::Observation],
     modules: &'a [crate::manifest::ManifestModule],
     dependencies: &'a [crate::manifest::Dependency],
+    build_providers: &'a [crate::manifest::Provider],
+    build_requirements: &'a [crate::manifest::Requirement],
+    build_preparations: &'a [crate::manifest::ProviderPreparation],
     providers: &'a [crate::manifest::Provider],
     requirements: &'a [crate::manifest::Requirement],
     preparations: &'a [crate::manifest::ProviderPreparation],
+    tasks: &'a [crate::manifest::Task],
     artifacts: &'a [Artifact],
 }
 
@@ -170,11 +212,12 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
         recover_publication(&build_dir)?;
 
         let host = options.host.map_or_else(HostContext::observe, Ok)?;
-        let desired = match evaluate_with(
+        let mut desired = match evaluate_with(
             &source_root,
             EvaluationOptions {
                 project_arguments: options.project_arguments,
                 host,
+                task_interpreters: options.task_interpreters,
             },
         )? {
             EvaluationOutcome::Manifest(manifest) => *manifest,
@@ -184,6 +227,19 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
                 ));
             }
         };
+        let plan = crate::plan::freeze(&source_root, &desired)?;
+        crate::plan::publish(&build_dir, &source_root, &plan)?;
+        desired.plan_id = plan.plan_id.clone();
+        let construction = crate::requirements::check_plan(&build_dir, &plan)?;
+        if !construction.satisfied() {
+            return Err(WombatError::configuration(format!(
+                "build requirements are not satisfied:\n{}run `wombat prepare -B {}` before building",
+                construction.display(),
+                build_dir.display()
+            )));
+        }
+        crate::tasks::check_runners(&plan.tasks)?;
+        crate::tasks::execute_tasks(&source_root, &build_dir, &mut desired)?;
         let staging_root = internal.join("staging");
         ensure_plain_directory(&staging_root)?;
         clear_directory_contents(&staging_root)?;
@@ -191,7 +247,8 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
             .prefix("build-")
             .tempdir_in(&staging_root)
             .map_err(|error| WombatError::io(&staging_root, error))?;
-        let manifest = materialise(&source_root, staging.path(), desired)?;
+        let cache = crate::cache::BuildCache::open(&build_dir)?;
+        let manifest = materialise(&source_root, staging.path(), desired, &cache)?;
         let staged = verify_product(staging.path())?;
         debug_assert_eq!(staged, manifest);
 
@@ -229,15 +286,110 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
     }
 }
 
+pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
+    let source_root = fs::canonicalize(&options.source_root)
+        .map_err(|error| WombatError::io(&options.source_root, error))?;
+    let requested_build = if options.build_dir.is_absolute() {
+        options.build_dir
+    } else {
+        source_root.join(options.build_dir)
+    };
+    let build_dir = resolve_maybe_missing(&requested_build)?;
+    validate_build_location(&source_root, &build_dir)?;
+    prepare_workspace_directory(&build_dir)?;
+    let internal = build_dir.join(".wombat");
+    ensure_plain_directory(&internal)?;
+    let lock_path = internal.join("lock");
+    ensure_plain_file_or_missing(&lock_path)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| WombatError::io(&lock_path, error))?;
+    acquire_exclusive(&lock, &build_dir)?;
+    let result = (|| {
+        ensure_workspace_marker(&build_dir, &source_root)?;
+        recover_publication(&build_dir)?;
+        let host = options.host.map_or_else(HostContext::observe, Ok)?;
+        let desired = match evaluate_with(
+            &source_root,
+            EvaluationOptions {
+                project_arguments: options.project_arguments,
+                host,
+                task_interpreters: options.task_interpreters,
+            },
+        )? {
+            EvaluationOutcome::Manifest(manifest) => *manifest,
+            EvaluationOutcome::ProjectHelp(_) => {
+                return Err(WombatError::configuration(
+                    "project help was requested where a build plan was expected",
+                ));
+            }
+        };
+        let plan = crate::plan::freeze(&source_root, &desired)?;
+        crate::plan::publish(&build_dir, &source_root, &plan)?;
+        Ok(PlanOutcome {
+            build_dir: build_dir.clone(),
+            plan,
+        })
+    })();
+    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
+    match result {
+        Err(error) => {
+            let _ = unlock;
+            Err(error)
+        }
+        Ok(outcome) => {
+            unlock?;
+            Ok(outcome)
+        }
+    }
+}
+
+pub fn prepare(options: BuildOptions, yes: bool) -> Result<PrepareOutcome> {
+    let first = plan(options.clone())?;
+    let reconciled = crate::requirements::prepare_plan(&first.build_dir, &first.plan, yes)?;
+    let second = plan(options)?;
+    if first.plan.plan_id != second.plan.plan_id {
+        return Err(WombatError::configuration(format!(
+            "build plan changed during preparation: `{}` became `{}`; completed host work: {}; no rollback was attempted",
+            first.plan.plan_id,
+            second.plan.plan_id,
+            if reconciled.completed.is_empty() {
+                "none".to_string()
+            } else {
+                reconciled.completed.join(", ")
+            }
+        )));
+    }
+    Ok(PrepareOutcome {
+        build_dir: second.build_dir,
+        plan_id: second.plan.plan_id,
+        completed: reconciled.completed,
+        already_satisfied: reconciled.already_satisfied,
+    })
+}
+
 pub fn project_help(source_root: &Path, host: Option<HostContext>) -> Result<String> {
+    let mut options = BuildOptions::new(source_root, "build");
+    options.host = host;
+    project_help_with_options(options)
+}
+
+#[doc(hidden)]
+pub fn project_help_with_options(options: BuildOptions) -> Result<String> {
+    let source_root = options.source_root;
     let source_root =
-        fs::canonicalize(source_root).map_err(|error| WombatError::io(source_root, error))?;
-    let host = host.map_or_else(HostContext::observe, Ok)?;
+        fs::canonicalize(&source_root).map_err(|error| WombatError::io(&source_root, error))?;
+    let host = options.host.map_or_else(HostContext::observe, Ok)?;
     match evaluate_with(
         &source_root,
         EvaluationOptions {
             project_arguments: vec![OsString::from("--help")],
             host,
+            task_interpreters: options.task_interpreters,
         },
     )? {
         EvaluationOutcome::ProjectHelp(help) => Ok(help),
@@ -597,8 +749,9 @@ fn materialise(
     source_root: &Path,
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
+    cache: &crate::cache::BuildCache,
 ) -> Result<Manifest> {
-    materialise_with_hook(source_root, product_root, desired, |_| {})
+    materialise_inner(source_root, product_root, desired, Some(cache), |_| {})
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,10 +760,21 @@ enum MaterialisationPoint {
     BeforeFinalValidation,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn materialise_with_hook(
     source_root: &Path,
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
+    hook: impl FnMut(MaterialisationPoint),
+) -> Result<Manifest> {
+    materialise_inner(source_root, product_root, desired, None, hook)
+}
+
+fn materialise_inner(
+    source_root: &Path,
+    product_root: &Path,
+    desired: crate::manifest::EvaluatedManifest,
+    cache: Option<&crate::cache::BuildCache>,
     mut hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
     let tree = product_root.join("tree");
@@ -622,7 +786,7 @@ fn materialise_with_hook(
 
     let mut artifacts = Vec::with_capacity(desired.artifacts.len());
     for (index, artifact) in desired.artifacts.iter().enumerate() {
-        artifacts.push(materialise_artifact(source_root, &tree, artifact)?);
+        artifacts.push(materialise_artifact(source_root, &tree, artifact, cache)?);
         hook(MaterialisationPoint::AfterArtifact(index));
     }
     materialise_provider_payloads(source_root, product_root, &desired.providers)?;
@@ -633,15 +797,20 @@ fn materialise_with_hook(
         format_version: MANIFEST_FORMAT_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
         build_id: String::new(),
+        plan_id: desired.plan_id,
         sources: desired.sources,
         inputs: desired.inputs,
         target: desired.target,
         observations: desired.observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
+        build_providers: desired.build_providers,
+        build_requirements: desired.build_requirements,
+        build_preparations: desired.build_preparations,
         providers: desired.providers,
         requirements: desired.requirements,
         preparations: desired.preparations,
+        tasks: desired.tasks.into_iter().map(|task| task.task).collect(),
         artifacts,
     };
     manifest.build_id = compute_build_id(&manifest)?;
@@ -729,9 +898,9 @@ fn materialise_artifact(
     source_root: &Path,
     tree: &Path,
     artifact: &EvaluatedArtifact,
+    cache: Option<&crate::cache::BuildCache>,
 ) -> Result<Artifact> {
     let source_path = source_root.join(&artifact.source);
-    reject_source_symlinks(source_root, &source_path)?;
     let anchor = match artifact.target.anchor {
         TargetAnchor::Home => "home",
         TargetAnchor::Config => "config",
@@ -740,17 +909,32 @@ fn materialise_artifact(
     let parent = destination.parent().expect("file artifacts have a parent");
     fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
     let (production, content) = match &artifact.production {
-        EvaluatedProduction::Static => (
-            Production::Static,
-            copy_and_hash(&source_path, &destination, &artifact.fingerprint)?,
-        ),
+        EvaluatedProduction::Static => {
+            reject_source_symlinks(source_root, &source_path)?;
+            (
+                Production::Static,
+                copy_and_hash(
+                    &source_path,
+                    &destination,
+                    artifact
+                        .fingerprint
+                        .as_ref()
+                        .expect("static artifacts have fingerprints"),
+                )?,
+            )
+        }
         EvaluatedProduction::Template { context } => {
+            reject_source_symlinks(source_root, &source_path)?;
             let (source_digest, content) = render_and_hash(
                 &source_path,
                 &artifact.source,
                 &destination,
-                &artifact.fingerprint,
+                artifact
+                    .fingerprint
+                    .as_ref()
+                    .expect("template artifacts have fingerprints"),
                 context,
+                cache,
             )?;
             (
                 Production::Template {
@@ -764,6 +948,28 @@ fn materialise_artifact(
                 content,
             )
         }
+        EvaluatedProduction::GeneratedLua {
+            content,
+            executable,
+        } => (
+            Production::GeneratedLua {
+                contract_version: 1,
+            },
+            write_generated(&destination, content, *executable)?,
+        ),
+        EvaluatedProduction::Task {
+            identity,
+            output,
+            content,
+            executable,
+        } => (
+            Production::Task {
+                contract_version: 1,
+                identity: identity.clone(),
+                output: output.clone(),
+            },
+            write_generated(&destination, content, *executable)?,
+        ),
     };
     Ok(Artifact {
         kind: artifact.kind,
@@ -777,12 +983,34 @@ fn materialise_artifact(
     })
 }
 
+fn write_generated(destination: &Path, bytes: &[u8], executable: bool) -> Result<FileContent> {
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(destination)
+        .map_err(|error| WombatError::io(destination, error))?;
+    output
+        .write_all(bytes)
+        .map_err(|error| WombatError::io(destination, error))?;
+    set_normalized_permissions(&output, executable, destination)?;
+    output
+        .sync_all()
+        .map_err(|error| WombatError::io(destination, error))?;
+    Ok(FileContent {
+        digest: digest_string(Sha256::digest(bytes)),
+        size: u64::try_from(bytes.len())
+            .map_err(|_| WombatError::configuration("generated artifact exceeds u64"))?,
+        executable,
+    })
+}
+
 fn render_and_hash(
     source: &Path,
     source_name: &str,
     destination: &Path,
     expected: &SourceFingerprint,
     context: &crate::frozen::FrozenValue,
+    cache: Option<&crate::cache::BuildCache>,
 ) -> Result<(String, FileContent)> {
     let mut input = File::open(source).map_err(|error| WombatError::io(source, error))?;
     let before = input
@@ -811,6 +1039,34 @@ fn render_and_hash(
         ))
     })?;
     let source_digest = digest_string(Sha256::digest(&bytes));
+
+    #[derive(Serialize)]
+    struct TemplateKey<'a> {
+        renderer: &'a str,
+        contract_version: u32,
+        source_digest: &'a str,
+        context: &'a crate::frozen::FrozenValue,
+    }
+    let cache_key = cache
+        .map(|cache| {
+            cache.key(
+                "template-v1",
+                &TemplateKey {
+                    renderer: TEMPLATE_RENDERER_NAME,
+                    contract_version: TEMPLATE_CONTRACT_VERSION,
+                    source_digest: &source_digest,
+                    context,
+                },
+            )
+        })
+        .transpose()?;
+    let executable = executable_intent(&before);
+    if let (Some(cache), Some(key)) = (cache, cache_key.as_deref())
+        && let Some(rendered) = cache.load_template(key)?
+    {
+        let content = write_generated(destination, &rendered, executable)?;
+        return Ok((source_digest, content));
+    }
 
     let mut renderer = handlebars::Handlebars::new();
     renderer.set_strict_mode(true);
@@ -843,11 +1099,13 @@ fn render_and_hash(
     output
         .write_all(rendered)
         .map_err(|error| WombatError::io(destination, error))?;
-    let executable = executable_intent(&before);
     set_normalized_permissions(&output, executable, destination)?;
     output
         .sync_all()
         .map_err(|error| WombatError::io(destination, error))?;
+    if let (Some(cache), Some(key)) = (cache, cache_key.as_deref()) {
+        cache.store_template(key, rendered)?;
+    }
     Ok((
         source_digest,
         FileContent {
@@ -1142,8 +1400,11 @@ fn revalidate_sources(
     directories: &[EvaluatedDirectory],
 ) -> Result<()> {
     for artifact in artifacts {
+        let Some(expected) = &artifact.fingerprint else {
+            continue;
+        };
         let source = source_root.join(&artifact.source);
-        if fingerprint_regular_file(&source)? != artifact.fingerprint {
+        if fingerprint_regular_file(&source)? != *expected {
             return Err(source_changed(&source));
         }
     }
@@ -1212,15 +1473,20 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
     let payload = IdentityPayload {
         format_version: manifest.format_version,
         wombat_version: &manifest.wombat_version,
+        plan_id: &manifest.plan_id,
         sources: &manifest.sources,
         inputs: &manifest.inputs,
         target: &manifest.target,
         observations: &manifest.observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
+        build_providers: &manifest.build_providers,
+        build_requirements: &manifest.build_requirements,
+        build_preparations: &manifest.build_preparations,
         providers: &manifest.providers,
         requirements: &manifest.requirements,
         preparations: &manifest.preparations,
+        tasks: &manifest.tasks,
         artifacts: &manifest.artifacts,
     };
     let bytes = serde_json::to_vec(&payload)?;
@@ -1297,6 +1563,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             manifest.wombat_version
         )));
     }
+    validate_sha256(&manifest.plan_id, "manifest build plan identity")?;
     if !manifest
         .sources
         .windows(2)
@@ -1445,7 +1712,21 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest dependency declaration",
         )?;
     }
-    validate_provider_manifest(manifest, &source_paths)?;
+    validate_provider_scope(
+        &manifest.build_providers,
+        &manifest.build_requirements,
+        &manifest.build_preparations,
+        &source_paths,
+        "build",
+    )?;
+    validate_provider_scope(
+        &manifest.providers,
+        &manifest.requirements,
+        &manifest.preparations,
+        &source_paths,
+        "target",
+    )?;
+    validate_tasks(manifest, &source_paths)?;
     if !manifest.artifacts.windows(2).all(|pair| {
         pair[0]
             .target
@@ -1517,6 +1798,27 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                     ));
                 }
             }
+            SourceOrigin::Generated { name } => {
+                validate_relative_path(name, "manifest generated artifact name")?;
+                if !matches!(artifact.production, Production::GeneratedLua { .. }) {
+                    return Err(WombatError::configuration(
+                        "manifest generated source must use generated Lua production",
+                    ));
+                }
+            }
+            SourceOrigin::Task { identity, relative } => {
+                if identity.is_empty() {
+                    return Err(WombatError::configuration(
+                        "manifest task artifact identity must not be empty",
+                    ));
+                }
+                validate_relative_path(relative, "manifest task output path")?;
+                if !matches!(artifact.production, Production::Task { .. }) {
+                    return Err(WombatError::configuration(
+                        "manifest task source must use task production",
+                    ));
+                }
+            }
         }
         match &artifact.production {
             Production::Static => {}
@@ -1546,6 +1848,36 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 if !matches!(context, crate::frozen::FrozenValue::Map(_)) {
                     return Err(WombatError::configuration(
                         "manifest template context must be a map",
+                    ));
+                }
+            }
+            Production::GeneratedLua { contract_version } => {
+                if *contract_version != 1 {
+                    return Err(WombatError::configuration(
+                        "unsupported generated Lua production contract",
+                    ));
+                }
+            }
+            Production::Task {
+                contract_version,
+                identity,
+                output,
+            } => {
+                if *contract_version != 1 || identity.is_empty() {
+                    return Err(WombatError::configuration(
+                        "unsupported or invalid task production contract",
+                    ));
+                }
+                validate_relative_path(output, "manifest task production output")?;
+                if !matches!(
+                    &artifact.source_origin,
+                    SourceOrigin::Task {
+                        identity: source_identity,
+                        relative,
+                    } if source_identity == identity && relative == output
+                ) {
+                    return Err(WombatError::configuration(
+                        "manifest task production does not match its source origin",
                     ));
                 }
             }
@@ -1596,13 +1928,19 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                         artifact.target.display
                     )));
                 }
-                let prefix = format!("{}/", source_anchor.source_prefix());
-                let relative = artifact.source.strip_prefix(&prefix).ok_or_else(|| {
-                    WombatError::configuration(format!(
-                        "manifest inferred source `{}` is outside its {:?} source anchor",
-                        artifact.source, source_anchor
-                    ))
-                })?;
+                let relative = match &artifact.source_origin {
+                    SourceOrigin::Generated { name } => name.as_str(),
+                    SourceOrigin::Task { relative, .. } => relative.as_str(),
+                    SourceOrigin::Direct { .. } | SourceOrigin::Directory { .. } => {
+                        let prefix = format!("{}/", source_anchor.source_prefix());
+                        artifact.source.strip_prefix(&prefix).ok_or_else(|| {
+                            WombatError::configuration(format!(
+                                "manifest inferred source `{}` is outside its {:?} source anchor",
+                                artifact.source, source_anchor
+                            ))
+                        })?
+                    }
+                };
                 let relative = if matches!(artifact.production, Production::Template { .. }) {
                     relative.strip_suffix(".tmpl").unwrap_or(relative)
                 } else {
@@ -1636,13 +1974,121 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn validate_provider_manifest(
+fn validate_tasks(
     manifest: &Manifest,
     source_paths: &std::collections::BTreeSet<&str>,
 ) -> Result<()> {
+    let mut identities = BTreeSet::new();
+    for task in &manifest.tasks {
+        if task.identity.is_empty() || !identities.insert(task.identity.as_str()) {
+            return Err(WombatError::configuration(
+                "manifest task identities must be non-empty and unique",
+            ));
+        }
+        validate_relative_path(&task.entrypoint, "manifest task entrypoint")?;
+        if !task.entrypoint.starts_with("tasks/") {
+            return Err(WombatError::configuration(
+                "manifest task entrypoints must live beneath `tasks/`",
+            ));
+        }
+        validate_sha256(&task.entrypoint_digest, "manifest task entrypoint digest")?;
+        validate_source_trace(&task.declared_at, source_paths, "manifest task declaration")?;
+        if !matches!(task.params, crate::frozen::FrozenValue::Map(_))
+            || task.runner.contract_version != 1
+            || task.runner.command.as_deref().is_some_and(str::is_empty)
+            || task.cache.revision.as_deref().is_some_and(str::is_empty)
+        {
+            return Err(WombatError::configuration(
+                "manifest task contains invalid parameters, runner, or cache policy",
+            ));
+        }
+        match task.runner.family {
+            crate::manifest::TaskRunnerFamily::EmbeddedLua
+            | crate::manifest::TaskRunnerFamily::Direct
+                if task.runner.command.is_some() =>
+            {
+                return Err(WombatError::configuration(
+                    "embedded and direct task runners must not record an interpreter command",
+                ));
+            }
+            crate::manifest::TaskRunnerFamily::Python
+            | crate::manifest::TaskRunnerFamily::PosixShell
+            | crate::manifest::TaskRunnerFamily::Bash
+            | crate::manifest::TaskRunnerFamily::Custom
+                if task.runner.command.is_none() =>
+            {
+                return Err(WombatError::configuration(
+                    "external task runners must record an interpreter command",
+                ));
+            }
+            _ => {}
+        }
+        if !task
+            .outputs
+            .windows(2)
+            .all(|pair| pair[0].relative < pair[1].relative)
+        {
+            return Err(WombatError::configuration(
+                "manifest task outputs must be uniquely sorted",
+            ));
+        }
+        if task.target_root.is_none() && !task.outputs.is_empty() {
+            return Err(WombatError::configuration(
+                "manifest task with outputs must have a target root",
+            ));
+        }
+        for output in &task.outputs {
+            validate_relative_path(&output.relative, "manifest task output")?;
+            validate_sha256(&output.content.digest, "manifest task output digest")?;
+            let matches = manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| {
+                    matches!(
+                        &artifact.production,
+                        Production::Task { identity, output: relative, .. }
+                            if identity == &task.identity && relative == &output.relative
+                    ) && artifact.content == output.content
+                })
+                .count();
+            if matches != 1 {
+                return Err(WombatError::configuration(format!(
+                    "manifest task `{}` output `{}` does not match exactly one artifact",
+                    task.identity, output.relative
+                )));
+            }
+        }
+    }
+    for artifact in &manifest.artifacts {
+        if let Production::Task {
+            identity, output, ..
+        } = &artifact.production
+            && !manifest.tasks.iter().any(|task| {
+                task.identity == *identity
+                    && task.outputs.iter().any(|candidate| {
+                        candidate.relative == *output && candidate.content == artifact.content
+                    })
+            })
+        {
+            return Err(WombatError::configuration(format!(
+                "manifest task artifact `{}` has no matching task output",
+                artifact.target.display
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_scope(
+    providers: &[crate::manifest::Provider],
+    requirements: &[crate::manifest::Requirement],
+    preparations: &[crate::manifest::ProviderPreparation],
+    source_paths: &std::collections::BTreeSet<&str>,
+    scope: &str,
+) -> Result<()> {
     let mut provider_names = BTreeSet::new();
     let mut payloads = BTreeSet::new();
-    for (index, provider) in manifest.providers.iter().enumerate() {
+    for (index, provider) in providers.iter().enumerate() {
         if !valid_provider_name(&provider.name) || !provider_names.insert(provider.name.as_str()) {
             return Err(WombatError::configuration(format!(
                 "manifest provider name `{}` is invalid or duplicated",
@@ -1650,9 +2096,9 @@ fn validate_provider_manifest(
             )));
         }
         if usize::try_from(provider.priority).ok() != Some(index) {
-            return Err(WombatError::configuration(
-                "manifest provider priorities must be contiguous and ordered",
-            ));
+            return Err(WombatError::configuration(format!(
+                "manifest {scope} provider priorities must be contiguous and ordered"
+            )));
         }
         if !matches!(provider.config, crate::frozen::FrozenValue::Map(_)) {
             return Err(WombatError::configuration(format!(
@@ -1705,7 +2151,7 @@ fn validate_provider_manifest(
         }
     }
 
-    for requirement in &manifest.requirements {
+    for requirement in requirements {
         validate_source_trace(
             &requirement.declared_at,
             source_paths,
@@ -1810,7 +2256,7 @@ fn validate_provider_manifest(
         }
         let mut expected_attempts = Vec::new();
         'candidates: for (candidate_index, candidate) in requirement.candidates.iter().enumerate() {
-            for provider in &manifest.providers {
+            for provider in providers {
                 if let crate::manifest::RequirementCandidate::Package {
                     provider: required, ..
                 } = candidate
@@ -1862,9 +2308,8 @@ fn validate_provider_manifest(
     }
     let mut preparation_identities = BTreeSet::new();
     let mut previous_priority = None;
-    for preparation in &manifest.preparations {
-        let priority = manifest
-            .providers
+    for preparation in preparations {
+        let priority = providers
             .iter()
             .find(|provider| provider.name == preparation.provider)
             .map(|provider| provider.priority)

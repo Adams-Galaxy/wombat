@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::manifest::{
-    Artifact, ArtifactKind, FileContent, Production, SourceOrigin, SourceTrace, TargetPath,
+    Artifact, ArtifactKind, EvaluatedTargetOrigin, FileContent, Production, SourceOrigin,
+    SourceTrace, TargetPath, Task, TaskCachePolicy, TaskLogPolicy, TaskOutput, TaskRunner,
+    TaskRunnerFamily, TaskTargetRoot,
 };
 use crate::{Result, WombatError};
 
@@ -328,10 +330,12 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
             )));
         }
     }
+    let tasks = state_tasks(artifacts);
     let manifest = crate::manifest::Manifest {
         format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
         wombat_version: env!("CARGO_PKG_VERSION").to_string(),
         build_id: String::new(),
+        plan_id: format!("sha256:{}", "0".repeat(64)),
         sources: artifacts
             .iter()
             .map(|artifact| artifact.declared_at.primary.source.clone())
@@ -354,12 +358,66 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         observations: Vec::new(),
         modules: Vec::new(),
         dependencies: Vec::new(),
+        build_providers: Vec::new(),
+        build_requirements: Vec::new(),
+        build_preparations: Vec::new(),
         providers: Vec::new(),
         requirements: Vec::new(),
         preparations: Vec::new(),
+        tasks,
         artifacts: artifacts.iter().map(AppliedArtifact::to_artifact).collect(),
     };
     crate::build::validate_manifest(&manifest)
+}
+
+fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
+    let mut tasks = std::collections::BTreeMap::<String, Task>::new();
+    for artifact in artifacts {
+        let Production::Task {
+            identity, output, ..
+        } = &artifact.production
+        else {
+            continue;
+        };
+        let task = tasks.entry(identity.clone()).or_insert_with(|| Task {
+            identity: identity.clone(),
+            owner: artifact.owner.clone(),
+            entrypoint: "tasks/target-state-placeholder".to_string(),
+            entrypoint_digest: format!("sha256:{}", "0".repeat(64)),
+            params: crate::frozen::FrozenValue::empty_map(),
+            runner: TaskRunner {
+                contract_version: 1,
+                family: TaskRunnerFamily::EmbeddedLua,
+                command: None,
+                args: Vec::new(),
+            },
+            python_helper: false,
+            logs: TaskLogPolicy::Never,
+            cache: TaskCachePolicy {
+                enabled: false,
+                revision: None,
+            },
+            target_root: Some(TaskTargetRoot {
+                anchor: artifact.target.anchor,
+                path: String::new(),
+                origin: EvaluatedTargetOrigin::Explicit {
+                    declared: artifact.target.display.clone(),
+                },
+            }),
+            declared_at: artifact.declared_at.clone(),
+            outputs: Vec::new(),
+        });
+        task.outputs.push(TaskOutput {
+            relative: output.clone(),
+            content: artifact.content.clone(),
+        });
+    }
+    let mut tasks = tasks.into_values().collect::<Vec<_>>();
+    for task in &mut tasks {
+        task.outputs
+            .sort_by(|left, right| left.relative.cmp(&right.relative));
+    }
+    tasks
 }
 
 fn valid_digest(value: &str) -> bool {

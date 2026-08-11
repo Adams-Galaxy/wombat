@@ -256,7 +256,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 }
 
 #[test]
-fn verifier_rejects_v7_unknown_v9_fields_and_internally_inconsistent_provenance() {
+fn verifier_rejects_v7_unknown_v10_fields_and_internally_inconsistent_provenance() {
     let repository = Repository::new();
     repository.build().unwrap();
 
@@ -273,7 +273,7 @@ fn verifier_rejects_v7_unknown_v9_fields_and_internally_inconsistent_provenance(
         "{error}"
     );
 
-    let unknown = repository.temporary.path().join("unknown-v9-field");
+    let unknown = repository.temporary.path().join("unknown-v10-field");
     copy_product(&repository.build_dir, &unknown);
     let unknown_manifest = unknown.join("manifest.json");
     let mut json: serde_json::Value =

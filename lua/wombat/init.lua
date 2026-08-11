@@ -70,6 +70,7 @@ end
 
 wombat.need = {}
 wombat.prefer = {}
+wombat.build = { need = {}, prefer = {} }
 
 function wombat.need.command(name, options)
     return requirement("need", "command", name, options, false)
@@ -85,6 +86,62 @@ end
 
 function wombat.prefer.package(name, options)
     return requirement("prefer", "package", name, options, true)
+end
+
+local function build_requirement(namespace, kind, name, options, preferred)
+    if type(name) ~= "string" then
+        error("w.build." .. namespace .. "." .. kind .. "() requires a string name", 3)
+    end
+    if options ~= nil and type(options) ~= "table" then
+        error("w.build." .. namespace .. "." .. kind .. "() options must be a table", 3)
+    end
+    return native.declare_build_requirement(kind, name, options, preferred)
+end
+
+function wombat.build.providers(entries)
+    if type(entries) ~= "table" then
+        error("w.build.providers() requires an array", 2)
+    end
+    return native.configure_build_providers(entries)
+end
+
+function wombat.build.need.command(name, options)
+    return build_requirement("need", "command", name, options, false)
+end
+
+function wombat.build.need.package(name, options)
+    return build_requirement("need", "package", name, options, false)
+end
+
+function wombat.build.prefer.command(name, options)
+    return build_requirement("prefer", "command", name, options, true)
+end
+
+function wombat.build.prefer.package(name, options)
+    return build_requirement("prefer", "package", name, options, true)
+end
+
+function wombat.build.task(entrypoint, params, options)
+    if type(entrypoint) ~= "string" then
+        error("w.build.task() requires a string entrypoint", 2)
+    end
+    if params ~= nil and type(params) ~= "table" then
+        error("w.build.task() params must be a table", 2)
+    end
+    if options ~= nil and type(options) ~= "table" then
+        error("w.build.task() options must be a table", 2)
+    end
+    return native.declare_task(entrypoint, params or {}, options or {})
+end
+
+function wombat.generate(name, options)
+    if type(name) ~= "string" then
+        error("w.generate() requires a string name", 2)
+    end
+    if type(options) ~= "table" then
+        error("w.generate() requires an options table", 2)
+    end
+    return native.declare_generated(name, options)
 end
 
 local function validate_install(source_path, options, explicit_kind)

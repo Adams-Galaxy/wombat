@@ -94,7 +94,7 @@ fn adds_config_and_literal_home_files_then_builds_them() {
     let auto = fs::read_to_string(fixture.repository.join("modules/auto.lua")).unwrap();
     assert!(auto.contains("w.install(\"dot_config/starship.toml\")\nw.install(\"home/.zshrc\")"));
     let manifest = fixture.build().unwrap().manifest;
-    assert_eq!(manifest.format_version, 9);
+    assert_eq!(manifest.format_version, 10);
     assert_eq!(manifest.artifacts.len(), 2);
     assert_eq!(manifest.artifacts[0].target.display, "~/.zshrc");
     assert_eq!(

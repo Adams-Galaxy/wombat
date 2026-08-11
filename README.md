@@ -5,8 +5,8 @@ configuration into an explicit, inspectable manifest before any target mutation
 takes place.
 
 The project is in early vertical-slice development. `init` creates the smallest
-conventional source repository, and `build` evaluates
-configuration and materialises a deterministic, self-contained build product
+conventional source repository, and `build` evaluates configuration into an
+inspectable construction plan and materialises a deterministic, self-contained build product
 without changing a target. `setup` acquires a repository and carries one exact
 product through requirement bootstrap and guarded deployment. `diff`, `apply`,
 and `deploy` then inspect or
@@ -105,8 +105,19 @@ the generated file.
 `w.install.file("literal.tmpl")` installs a `.tmpl` file literally, while
 `w.install.template("input", { to = "~/.config/output", with = context })`
 marks an unconventional name explicitly. Template directories, implicit
-runtime context, includes, callbacks, and generated Lua artifacts are not yet
-supported.
+runtime context, includes, and callbacks are not supported.
+
+Lua may also publish already-generated binary-safe content:
+
+```lua
+w.generate("starship.toml", {
+    content = rendered_bytes,
+    to = ".config/starship.toml",
+})
+```
+
+Generated content has ordinary ownership, identity, inspection, conflict, and
+deployment semantics.
 
 ## Building
 
@@ -123,6 +134,10 @@ or configure it in `$XDG_CONFIG_HOME/wombat/config.toml` (falling back to
 ```toml
 format_version = 1
 repository = "~/dotfiles"
+
+[tasks.interpreters.python]
+command = "~/.venvs/wombat/bin/python"
+args = []
 ```
 
 Without either, the source defaults to `~/.local/share/wombat/`. Builds default
@@ -136,12 +151,51 @@ build/
 │   ├── home/
 │   └── config/
 └── .wombat/
+    ├── plan/
+    ├── tasks/
+    └── cache/
 ```
 
 `manifest.json` and `tree/` are the relocatable functional product. `.wombat/`
 holds locking, staging, ownership, and recovery state. Rebuilding is staged and
 verified before publication; it reports whether the product was created,
 updated, unchanged, or repaired.
+
+## Construction plans and tasks
+
+Lua evaluation freezes a versioned build plan before any external task runs:
+
+```sh
+wombat inspect plan
+wombat inspect plan tasks
+wombat prepare
+wombat build
+```
+
+`build` never installs host tools. Construction requirements use the existing
+product/provider vocabulary in a separate host scope:
+
+```lua
+w.build.need.command("python3", { minimum = "3.12" })
+w.build.providers({ "brew" }) -- optional; local defaults are inferred
+```
+
+Programs beneath `tasks/` can generate artifact trees or act as outputless
+build gates:
+
+```lua
+w.build.task("generate.py", { message = "Hello" })
+w.build.task("validate.sh", {}, { cache = false })
+```
+
+Python, POSIX shell, Bash, embedded Lua 5.5, and executable entrypoints are
+inferred. Tasks run in private build-local workspaces and receive fixed
+`--params`, `--output-dir`, `--work-dir`, and `--cache-dir` arguments. Python
+tasks can simply import `params`, `output`, `work`, and `cache` from `wombat`.
+Regular files in `output` publish by default; `work` is cleared per execution,
+while the task-private `cache` persists. Verified template and task result
+caches live only beneath the selected build directory and never enter the
+functional product.
 
 Create the minimal conventional repository at the selected source with:
 
@@ -219,7 +273,7 @@ end
 
 Only facts actually consulted during evaluation enter manifest provenance.
 Resolved inputs, the concrete target, consulted observations, and typed Lua
-source provenance are stored in manifest v9 and participate in build identity.
+source provenance are stored in manifest v10 and participate in build identity.
 Every Wombat-owned root, module, and repository `require()` load contributes its
 repository-relative path and digest. Consequently a comment or declaration
 line movement can produce a new exact build identity even when artifact bytes
@@ -237,6 +291,9 @@ wombat inspect inputs
 wombat inspect target
 wombat inspect modules
 wombat inspect dependencies
+wombat inspect providers
+wombat inspect requirements
+wombat inspect tasks
 wombat inspect artifacts
 wombat inspect sources
 
@@ -278,8 +335,13 @@ wombat check
 wombat bootstrap
 ```
 
+Host tools needed to construct a product are declared under `w.build`, checked
+before any task workspace is created, and reconciled only by `wombat prepare`.
+Target requirements remain the concern of `check` and `bootstrap`.
+
 For a fresh machine, `setup` safely clones or reuses a matching Git repository,
-builds once, checks and optionally bootstraps requirements, then guardedly
+freezes one plan, presents host and target provider work together, prepares the
+host, builds that exact plan, bootstraps target requirements, then guardedly
 deploys that exact build ID:
 
 ```sh
@@ -300,9 +362,9 @@ curl -fsSL https://raw.githubusercontent.com/Adams-Galaxy/wombat/main/install.sh
   | sh -s -- setup Adams-Galaxy
 ```
 
-Missing host build prerequisites require a separate interactive confirmation,
+Missing installer prerequisites require a separate interactive confirmation,
 or leading `--install-prerequisites` in automation. Setup's `--yes` confirms
-only the displayed bootstrap plan; deployment conflicts still use
+the consolidated provider-mutation plan; deployment conflicts still use
 `--conflict ask|fail|skip|overwrite`. The installer tracks `main` while Wombat
 is pre-release; a stable `get.wombat.sh` endpoint and release binaries are
 future distribution work.
