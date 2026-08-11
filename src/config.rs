@@ -24,6 +24,14 @@ pub fn resolve_source(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 #[doc(hidden)]
+pub fn resolve_source_candidate(explicit: Option<&Path>) -> Result<PathBuf> {
+    let current = env::current_dir().map_err(|error| WombatError::io(".", error))?;
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let xdg = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    select_source_with(explicit, &current, home.as_deref(), xdg.as_deref())
+}
+
+#[doc(hidden)]
 pub fn resolve_home() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
@@ -37,11 +45,22 @@ pub(crate) fn resolve_source_with(
     home: Option<&Path>,
     xdg_config_home: Option<&Path>,
 ) -> Result<PathBuf> {
-    let selected = if let Some(explicit) = explicit {
+    let selected = select_source_with(explicit, current, home, xdg_config_home)?;
+
+    fs::canonicalize(&selected).map_err(|error| WombatError::io(&selected, error))
+}
+
+fn select_source_with(
+    explicit: Option<&Path>,
+    current: &Path,
+    home: Option<&Path>,
+    xdg_config_home: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(explicit) = explicit {
         if explicit.is_absolute() {
-            explicit.to_path_buf()
+            Ok(explicit.to_path_buf())
         } else {
-            current.join(explicit)
+            Ok(current.join(explicit))
         }
     } else {
         let home = home.ok_or_else(|| {
@@ -61,15 +80,13 @@ pub(crate) fn resolve_source_with(
         };
         let config_path = config_root.join("wombat/config.toml");
         match fs::read_to_string(&config_path) {
-            Ok(contents) => repository_from_config(&config_path, &contents, home)?,
+            Ok(contents) => repository_from_config(&config_path, &contents, home),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                home.join(".local/share/wombat")
+                Ok(home.join(".local/share/wombat"))
             }
-            Err(error) => return Err(WombatError::io(&config_path, error)),
+            Err(error) => Err(WombatError::io(&config_path, error)),
         }
-    };
-
-    fs::canonicalize(&selected).map_err(|error| WombatError::io(&selected, error))
+    }
 }
 
 fn repository_from_config(path: &Path, contents: &str, home: &Path) -> Result<PathBuf> {

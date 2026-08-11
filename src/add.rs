@@ -90,12 +90,16 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
             target.display()
         )));
     }
+    if target_metadata.file_type().is_dir() {
+        return add_directory(&root, &home, target);
+    }
     if !target_metadata.file_type().is_file() {
         return Err(WombatError::configuration(format!(
             "add target `{}` must be a regular file",
             target.display()
         )));
     }
+    let target_executable = is_executable(&target_metadata);
     let target = fs::canonicalize(target).map_err(|error| WombatError::io(target, error))?;
     let home_relative = target.strip_prefix(&home).map_err(|_| {
         WombatError::configuration(format!(
@@ -137,9 +141,9 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
         }
         let existing =
             fs::read(&source_path).map_err(|error| WombatError::io(&source_path, error))?;
-        if existing != target_bytes {
+        if existing != target_bytes || is_executable(&metadata) != target_executable {
             return Err(WombatError::configuration(format!(
-                "source state `{source}` already exists with different contents; overwrite and re-add are not supported in this slice"
+                "source state `{source}` already exists with different contents or executable intent; overwrite and re-add are not supported in this slice"
             )));
         }
     }
@@ -156,7 +160,7 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
                     "`{}` owned by `{}` at {}",
                     coverage.directory.declared_source,
                     coverage.directory.owner,
-                    coverage.directory.declared_from
+                    coverage.directory.declared_at
                 )
             })
             .collect::<Vec<_>>()
@@ -179,7 +183,12 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
                 method,
             });
         }
-        persist_addition(&root, &source_path, Some(target_bytes.as_slice()), None)?;
+        persist_addition(
+            &root,
+            &source_path,
+            Some((target_bytes.as_slice(), target_executable)),
+            None,
+        )?;
         return Ok(AddOutcome {
             status: AddStatus::Added,
             source,
@@ -225,7 +234,7 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
                 prospective_target.display,
                 artifact.owner,
                 artifact.source,
-                artifact.declared_from
+                artifact.declared_at
             )));
         }
     }
@@ -244,7 +253,7 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
     persist_addition(
         &root,
         &source_path,
-        (!source_exists).then_some(target_bytes.as_slice()),
+        (!source_exists).then_some((target_bytes.as_slice(), target_executable)),
         Some((
             &auto_path,
             declaration_added.then_some(updated_auto.as_bytes()),
@@ -261,6 +270,456 @@ pub fn add(root: &Path, target_home: &Path, target: &Path) -> Result<AddOutcome>
         source,
         method: AddMethod::GeneratedAuto,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImportedLeaf {
+    relative: String,
+    bytes: Vec<u8>,
+    fingerprint: crate::source::SourceFingerprint,
+    executable: bool,
+}
+
+fn add_directory(root: &Path, home: &Path, requested: &Path) -> Result<AddOutcome> {
+    let target = fs::canonicalize(requested).map_err(|error| WombatError::io(requested, error))?;
+    validate_target_components(home, &target)?;
+    let relative = target.strip_prefix(home).map_err(|_| {
+        WombatError::configuration(format!(
+            "add target `{}` must resolve beneath target home `{}`",
+            target.display(),
+            home.display()
+        ))
+    })?;
+    let source = source_path_for_home_directory(relative)?;
+    validate_relative_path(&source, "generated directory source")?;
+    let source_path = root.join(source.replace('/', std::path::MAIN_SEPARATOR_STR));
+    validate_destination_path(root, &source_path)?;
+    let target_leaves = snapshot_import_tree(&target)?;
+    if target_leaves.is_empty() {
+        return Err(WombatError::configuration(format!(
+            "add target directory `{}` contains no regular files",
+            target.display()
+        )));
+    }
+
+    let manifest = evaluate(root)?;
+    let mut coverage_identity: Option<(String, String)> = None;
+    let mut any_coverage = false;
+    for leaf in &target_leaves {
+        let leaf_source = format!("{source}/{}", leaf.relative);
+        let (anchor, target_relative) = prefixed_source(&leaf_source)?
+            .expect("generated directory sources use canonical anchors");
+        let expected = infer_target(anchor, target_relative, InferenceBasis::SourcePrefix)?;
+        let coverages = directory_coverages(&manifest.directories, &leaf_source)?;
+        validate_prospective_outputs(
+            &target.join(portable_path(&leaf.relative)),
+            &leaf_source,
+            &manifest.artifacts,
+            &coverages,
+            &expected,
+        )?;
+        if coverages.len() > 1 {
+            return Err(WombatError::configuration(format!(
+                "cannot add directory `{}` because `{leaf_source}` has ambiguous directory ownership",
+                target.display()
+            )));
+        }
+        if let Some(coverage) = coverages.first() {
+            any_coverage = true;
+            if coverage.target.key() != expected.key() {
+                return Err(WombatError::configuration(format!(
+                    "cannot add directory `{}` because existing directory `{}` maps `{leaf_source}` to `{}` instead of `{}`",
+                    target.display(),
+                    coverage.directory.declared_source,
+                    coverage.target.display,
+                    expected.display
+                )));
+            }
+            let identity = (
+                coverage.directory.owner.clone(),
+                coverage.directory.declared_source.clone(),
+            );
+            if coverage_identity
+                .as_ref()
+                .is_some_and(|prior| prior != &identity)
+            {
+                return Err(WombatError::configuration(format!(
+                    "cannot add directory `{}` because its leaves have different existing owners",
+                    target.display()
+                )));
+            }
+            coverage_identity = Some(identity);
+        } else if any_coverage || coverage_identity.is_some() {
+            return Err(WombatError::configuration(format!(
+                "cannot add directory `{}` because only part of the tree has existing directory coverage",
+                target.display()
+            )));
+        }
+    }
+    if any_coverage
+        && target_leaves.iter().any(|leaf| {
+            let leaf_source = format!("{source}/{}", leaf.relative);
+            directory_coverages(&manifest.directories, &leaf_source)
+                .map_or(true, |coverages| coverages.is_empty())
+        })
+    {
+        return Err(WombatError::configuration(format!(
+            "cannot add directory `{}` because only part of the tree has existing directory coverage",
+            target.display()
+        )));
+    }
+    if !any_coverage {
+        for leaf in &target_leaves {
+            let leaf_source = format!("{source}/{}", leaf.relative);
+            let (anchor, target_relative) = prefixed_source(&leaf_source)?
+                .expect("generated directory sources use canonical anchors");
+            let prospective = infer_target(anchor, target_relative, InferenceBasis::SourcePrefix)?;
+            if let Some(artifact) = manifest
+                .artifacts
+                .iter()
+                .find(|artifact| targets_overlap(&artifact.target, &prospective))
+            {
+                return Err(WombatError::configuration(format!(
+                    "cannot add directory `{}` because target `{}` overlaps an artifact owned by `{}` from `{}` declared at {}",
+                    target.display(),
+                    prospective.display,
+                    artifact.owner,
+                    artifact.source,
+                    artifact.declared_at
+                )));
+            }
+        }
+    }
+
+    let existing_leaves = match fs::symlink_metadata(&source_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(WombatError::configuration(format!(
+                "source state `{source}` must be a non-symlink directory"
+            )));
+        }
+        Ok(_) => Some(snapshot_import_tree(&source_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(WombatError::io(&source_path, error)),
+    };
+    if let Some(existing) = &existing_leaves
+        && existing.iter().any(|left| {
+            target_leaves
+                .iter()
+                .find(|right| right.relative == left.relative)
+                .is_none_or(|right| {
+                    left.bytes != right.bytes || left.executable != right.executable
+                })
+        })
+    {
+        return Err(WombatError::configuration(format!(
+            "source state `{source}` already exists with a different directory tree"
+        )));
+    }
+    let source_complete = existing_leaves
+        .as_ref()
+        .is_some_and(|existing| existing.len() == target_leaves.len());
+
+    let (method, auto_update) = if let Some((owner, declared_source)) = coverage_identity {
+        (
+            AddMethod::Directory {
+                owner,
+                declared_source,
+            },
+            None,
+        )
+    } else {
+        let auto_path = root.join(AUTO_MODULE);
+        let auto_metadata = fs::symlink_metadata(&auto_path).map_err(|_| {
+            WombatError::configuration(format!(
+                "`{AUTO_MODULE}` is required before `wombat add`; run `wombat init` or create and select the standard generated module"
+            ))
+        })?;
+        if auto_metadata.file_type().is_symlink() || !auto_metadata.file_type().is_file() {
+            return Err(WombatError::configuration(format!(
+                "`{AUTO_MODULE}` must be a regular non-symlink file"
+            )));
+        }
+        if !manifest.modules.iter().any(|module| module.name == "auto") {
+            return Err(WombatError::configuration(
+                "module `auto` is not selected; add `w.use(\"auto\")` to root policy before using `wombat add`",
+            ));
+        }
+        let auto_source =
+            fs::read_to_string(&auto_path).map_err(|error| WombatError::io(&auto_path, error))?;
+        let mut generated = parse_generated_region(&auto_source).map_err(|message| {
+            WombatError::configuration(format!(
+                "cannot update `{AUTO_MODULE}`: {message}; proposed declaration: {}",
+                generated_line(&source)
+            ))
+        })?;
+        let declaration_added = generated.insert(source.clone());
+        let updated = render_generated_region(&auto_source, &generated)
+            .expect("a parsed generated region can always be rendered");
+        (
+            AddMethod::GeneratedAuto,
+            Some((
+                auto_path,
+                auto_source,
+                declaration_added.then_some(updated),
+                crate::source::SourceFingerprint::from_metadata(&auto_metadata),
+            )),
+        )
+    };
+
+    let declaration_added = auto_update
+        .as_ref()
+        .is_some_and(|(_, _, updated, _)| updated.is_some());
+    if source_complete && !declaration_added {
+        return Ok(AddOutcome {
+            status: AddStatus::AlreadyPresent,
+            source,
+            method,
+        });
+    }
+    persist_directory_addition(
+        root,
+        &source_path,
+        &target,
+        &target_leaves,
+        existing_leaves.as_deref(),
+        auto_update.as_ref().map(|(path, old, new, fingerprint)| {
+            (path.as_path(), old.as_str(), new.as_deref(), fingerprint)
+        }),
+    )?;
+    Ok(AddOutcome {
+        status: if source_complete {
+            AddStatus::DeclarationAdded
+        } else {
+            AddStatus::Added
+        },
+        source,
+        method,
+    })
+}
+
+fn snapshot_import_tree(root: &Path) -> Result<Vec<ImportedLeaf>> {
+    fn walk(root: &Path, directory: &Path, leaves: &mut Vec<ImportedLeaf>) -> Result<()> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| WombatError::io(directory, error))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| WombatError::io(directory, error))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+            if metadata.file_type().is_symlink() {
+                return Err(WombatError::configuration(format!(
+                    "add directory entry `{}` must not be a symbolic link",
+                    path.display()
+                )));
+            }
+            if metadata.file_type().is_dir() {
+                walk(root, &path, leaves)?;
+            } else if metadata.file_type().is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("walked entries remain beneath their root")
+                    .to_str()
+                    .ok_or_else(|| {
+                        WombatError::configuration(format!(
+                            "add directory entry `{}` is not valid UTF-8",
+                            path.display()
+                        ))
+                    })?
+                    .replace('\\', "/");
+                let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+                let after =
+                    fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+                let fingerprint = crate::source::SourceFingerprint::from_metadata(&metadata);
+                if crate::source::SourceFingerprint::from_metadata(&after) != fingerprint {
+                    return Err(WombatError::configuration(format!(
+                        "add directory entry `{}` changed while it was being read",
+                        path.display()
+                    )));
+                }
+                leaves.push(ImportedLeaf {
+                    relative,
+                    bytes,
+                    fingerprint,
+                    executable: is_executable(&after),
+                });
+            } else {
+                return Err(WombatError::configuration(format!(
+                    "add directory entry `{}` is not a regular file or directory",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    let mut leaves = Vec::new();
+    walk(root, root, &mut leaves)?;
+    leaves.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(leaves)
+}
+
+fn persist_directory_addition(
+    root: &Path,
+    source_root: &Path,
+    target_root: &Path,
+    desired: &[ImportedLeaf],
+    existing: Option<&[ImportedLeaf]>,
+    auto: Option<(&Path, &str, Option<&str>, &crate::source::SourceFingerprint)>,
+) -> Result<()> {
+    if snapshot_import_tree(target_root)? != desired {
+        return Err(WombatError::configuration(format!(
+            "add target directory `{}` changed after preflight",
+            target_root.display()
+        )));
+    }
+    if let Some(existing) = existing
+        && snapshot_import_tree(source_root)? != existing
+    {
+        return Err(WombatError::configuration(format!(
+            "source directory `{}` changed after preflight",
+            source_root.display()
+        )));
+    }
+    if let Some((path, old, _, fingerprint)) = auto {
+        let metadata = fs::symlink_metadata(path).map_err(|error| WombatError::io(path, error))?;
+        let current = fs::read_to_string(path).map_err(|error| WombatError::io(path, error))?;
+        if &crate::source::SourceFingerprint::from_metadata(&metadata) != fingerprint
+            || current != old
+        {
+            return Err(WombatError::configuration(format!(
+                "`{AUTO_MODULE}` changed after add preflight"
+            )));
+        }
+    }
+
+    let existing_paths = existing
+        .unwrap_or_default()
+        .iter()
+        .map(|leaf| leaf.relative.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut created_directories = create_missing_parents(root, source_root)?;
+    if !source_root.exists() {
+        fs::create_dir(source_root).map_err(|error| WombatError::io(source_root, error))?;
+        created_directories.push(source_root.to_path_buf());
+    }
+    let mut created_files = Vec::new();
+    let result = (|| {
+        for leaf in desired {
+            if existing_paths.contains(leaf.relative.as_str()) {
+                continue;
+            }
+            let destination = source_root.join(portable_path(&leaf.relative));
+            let created =
+                create_missing_parents(root, destination.parent().unwrap_or(source_root))?;
+            created_directories.extend(created);
+            let mut temporary =
+                prepare_temp(destination.parent().unwrap_or(source_root), &leaf.bytes)?;
+            set_import_permissions(temporary.as_file_mut(), leaf.executable)?;
+            temporary
+                .persist(&destination)
+                .map_err(|error| WombatError::io(&destination, error.error))?;
+            created_files.push(destination);
+        }
+        if let Some((path, _, Some(updated), _)) = auto {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|error| WombatError::io(path, error))?;
+            let temporary = prepare_temp(path.parent().unwrap_or(root), updated.as_bytes())?;
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())
+                .map_err(|error| WombatError::io(temporary.path(), error))?;
+            temporary
+                .persist(path)
+                .map_err(|error| WombatError::io(path, error.error))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for file in created_files.iter().rev() {
+            let _ = fs::remove_file(file);
+        }
+        cleanup_directories(&created_directories);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn source_path_for_home_directory(relative: &Path) -> Result<String> {
+    let value = relative
+        .to_str()
+        .ok_or_else(|| WombatError::configuration("add target paths must be valid UTF-8"))?;
+    let normalized = value.replace('\\', "/");
+    if normalized.is_empty() {
+        return Err(WombatError::configuration(
+            "the target home itself cannot be added as a directory",
+        ));
+    }
+    if normalized == ".config" {
+        Ok("dot_config".to_string())
+    } else if let Some(relative) = normalized.strip_prefix(".config/") {
+        Ok(format!("dot_config/{relative}"))
+    } else if normalized == ".local" {
+        Ok("dot_local".to_string())
+    } else if let Some(relative) = normalized.strip_prefix(".local/") {
+        Ok(format!("dot_local/{relative}"))
+    } else {
+        Ok(format!("home/{normalized}"))
+    }
+}
+
+fn portable_path(relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(PathBuf::new(), |path, component| path.join(component))
+}
+
+fn validate_target_components(home: &Path, target: &Path) -> Result<()> {
+    let relative = target.strip_prefix(home).map_err(|_| {
+        WombatError::configuration(format!(
+            "add target `{}` must be beneath target home `{}`",
+            target.display(),
+            home.display()
+        ))
+    })?;
+    let mut current = home.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|error| WombatError::io(&current, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(WombatError::configuration(format!(
+                "add target path component `{}` must not be a symbolic link",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn set_import_permissions(file: &mut fs::File, executable: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = if executable { 0o755 } else { 0o644 };
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|error| WombatError::io("<temporary add file>", error))
+}
+
+#[cfg(not(unix))]
+fn set_import_permissions(_: &mut fs::File, _: bool) -> Result<()> {
+    Ok(())
 }
 
 struct DirectoryCoverage<'a> {
@@ -329,7 +788,7 @@ fn validate_prospective_outputs(
                     left.display,
                     artifact.owner,
                     artifact.source,
-                    artifact.declared_from
+                    artifact.declared_at
                 )));
             }
         }
@@ -542,15 +1001,18 @@ fn unescape_lua_string(value: &str) -> std::result::Result<String, String> {
 fn persist_addition(
     root: &Path,
     source_path: &Path,
-    source_bytes: Option<&[u8]>,
+    source_bytes: Option<(&[u8], bool)>,
     auto_update: Option<(&Path, Option<&[u8]>, &fs::Metadata)>,
 ) -> Result<()> {
     let created_directories = create_missing_parents(root, source_path.parent().unwrap_or(root))?;
     let mut source_was_created = false;
     let result = (|| {
-        let source_temp = source_bytes
-            .map(|bytes| prepare_temp(source_path.parent().unwrap_or(root), bytes))
+        let mut source_temp = source_bytes
+            .map(|(bytes, _)| prepare_temp(source_path.parent().unwrap_or(root), bytes))
             .transpose()?;
+        if let (Some(temporary), Some((_, executable))) = (&mut source_temp, source_bytes) {
+            set_import_permissions(temporary.as_file_mut(), executable)?;
+        }
         let auto_temp = auto_update
             .and_then(|(path, bytes, _)| bytes.map(|bytes| (path, bytes)))
             .map(|(path, bytes)| prepare_temp(path.parent().unwrap_or(root), bytes))
@@ -630,10 +1092,12 @@ fn cleanup_directories(created: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fs;
 
     use super::{
-        escape_lua_string, generated_line, parse_generated_region, render_generated_region,
-        source_path_for_home_file, unescape_lua_string,
+        escape_lua_string, generated_line, parse_generated_region, persist_directory_addition,
+        render_generated_region, snapshot_import_tree, source_path_for_home_file,
+        unescape_lua_string,
     };
     use std::path::Path;
 
@@ -674,5 +1138,41 @@ mod tests {
                 .contains("w.install(\"dot_config/starship.toml\")\nw.install(\"home/.zshrc\")")
         );
         assert!(rendered.ends_with("\nreturn true\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_transaction_rolls_back_leaves_when_auto_publication_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("source");
+        let target = temporary.path().join("target");
+        let modules = root.join("modules");
+        fs::create_dir_all(&modules).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("file"), "contents\n").unwrap();
+        let auto = modules.join("auto.lua");
+        let old = "-- wombat:add begin\n-- wombat:add end\n";
+        fs::write(&auto, old).unwrap();
+        let fingerprint =
+            crate::source::SourceFingerprint::from_metadata(&fs::symlink_metadata(&auto).unwrap());
+        let leaves = snapshot_import_tree(&target).unwrap();
+        fs::set_permissions(&modules, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let destination = root.join("dot_config/tree");
+        let result = persist_directory_addition(
+            &root,
+            &destination,
+            &target,
+            &leaves,
+            None,
+            Some((&auto, old, Some("updated\n"), &fingerprint)),
+        );
+        fs::set_permissions(&modules, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert_eq!(fs::read_to_string(auto).unwrap(), old);
     }
 }

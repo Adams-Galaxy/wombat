@@ -3,7 +3,7 @@ use std::ffi::OsString;
 
 use crate::context::HostContext;
 use crate::frozen::FrozenValue;
-use crate::manifest::{BuildInput, BuildInputKind, BuildInputOrigin};
+use crate::manifest::{BuildInput, BuildInputKind, BuildInputOrigin, SourceTrace};
 use crate::{Result, WombatError};
 
 #[derive(Clone, Debug)]
@@ -17,7 +17,7 @@ pub(crate) struct InputSpec {
     pub choices: Vec<String>,
     pub min: Option<i64>,
     pub max: Option<i64>,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 #[derive(Clone, Debug)]
@@ -32,7 +32,7 @@ impl InputSpec {
         order: u64,
         kind: &str,
         options: FrozenValue,
-        declared_from: String,
+        declared_at: SourceTrace,
     ) -> Result<Self> {
         let kind = match kind {
             "flag" => BuildInputKind::Flag,
@@ -160,7 +160,7 @@ impl InputSpec {
             choices,
             min,
             max,
-            declared_from,
+            declared_at,
         })
     }
 }
@@ -353,7 +353,7 @@ pub(crate) fn resolve(
             kind: spec.kind,
             value,
             origin,
-            declared_from: spec.declared_from.clone(),
+            declared_at: spec.declared_at.clone(),
         });
     }
     manifest.sort_by(|left, right| left.name.cmp(&right.name));
@@ -566,6 +566,7 @@ mod tests {
 
     use crate::context::{Architecture, HostContext, OperatingSystemName, TargetPlatform};
     use crate::frozen::FrozenValue;
+    use crate::manifest::{SourceLocation, SourceTrace};
 
     use super::{InputSpec, resolve};
 
@@ -574,6 +575,17 @@ mod tests {
             OperatingSystemName::Macos,
             Architecture::Aarch64,
         ))
+    }
+
+    fn at(line: u32) -> SourceTrace {
+        SourceTrace {
+            primary: SourceLocation {
+                source: "wombat.lua".to_string(),
+                line: Some(line),
+                column: None,
+            },
+            callers: Vec::new(),
+        }
     }
 
     #[test]
@@ -585,7 +597,7 @@ mod tests {
                     1,
                     "flag",
                     FrozenValue::Map([("default".into(), FrozenValue::Boolean(true))].into()),
-                    "wombat.lua:1".into(),
+                    at(1),
                 )
                 .unwrap(),
             ),
@@ -607,14 +619,13 @@ mod tests {
                         ]
                         .into(),
                     ),
-                    "wombat.lua:2".into(),
+                    at(2),
                 )
                 .unwrap(),
             ),
             (
                 3,
-                InputSpec::parse(3, "target", FrozenValue::empty_map(), "wombat.lua:3".into())
-                    .unwrap(),
+                InputSpec::parse(3, "target", FrozenValue::empty_map(), at(3)).unwrap(),
             ),
         ]);
         let resolved = resolve(

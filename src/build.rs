@@ -123,6 +123,7 @@ struct WorkspaceMarker {
 struct IdentityPayload<'a> {
     format_version: u32,
     wombat_version: &'a str,
+    sources: &'a [crate::manifest::SourceFile],
     inputs: &'a [crate::manifest::BuildInput],
     target: &'a crate::context::ResolvedTarget,
     observations: &'a [crate::manifest::Observation],
@@ -615,10 +616,12 @@ fn materialise_with_hook(
     }
     hook(MaterialisationPoint::BeforeFinalValidation);
     revalidate_sources(source_root, &desired.artifacts, &desired.directories)?;
+    revalidate_lua_sources(source_root, &desired.sources)?;
     let mut manifest = Manifest {
         format_version: MANIFEST_FORMAT_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
         build_id: String::new(),
+        sources: desired.sources,
         inputs: desired.inputs,
         target: desired.target,
         observations: desired.observations,
@@ -629,6 +632,33 @@ fn materialise_with_hook(
     manifest.build_id = compute_build_id(&manifest)?;
     write_manifest(&product_root.join("manifest.json"), &manifest)?;
     Ok(manifest)
+}
+
+fn revalidate_lua_sources(
+    source_root: &Path,
+    sources: &[crate::manifest::SourceFile],
+) -> Result<()> {
+    for source in sources {
+        let path = source_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        reject_source_symlinks(source_root, &path)?;
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+        if !metadata.file_type().is_file() {
+            return Err(WombatError::configuration(format!(
+                "Lua source `{}` is no longer a regular file",
+                source.path
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+        let digest = digest_string(Sha256::digest(&bytes));
+        if digest != source.digest {
+            return Err(WombatError::configuration(format!(
+                "Lua source `{}` changed during materialisation",
+                source.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn materialise_artifact(
@@ -679,7 +709,7 @@ fn materialise_artifact(
         target: artifact.target.clone(),
         content,
         owner: artifact.owner.clone(),
-        declared_from: artifact.declared_from.clone(),
+        declared_at: artifact.declared_at.clone(),
     })
 }
 
@@ -733,12 +763,12 @@ fn render_and_hash(
         Box::new(StrictConditionalHelper::new("unless", false)),
     );
     let template = handlebars::Template::compile(template_source)
-        .map_err(|error| template_compile_error(source_name, error))?;
+        .map_err(|error| template_compile_error(source_name, template_source, error))?;
     validate_handlebars_contract(source_name, &template)?;
     renderer.register_template(source_name, template);
     let rendered = renderer
         .render(source_name, context)
-        .map_err(|error| template_render_error(source_name, error))?;
+        .map_err(|error| template_render_error(source_name, template_source, error))?;
     let rendered = rendered.as_bytes();
 
     let mut output = OpenOptions::new()
@@ -765,16 +795,62 @@ fn render_and_hash(
     ))
 }
 
-fn template_compile_error(source_name: &str, error: handlebars::TemplateError) -> WombatError {
-    WombatError::configuration(format!(
-        "failed to compile template `{source_name}`: {error}"
-    ))
+fn template_compile_error(
+    source_name: &str,
+    source: &str,
+    error: handlebars::TemplateError,
+) -> WombatError {
+    let position = error.pos();
+    template_diagnostic(
+        format!(
+            "failed to compile template `{source_name}`: {}",
+            error.reason()
+        ),
+        source_name,
+        source,
+        position,
+        error.to_string(),
+    )
 }
 
-fn template_render_error(source_name: &str, error: handlebars::RenderError) -> WombatError {
-    WombatError::configuration(format!(
-        "failed to render template `{source_name}`: {error}"
-    ))
+fn template_render_error(
+    source_name: &str,
+    source: &str,
+    error: handlebars::RenderError,
+) -> WombatError {
+    let position = error.line_no.zip(error.column_no);
+    template_diagnostic(
+        format!("failed to render template `{source_name}`: {error}"),
+        source_name,
+        source,
+        position,
+        error.to_string(),
+    )
+}
+
+fn template_diagnostic(
+    message: String,
+    source_name: &str,
+    source: &str,
+    position: Option<(usize, usize)>,
+    underlying: String,
+) -> WombatError {
+    let line = position.and_then(|(line, _)| u32::try_from(line).ok());
+    let column = position.and_then(|(_, column)| u32::try_from(column).ok());
+    let mut diagnostic = crate::Diagnostic::new(message);
+    diagnostic.primary = Some(crate::manifest::SourceLocation {
+        source: source_name.to_string(),
+        line,
+        column,
+    });
+    diagnostic.source_line = line.and_then(|line| {
+        source
+            .lines()
+            .nth(line.saturating_sub(1) as usize)
+            .map(str::to_string)
+    });
+    diagnostic.underlying = Some(underlying);
+    WombatError::diagnostic(diagnostic)
 }
 
 struct StrictConditionalHelper {
@@ -1072,6 +1148,7 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
     let payload = IdentityPayload {
         format_version: manifest.format_version,
         wombat_version: &manifest.wombat_version,
+        sources: &manifest.sources,
         inputs: &manifest.inputs,
         target: &manifest.target,
         observations: &manifest.observations,
@@ -1152,8 +1229,26 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             manifest.wombat_version
         )));
     }
+    if !manifest
+        .sources
+        .windows(2)
+        .all(|pair| pair[0].path < pair[1].path)
+    {
+        return Err(WombatError::configuration(
+            "manifest Lua sources are not uniquely sorted",
+        ));
+    }
+    let source_paths = manifest
+        .sources
+        .iter()
+        .map(|source| source.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for source in &manifest.sources {
+        validate_relative_path(&source.path, "manifest Lua source path")?;
+        validate_sha256(&source.digest, "manifest Lua source digest")?;
+    }
     crate::context::TargetPlatform::from_frozen(&manifest.target.platform.to_frozen())?;
-    match (&manifest.target.origin, &manifest.target.declared_from) {
+    match (&manifest.target.origin, &manifest.target.declared_at) {
         (crate::context::TargetOrigin::HostDefault, None)
         | (crate::context::TargetOrigin::RootOverride, Some(_)) => {}
         _ => {
@@ -1161,6 +1256,9 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 "manifest target origin and declaration location are inconsistent",
             ));
         }
+    }
+    if let Some(trace) = &manifest.target.declared_at {
+        validate_source_trace(trace, &source_paths, "manifest target declaration")?;
     }
     if !manifest
         .inputs
@@ -1183,9 +1281,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 input.name
             )));
         }
-        validate_relative_path(
-            input.declared_from.split(':').next().unwrap_or(""),
-            "manifest input declaration path",
+        validate_source_trace(
+            &input.declared_at,
+            &source_paths,
+            "manifest input declaration",
         )?;
         match input.kind {
             crate::manifest::BuildInputKind::Flag
@@ -1253,6 +1352,15 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest modules are not uniquely sorted",
         ));
     }
+    for module in &manifest.modules {
+        validate_relative_path(&module.source, "manifest module source")?;
+        if !source_paths.contains(module.source.as_str()) {
+            return Err(WombatError::configuration(format!(
+                "manifest module `{}` references uncatalogued source `{}`",
+                module.name, module.source
+            )));
+        }
+    }
     if !manifest
         .dependencies
         .windows(2)
@@ -1262,6 +1370,13 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest dependencies are not uniquely sorted",
         ));
     }
+    for dependency in &manifest.dependencies {
+        validate_source_trace(
+            &dependency.declared_at,
+            &source_paths,
+            "manifest dependency declaration",
+        )?;
+    }
     if !manifest.artifacts.windows(2).all(|pair| {
         pair[0]
             .target
@@ -1269,7 +1384,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             .cmp(&pair[1].target.key())
             .then_with(|| pair[0].owner.cmp(&pair[1].owner))
             .then_with(|| pair[0].source.cmp(&pair[1].source))
-            .then_with(|| pair[0].declared_from.cmp(&pair[1].declared_from))
+            .then_with(|| pair[0].declared_at.cmp(&pair[1].declared_at))
             .is_lt()
     }) {
         return Err(WombatError::configuration(
@@ -1278,7 +1393,11 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
     for artifact in &manifest.artifacts {
         validate_relative_path(&artifact.source, "manifest artifact source")?;
-        validate_relative_path(&artifact.declared_from, "manifest declaration path")?;
+        validate_source_trace(
+            &artifact.declared_at,
+            &source_paths,
+            "manifest artifact declaration",
+        )?;
         validate_relative_path(&artifact.target.path, "manifest target path")?;
         match &artifact.source_origin {
             SourceOrigin::Direct { declared } => {
@@ -1288,8 +1407,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                         "manifest direct artifact source must identify a file",
                     ));
                 }
-                let expected_source =
-                    resolve_declared_manifest_source(declared, &artifact.declared_from);
+                let expected_source = resolve_declared_manifest_source(
+                    declared,
+                    &artifact.declared_at.primary.source,
+                );
                 if artifact.source != expected_source {
                     return Err(WombatError::configuration(format!(
                         "manifest direct source `{}` does not match declared source `{expected_source}`",
@@ -1305,8 +1426,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 validate_declared_source(declared)?;
                 validate_relative_path(root, "manifest directory source root")?;
                 validate_relative_path(relative, "manifest directory relative path")?;
-                let expected_root =
-                    resolve_declared_manifest_source(declared, &artifact.declared_from);
+                let expected_root = resolve_declared_manifest_source(
+                    declared,
+                    &artifact.declared_at.primary.source,
+                );
                 if root != &expected_root {
                     return Err(WombatError::configuration(format!(
                         "manifest directory root `{root}` does not match declared root `{expected_root}`"
@@ -1381,20 +1504,23 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 basis,
                 source_anchor,
             } => {
-                let expected = manifest_declaration_anchor(&artifact.declared_from).map_or_else(
-                    || {
-                        crate::manifest::SourceAnchor::ALL
-                            .into_iter()
-                            .find(|anchor| {
-                                artifact.source == anchor.source_prefix()
-                                    || artifact
-                                        .source
-                                        .starts_with(&format!("{}/", anchor.source_prefix()))
-                            })
-                            .map(|anchor| (crate::manifest::InferenceBasis::SourcePrefix, anchor))
-                    },
-                    |anchor| Some((crate::manifest::InferenceBasis::ModuleAnchor, anchor)),
-                );
+                let expected = manifest_declaration_anchor(&artifact.declared_at.primary.source)
+                    .map_or_else(
+                        || {
+                            crate::manifest::SourceAnchor::ALL
+                                .into_iter()
+                                .find(|anchor| {
+                                    artifact.source == anchor.source_prefix()
+                                        || artifact
+                                            .source
+                                            .starts_with(&format!("{}/", anchor.source_prefix()))
+                                })
+                                .map(|anchor| {
+                                    (crate::manifest::InferenceBasis::SourcePrefix, anchor)
+                                })
+                        },
+                        |anchor| Some((crate::manifest::InferenceBasis::ModuleAnchor, anchor)),
+                    );
                 if expected != Some((*basis, *source_anchor)) {
                     return Err(WombatError::configuration(format!(
                         "manifest inferred target `{}` has inconsistent inference provenance",
@@ -1437,6 +1563,57 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<()> {
+    if value.len() != 71
+        || !value.starts_with("sha256:")
+        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(WombatError::configuration(format!(
+            "{label} is not a SHA-256 identity"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_source_trace(
+    trace: &crate::manifest::SourceTrace,
+    sources: &std::collections::BTreeSet<&str>,
+    label: &str,
+) -> Result<()> {
+    if trace.callers.len() + 1 > crate::manifest::MAX_SOURCE_TRACE_FRAMES {
+        return Err(WombatError::configuration(format!(
+            "{label} exceeds the maximum source trace depth"
+        )));
+    }
+    let mut previous = None;
+    for location in std::iter::once(&trace.primary).chain(&trace.callers) {
+        validate_relative_path(&location.source, &format!("{label} source"))?;
+        if !sources.contains(location.source.as_str()) {
+            return Err(WombatError::configuration(format!(
+                "{label} references uncatalogued source `{}`",
+                location.source
+            )));
+        }
+        if location.line == Some(0) || location.column == Some(0) {
+            return Err(WombatError::configuration(format!(
+                "{label} contains a zero source position"
+            )));
+        }
+        if location.column.is_some() && location.line.is_none() {
+            return Err(WombatError::configuration(format!(
+                "{label} contains a column without a line"
+            )));
+        }
+        if previous == Some(location) {
+            return Err(WombatError::configuration(format!(
+                "{label} contains consecutive duplicate frames"
+            )));
+        }
+        previous = Some(location);
     }
     Ok(())
 }
@@ -1883,6 +2060,33 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("changed during materialisation"), "{error}");
+    }
+
+    #[test]
+    fn lua_source_mutation_before_final_validation_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("repository");
+        let staged = temporary.path().join("staged");
+        repository(&source);
+        fs::create_dir(&staged).unwrap();
+        let desired = evaluate(&source).unwrap();
+        let module = source.join("modules/dot_config/app.lua");
+
+        let error = materialise_with_hook(&source, &staged, desired, |point| {
+            if point == MaterialisationPoint::BeforeFinalValidation {
+                fs::write(
+                    &module,
+                    "-- changed\nlocal w = require(\"wombat\")\nw.install(\"app.toml\")\n",
+                )
+                .unwrap();
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("Lua source") && error.contains("changed"),
+            "{error}"
+        );
     }
 
     #[test]

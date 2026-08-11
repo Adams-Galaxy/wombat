@@ -138,10 +138,16 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
         .build("build/default", &[], mac_host("wombat-mac"))
         .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 6);
+    assert_eq!(outcome.manifest.format_version, 7);
     assert_eq!(outcome.manifest.target.origin, TargetOrigin::RootOverride);
     assert_eq!(
-        outcome.manifest.target.declared_from.as_deref(),
+        outcome
+            .manifest
+            .target
+            .declared_at
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
         Some("wombat.lua:9")
     );
     assert_eq!(
@@ -445,7 +451,7 @@ w.use('app', { distro = target.os.distribution.id, arch = target.arch })
 }
 
 #[test]
-fn semantic_aliases_match_identity_while_help_and_short_aliases_do_not_enter_it() {
+fn semantic_cli_aliases_match_while_source_only_input_edits_change_exact_identity() {
     let repository = parameterised_repository();
     let alias = repository
         .build(
@@ -479,16 +485,11 @@ fn semantic_aliases_match_identity_while_help_and_short_aliases_do_not_enter_it(
         "local w = require('wombat')\nw.install('app')\n",
     );
     second.write("dot_config/app", "same\n");
-    assert_eq!(
-        first
-            .build("build", &["-a"], mac_host("host"))
-            .unwrap()
-            .build_id,
-        second
-            .build("build", &["-b"], mac_host("host"))
-            .unwrap()
-            .build_id
-    );
+    let first = first.build("build", &["-a"], mac_host("host")).unwrap();
+    let second = second.build("build", &["-b"], mac_host("host")).unwrap();
+    assert_ne!(first.build_id, second.build_id);
+    assert_eq!(first.manifest.inputs, second.manifest.inputs);
+    assert_eq!(first.manifest.artifacts, second.manifest.artifacts);
 }
 
 #[test]

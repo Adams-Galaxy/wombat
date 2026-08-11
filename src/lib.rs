@@ -6,7 +6,9 @@ pub mod context;
 pub mod deploy;
 pub mod error;
 pub mod frozen;
+pub mod initialize;
 mod inputs;
+pub mod inspection;
 pub mod manifest;
 mod path;
 pub mod presentation;
@@ -28,7 +30,9 @@ pub use deploy::{
     ApplyOutcome, ApplyStatus, ConflictPolicy, ConflictResolution, DeploymentOptions, DiffOutcome,
     PreparedApply, apply, diff, prepare_apply,
 };
-pub use error::{Result, WombatError};
+pub use error::{Diagnostic, Result, WombatError};
+pub use initialize::{InitOutcome, InitStatus, initialize};
+pub use inspection::{InspectSection, compare, explain, inspect};
 pub use manifest::Manifest;
 pub use presentation::{ColorPolicy, Presenter, Role};
 pub use reconcile::{ReconciliationAction, ReconciliationItem, ReconciliationPlan};

@@ -6,6 +6,8 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use crate::manifest::SourceTrace;
+
 use crate::frozen::FrozenValue;
 use crate::{Result, WombatError};
 
@@ -225,7 +227,7 @@ pub struct ResolvedTarget {
     pub platform: TargetPlatform,
     pub origin: TargetOrigin,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub declared_from: Option<String>,
+    pub declared_at: Option<SourceTrace>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,7 +282,7 @@ impl HostContext {
         ResolvedTarget {
             platform: TargetPlatform::minimal(self.platform.os.name, self.platform.arch),
             origin: TargetOrigin::HostDefault,
-            declared_from: None,
+            declared_at: None,
         }
     }
 

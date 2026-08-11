@@ -61,7 +61,7 @@ fn anchored_directories_expand_hidden_nested_and_dot_local_files() {
 
     let outcome = repository.build().unwrap();
     let manifest = outcome.manifest;
-    assert_eq!(manifest.format_version, 6);
+    assert_eq!(manifest.format_version, 7);
     assert_eq!(manifest.artifacts.len(), 4);
     assert!(
         manifest
@@ -126,7 +126,7 @@ fn anchorless_directories_support_inferred_and_explicit_roots() {
 }
 
 #[test]
-fn empty_directory_declarations_are_valid_and_emit_no_artifacts() {
+fn empty_directory_declarations_emit_no_artifacts_but_retain_source_identity() {
     let repository = Repository::new("local w = require(\"wombat\")\nw.use(\"empty\")\n");
     repository.write(
         "modules/dot_config/empty.lua",
@@ -138,7 +138,8 @@ fn empty_directory_declarations_are_valid_and_emit_no_artifacts() {
     assert!(declared.manifest.artifacts.is_empty());
     repository.write("modules/dot_config/empty.lua", "return true\n");
     let omitted = repository.build().unwrap();
-    assert_eq!(declared.build_id, omitted.build_id);
+    assert_ne!(declared.build_id, omitted.build_id);
+    assert_ne!(declared.manifest.sources, omitted.manifest.sources);
 }
 
 #[test]

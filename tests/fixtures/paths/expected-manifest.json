@@ -1,7 +1,29 @@
 {
-  "format_version": 6,
+  "format_version": 7,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:382efff7597ed5f11ba4cbaac3f2e6fbc1b0a0b08bc13c517a829680fbf3815b",
+  "build_id": "sha256:58c9a0eee9b3c4aa809933a94582ab13890703b93f53749d3e3c789b0bd3f851",
+  "sources": [
+    {
+      "path": "modules/auto.lua",
+      "digest": "sha256:0f842d2816db2a20f6ddd80f3903f5cafc1d0c05b643eee84bec0f06cca23fc5"
+    },
+    {
+      "path": "modules/dot_config/override.lua",
+      "digest": "sha256:a9be030753f430d3b543fc3ac6b245338d9ab000ad72e73d3a6bef989e2d1be5"
+    },
+    {
+      "path": "modules/dot_config/starship.lua",
+      "digest": "sha256:aae94e2d3854d1203bbae6f6bfea9c9e4b882cf327d9a921c8cd6c554d5becad"
+    },
+    {
+      "path": "modules/home/shell.lua",
+      "digest": "sha256:15ec5a5443ad14028614bc7c8e3006c8a4c5f11520cc16a6f9d5b286904b3f6f"
+    },
+    {
+      "path": "wombat.lua",
+      "digest": "sha256:5fde1d479fbb130d0551cf08b0efd4047b224fcded7b47095347bc6403cd1cb1"
+    }
+  ],
   "inputs": [],
   "target": {
     "os": {
@@ -15,18 +37,22 @@
   "modules": [
     {
       "name": "auto",
+      "source": "modules/auto.lua",
       "config": {}
     },
     {
       "name": "override",
+      "source": "modules/dot_config/override.lua",
       "config": {}
     },
     {
       "name": "shell",
+      "source": "modules/home/shell.lua",
       "config": {}
     },
     {
       "name": "starship",
+      "source": "modules/dot_config/starship.lua",
       "config": {}
     }
   ],
@@ -35,25 +61,49 @@
       "kind": "use",
       "from": "<root>",
       "to": "auto",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "override",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 4
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "shell",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 5
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "starship",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 6
+        },
+        "callers": []
+      }
     }
   ],
   "artifacts": [
@@ -83,7 +133,13 @@
         "executable": false
       },
       "owner": "auto",
-      "declared_from": "modules/auto.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/auto.lua",
+          "line": 5
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -111,7 +167,13 @@
         "executable": false
       },
       "owner": "shell",
-      "declared_from": "modules/home/shell.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/home/shell.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -139,7 +201,13 @@
         "executable": false
       },
       "owner": "auto",
-      "declared_from": "modules/auto.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/auto.lua",
+          "line": 4
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -166,7 +234,13 @@
         "executable": false
       },
       "owner": "override",
-      "declared_from": "modules/dot_config/override.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/override.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -194,7 +268,13 @@
         "executable": false
       },
       "owner": "starship",
-      "declared_from": "modules/dot_config/starship.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     }
   ]
 }

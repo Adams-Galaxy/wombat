@@ -330,7 +330,7 @@ mod tests {
     use super::{ActualArtifact, ReconciliationAction, classify, expected_mode};
     use crate::manifest::{
         Artifact, ArtifactKind, FileContent, InferenceBasis, Production, SourceAnchor,
-        SourceOrigin, TargetAnchor, TargetOrigin, TargetPath,
+        SourceLocation, SourceOrigin, SourceTrace, TargetAnchor, TargetOrigin, TargetPath,
     };
 
     fn artifact(owner: &str, digest: &str) -> Artifact {
@@ -356,7 +356,14 @@ mod tests {
                 executable: false,
             },
             owner: owner.to_string(),
-            declared_from: format!("modules/dot_config/{owner}.lua"),
+            declared_at: SourceTrace {
+                primary: SourceLocation {
+                    source: format!("modules/dot_config/{owner}.lua"),
+                    line: Some(1),
+                    column: None,
+                },
+                callers: Vec::new(),
+            },
         }
     }
 

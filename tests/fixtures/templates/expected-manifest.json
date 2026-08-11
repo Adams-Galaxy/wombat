@@ -1,7 +1,25 @@
 {
-  "format_version": 6,
+  "format_version": 7,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:f6a9df42e1999299fe78bf923fa8018e2e19508ba1b55902b71f3e5e8feba8b2",
+  "build_id": "sha256:df8105b206bfe61d09c24a104057f7b98236882a35cc6db90b6c754921806bf8",
+  "sources": [
+    {
+      "path": "modules/dot_config/starship.lua",
+      "digest": "sha256:5a3d4d93815d1c7a9d7b4fd20c0f2f046368523f77ef95e5e06f334e7d386708"
+    },
+    {
+      "path": "modules/dot_config/wezterm.lua",
+      "digest": "sha256:6d488e030a386933d59433e61f689160f07806e5a3c03912b1dd9068b4ac8793"
+    },
+    {
+      "path": "modules/theme.lua",
+      "digest": "sha256:2468779a1f6cc0d757d49d3fffc779bf0413efe4ea711807b08df2730e7901d4"
+    },
+    {
+      "path": "wombat.lua",
+      "digest": "sha256:4274d8b64e77910e9c887e4121d4f7e65bc639457a9891d45fe9b502b4c68716"
+    }
+  ],
   "inputs": [],
   "target": {
     "os": {
@@ -15,14 +33,17 @@
   "modules": [
     {
       "name": "starship",
+      "source": "modules/dot_config/starship.lua",
       "config": {}
     },
     {
       "name": "theme",
+      "source": "modules/theme.lua",
       "config": {}
     },
     {
       "name": "wezterm",
+      "source": "modules/dot_config/wezterm.lua",
       "config": {}
     }
   ],
@@ -31,31 +52,61 @@
       "kind": "use",
       "from": "<root>",
       "to": "starship",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 4
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "theme",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "wezterm",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 5
+        },
+        "callers": []
+      }
     },
     {
       "kind": "using",
       "from": "starship",
       "to": "theme",
-      "declared_from": "modules/dot_config/starship.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 2
+        },
+        "callers": []
+      }
     },
     {
       "kind": "using",
       "from": "wezterm",
       "to": "theme",
-      "declared_from": "modules/dot_config/wezterm.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/wezterm.lua",
+          "line": 2
+        },
+        "callers": []
+      }
     }
   ],
   "artifacts": [
@@ -98,7 +149,13 @@
         "executable": false
       },
       "owner": "starship",
-      "declared_from": "modules/dot_config/starship.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 15
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -142,7 +199,13 @@
         "executable": false
       },
       "owner": "wezterm",
-      "declared_from": "modules/dot_config/wezterm.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/wezterm.lua",
+          "line": 4
+        },
+        "callers": []
+      }
     }
   ]
 }

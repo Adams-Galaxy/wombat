@@ -1,7 +1,21 @@
 {
-  "format_version": 6,
+  "format_version": 7,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:057acc6d3f49f46bc1e3edbf0f4c9ea4d6a5f909e6289896c78ce3e769b2cb31",
+  "build_id": "sha256:3f0d308f0118946b4a2604595e6627f9c82807c57514104204d6d338db99c215",
+  "sources": [
+    {
+      "path": "modules/dot_config/config.lua",
+      "digest": "sha256:8806e4393578b36cd419952b462c3134308680bb82b4bafbec86864876d31c0d"
+    },
+    {
+      "path": "modules/dot_local/tools.lua",
+      "digest": "sha256:c7657b67f1cfb1a66325a1719a67a790c20dae8df0f6ef48fad89a0bd804e15c"
+    },
+    {
+      "path": "wombat.lua",
+      "digest": "sha256:75a71ed5ceca1b24bee78a830e92344653135bd04731c8cac5537d2fc04900c8"
+    }
+  ],
   "inputs": [],
   "target": {
     "os": {
@@ -15,10 +29,12 @@
   "modules": [
     {
       "name": "config",
+      "source": "modules/dot_config/config.lua",
       "config": {}
     },
     {
       "name": "tools",
+      "source": "modules/dot_local/tools.lua",
       "config": {}
     }
   ],
@@ -27,13 +43,25 @@
       "kind": "use",
       "from": "<root>",
       "to": "config",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "use",
       "from": "<root>",
       "to": "tools",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 4
+        },
+        "callers": []
+      }
     }
   ],
   "artifacts": [
@@ -65,7 +93,13 @@
         "executable": true
       },
       "owner": "tools",
-      "declared_from": "modules/dot_local/tools.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_local/tools.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -95,7 +129,13 @@
         "executable": false
       },
       "owner": "config",
-      "declared_from": "modules/dot_config/config.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/config.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     },
     {
       "kind": "file",
@@ -125,7 +165,13 @@
         "executable": false
       },
       "owner": "config",
-      "declared_from": "modules/dot_config/config.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/config.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     }
   ]
 }

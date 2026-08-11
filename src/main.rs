@@ -16,6 +16,10 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "auto")]
     color: ColorArg,
 
+    /// Include filtered user frames and underlying diagnostic evidence.
+    #[arg(long, global = true)]
+    trace: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -32,10 +36,40 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true)]
         project_arguments: Vec<OsString>,
     },
+    /// Create the smallest conventional Wombat source repository.
+    Init {
+        /// Repository path. Defaults to the selected configured/default source.
+        path: Option<PathBuf>,
+    },
     /// Add an existing home file to Wombat source state.
     Add {
         /// Absolute existing file beneath the target home.
         target: PathBuf,
+    },
+    /// Inspect one exact completed build product without evaluating Lua.
+    Inspect {
+        /// Focused product section. Defaults to the overview.
+        #[arg(value_enum, default_value = "overview")]
+        section: InspectArg,
+
+        /// Build product, relative to the resolved source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+    },
+    /// Explain one artifact in an exact completed build product.
+    Explain {
+        /// Artifact target, logical path, or anchored source path.
+        artifact: PathBuf,
+
+        /// Build product, relative to the resolved source unless absolute.
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+    },
+    /// Compare one or two exact completed build products semantically.
+    Compare {
+        /// With one path, compare default `build` to it; with two, compare them directly.
+        #[arg(num_args = 1..=2)]
+        products: Vec<PathBuf>,
     },
     /// Compare a completed build product with a target home.
     Diff {
@@ -100,6 +134,31 @@ enum ColorArg {
     Never,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum InspectArg {
+    Overview,
+    Inputs,
+    Target,
+    Modules,
+    Dependencies,
+    Artifacts,
+    Sources,
+}
+
+impl From<InspectArg> for wombat::InspectSection {
+    fn from(value: InspectArg) -> Self {
+        match value {
+            InspectArg::Overview => Self::Overview,
+            InspectArg::Inputs => Self::Inputs,
+            InspectArg::Target => Self::Target,
+            InspectArg::Modules => Self::Modules,
+            InspectArg::Dependencies => Self::Dependencies,
+            InspectArg::Artifacts => Self::Artifacts,
+            InspectArg::Sources => Self::Sources,
+        }
+    }
+}
+
 impl From<ColorArg> for wombat::ColorPolicy {
     fn from(value: ColorArg) -> Self {
         match value {
@@ -132,6 +191,7 @@ fn main() -> ExitCode {
     };
     let stdout = wombat::Presenter::new(cli.color.into(), io::stdout().is_terminal());
     let stderr = wombat::Presenter::new(cli.color.into(), io::stderr().is_terminal());
+    let trace = cli.trace;
 
     let result = match cli.command {
         Command::Build {
@@ -150,10 +210,66 @@ fn main() -> ExitCode {
                 .map(|outcome| print_build_outcome(&outcome, stdout))
             }
         }),
+        Command::Init { path } => {
+            let selected = match (cli.source.as_deref(), path.as_deref()) {
+                (Some(_), Some(_)) => Err(wombat::WombatError::configuration(
+                    "wombat init accepts either --source or PATH, not both",
+                )),
+                (source, path) => wombat::config::resolve_source_candidate(path.or(source)),
+            };
+            selected
+                .and_then(|root| wombat::initialize(&root))
+                .map(|outcome| {
+                    println!("{}", stdout.paint(wombat::Role::Success, outcome.display()));
+                    if let Some(warning) = outcome.warning {
+                        eprintln!(
+                            "{}",
+                            stderr.paint(wombat::Role::Warning, format!("warning: {warning}"))
+                        );
+                    }
+                })
+        }
         Command::Add { target } => wombat::config::resolve_source(cli.source.as_deref())
             .and_then(|source_root| wombat::config::resolve_home().map(|home| (source_root, home)))
             .and_then(|(source_root, home)| wombat::add(&source_root, &home, &target))
             .map(|outcome| println!("{}", stdout.paint(wombat::Role::Success, outcome.display()))),
+        Command::Inspect { section, build_dir } => {
+            resolve_product_path(cli.source.as_deref(), build_dir)
+                .and_then(|(build_dir, _)| wombat::inspect(&build_dir, section.into()))
+                .map(|output| print!("{}", stdout.human_output(&output)))
+        }
+        Command::Explain {
+            artifact,
+            build_dir,
+        } => resolve_product_path(cli.source.as_deref(), build_dir).and_then(
+            |(build_dir, source_root)| {
+                let selector = artifact.to_str().ok_or_else(|| {
+                    wombat::WombatError::configuration("artifact selectors must be valid UTF-8")
+                })?;
+                let home = wombat::config::resolve_home().ok();
+                let output = wombat::explain(
+                    &build_dir,
+                    selector,
+                    source_root.as_deref(),
+                    home.as_deref(),
+                )?;
+                print!("{}", stdout.human_output(&output));
+                Ok(())
+            },
+        ),
+        Command::Compare { products } => {
+            let (left, right) = match products.as_slice() {
+                [right] => (PathBuf::from("build"), right.clone()),
+                [left, right] => (left.clone(), right.clone()),
+                _ => unreachable!("clap constrains comparison operands"),
+            };
+            resolve_product_path(cli.source.as_deref(), left)
+                .and_then(|(left, _)| {
+                    resolve_product_path(cli.source.as_deref(), right)
+                        .and_then(|(right, _)| wombat::compare(&left, &right))
+                })
+                .map(|output| print!("{}", stdout.human_output(&output)))
+        }
         Command::Diff {
             build_dir,
             target_home,
@@ -204,10 +320,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!(
-                "{}",
-                stderr.paint(wombat::Role::Error, format!("error: {error}"))
-            );
+            eprint!("{}", stderr.human_output(&error.render(trace)));
             ExitCode::FAILURE
         }
     }
@@ -287,6 +400,20 @@ fn resolve_deployment_options(
     let target_home = target_home.map_or_else(wombat::config::resolve_home, Ok)?;
     Ok(wombat::DeploymentOptions::new(build_dir, target_home)
         .with_target_home_explicit(target_home_explicit))
+}
+
+fn resolve_product_path(
+    source: Option<&std::path::Path>,
+    build_dir: PathBuf,
+) -> wombat::Result<(PathBuf, Option<PathBuf>)> {
+    if build_dir.is_absolute() {
+        let source_root = source
+            .map(|source| wombat::config::resolve_source(Some(source)))
+            .transpose()?;
+        return Ok((build_dir, source_root));
+    }
+    let source_root = wombat::config::resolve_source(source)?;
+    Ok((source_root.join(build_dir), Some(source_root)))
 }
 
 fn effective_policy(explicit: Option<ConflictArg>) -> wombat::ConflictPolicy {

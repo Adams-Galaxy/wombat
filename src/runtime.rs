@@ -5,15 +5,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mlua::{Lua, Table, Value};
+use mlua::{Function, Lua, MultiValue, Table, Value};
+use sha2::{Digest, Sha256};
 
 use crate::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
 use crate::frozen::FrozenValue;
 use crate::inputs::{self, InputSpec};
 use crate::manifest::{
     ArtifactKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact, EvaluatedDirectory,
-    EvaluatedManifest, EvaluatedProduction, InferenceBasis, ManifestModule, Observation,
-    ObservationSubject, SourceAnchor, SourceOrigin,
+    EvaluatedManifest, EvaluatedProduction, InferenceBasis, MAX_SOURCE_TRACE_FRAMES,
+    ManifestModule, Observation, ObservationSubject, SourceAnchor, SourceFile, SourceLocation,
+    SourceOrigin, SourceTrace,
 };
 use crate::path::{
     expand_target_root, infer_target, infer_target_root, parse_explicit_target,
@@ -23,25 +25,27 @@ use crate::path::{
 use crate::source::{
     SourceFingerprint, join_portable, snapshot_directory, validate_source_components,
 };
-use crate::{Result, WombatError};
+use crate::{Diagnostic, Result, WombatError};
 
 const WOMBAT_LUA: &str = include_str!("../lua/wombat/init.lua");
 const ROOT_MODULE: &str = "<root>";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Location {
-    file: String,
-    line: i64,
+    trace: SourceTrace,
 }
 
 impl Location {
     fn display(&self) -> String {
-        if self.line > 0 {
-            format!("{}:{}", self.file, self.line)
-        } else {
-            self.file.clone()
-        }
+        self.trace.to_string()
     }
+}
+
+#[derive(Clone, Debug)]
+struct TrackedSource {
+    manifest: SourceFile,
+    fingerprint: SourceFingerprint,
+    snapshot: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +97,7 @@ struct ModuleLocation {
 #[derive(Debug)]
 struct RuntimeState {
     root: PathBuf,
+    sources: BTreeMap<String, TrackedSource>,
     modules: BTreeMap<String, ModuleRecord>,
     dependencies: BTreeSet<Dependency>,
     artifacts: Vec<EvaluatedArtifact>,
@@ -110,6 +115,8 @@ struct RuntimeState {
     inputs: Vec<BuildInput>,
     observations: BTreeMap<(ObservationSubject, String), Observation>,
     project_help: Option<String>,
+    failure_frames: Vec<SourceLocation>,
+    failure_tail_call: bool,
 }
 
 impl RuntimeState {
@@ -164,12 +171,12 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     let root = fs::canonicalize(root).map_err(|source| WombatError::io(root, source))?;
     reject_noncanonical_artifact_trees(&root)?;
     let entrypoint = root.join("wombat.lua");
-    let source = read_utf8(&entrypoint)?;
 
     let target = options.host.resolved_target();
     let lua = Lua::new();
     let state = Rc::new(RefCell::new(RuntimeState {
         root: root.clone(),
+        sources: BTreeMap::new(),
         modules: BTreeMap::new(),
         dependencies: BTreeSet::new(),
         artifacts: Vec::new(),
@@ -187,22 +194,23 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         inputs: Vec::new(),
         observations: BTreeMap::new(),
         project_help: None,
+        failure_frames: Vec::new(),
+        failure_tail_call: false,
     }));
 
-    configure_package_path(&lua, &root)?;
+    let source = load_tracked_source(&state, &entrypoint)?;
+
+    configure_package_path(&lua, &root, Rc::clone(&state))?;
     register_preloaded_modules(&lua, Rc::clone(&state))?;
 
-    let execution = lua
-        .load(&source)
-        .set_name(entrypoint.to_string_lossy())
-        .exec();
+    let execution = execute_tracked_chunk(&lua, &state, &source, &entrypoint);
 
     if let Err(error) = execution {
         let state = state.borrow();
         if let Some(help) = &state.project_help {
             return Ok(EvaluationOutcome::ProjectHelp(help.clone()));
         }
-        return Err(error.into());
+        return Err(error);
     }
 
     {
@@ -226,11 +234,56 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     ))))
 }
 
-fn configure_package_path(lua: &Lua, root: &Path) -> Result<()> {
+fn configure_package_path(lua: &Lua, root: &Path, state: Rc<RefCell<RuntimeState>>) -> Result<()> {
     let package: Table = lua.globals().get("package")?;
     let library = root.join("lua").to_string_lossy().replace('\\', "/");
     package.set("path", format!("{library}/?.lua;{library}/?/init.lua"))?;
+    let existing: Table = package.get("searchers")?;
+    let searchers = lua.create_table()?;
+    searchers.set(1, existing.get::<Value>(1)?)?;
+    let helper_root = root.join("lua");
+    searchers.set(
+        2,
+        lua.create_function(move |lua, name: String| {
+            let relative = helper_module_path(&name).map_err(mlua::Error::external)?;
+            let candidates = [
+                helper_root.join(format!("{relative}.lua")),
+                helper_root.join(&relative).join("init.lua"),
+            ];
+            let Some(path) = candidates.iter().find(|path| path.is_file()) else {
+                return Ok(MultiValue::from_vec(vec![Value::String(
+                    lua.create_string(format!("\n\tno repository Lua module '{}'", name))?,
+                )]));
+            };
+            let source = load_tracked_source(&state, path).map_err(mlua::Error::external)?;
+            let loader = lua
+                .load(&source)
+                .set_name(format!("@{}", path.to_string_lossy()))
+                .into_function()?;
+            Ok(MultiValue::from_vec(vec![
+                Value::Function(loader),
+                Value::String(lua.create_string(display_path(&state.borrow().root, path))?),
+            ]))
+        })?,
+    )?;
+    package.set("searchers", searchers)?;
     Ok(())
+}
+
+fn helper_module_path(name: &str) -> Result<String> {
+    if name.is_empty()
+        || name.split('.').any(|segment| {
+            segment.is_empty()
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        })
+    {
+        return Err(WombatError::configuration(format!(
+            "invalid repository Lua module name `{name}`"
+        )));
+    }
+    Ok(name.replace('.', "/"))
 }
 
 fn register_preloaded_modules(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<()> {
@@ -367,12 +420,7 @@ fn register_input_spec(
         .next_input_spec
         .checked_add(1)
         .ok_or_else(|| WombatError::configuration("too many project input declarations"))?;
-    let spec = InputSpec::parse(
-        order,
-        kind,
-        FrozenValue::from_lua(options)?,
-        location.display(),
-    )?;
+    let spec = InputSpec::parse(order, kind, FrozenValue::from_lua(options)?, location.trace)?;
     state.input_specs.insert(order, spec);
     Ok(order)
 }
@@ -651,7 +699,7 @@ fn set_target(
     state.target = ResolvedTarget {
         platform,
         origin: TargetOrigin::RootOverride,
-        declared_from: Some(location.display()),
+        declared_at: Some(location.trace.clone()),
     };
     state.target_override = Some(location);
     Ok(())
@@ -687,7 +735,7 @@ fn register_selection(
         kind: DependencyKind::Use,
         from,
         to: name.to_string(),
-        declared_from: location.file.clone(),
+        declared_at: location.trace.clone(),
     });
 
     let record = state
@@ -746,7 +794,7 @@ fn consume_module(
             kind: DependencyKind::Using,
             from,
             to: name.to_string(),
-            declared_from: location.file,
+            declared_at: location.trace,
         });
     }
 
@@ -872,7 +920,7 @@ fn register_artifact(
             target,
             fingerprint: SourceFingerprint::from_metadata(&metadata),
             owner,
-            declared_from: location.file,
+            declared_at: location.trace,
         });
     } else if metadata.file_type().is_dir() {
         if requested_kind == "template" {
@@ -912,7 +960,7 @@ fn register_artifact(
                 target: expand_target_root(&target_root, &leaf.relative)?,
                 fingerprint: leaf.fingerprint.clone(),
                 owner: owner.clone(),
-                declared_from: location.file.clone(),
+                declared_at: location.trace.clone(),
             });
         }
         state.directories.push(EvaluatedDirectory {
@@ -920,7 +968,7 @@ fn register_artifact(
             root: resolved_root,
             target_root,
             owner,
-            declared_from: location.file,
+            declared_at: location.trace,
             snapshot,
         });
     } else {
@@ -997,12 +1045,22 @@ fn evaluate_module(lua: &Lua, state: &Rc<RefCell<RuntimeState>>, name: &str) -> 
     }
 
     let path = resolved_location.file;
-    let result = read_utf8(&path).and_then(|source| {
-        let value = lua
-            .load(&source)
-            .set_name(path.to_string_lossy())
-            .eval::<Value>()?;
+    let result = load_tracked_source(state, &path).and_then(|source| {
+        let value = execute_tracked_chunk(lua, state, &source, &path)?;
         FrozenValue::from_lua(value)
+    });
+    let selection = state
+        .borrow()
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.kind == DependencyKind::Use && dependency.to == name)
+        .cloned();
+    let result = result.map_err(|error| match &selection {
+        Some(selection) => error.with_note(format!(
+            "module `{name}` was selected at {}",
+            selection.declared_at
+        )),
+        None => error,
     });
 
     let mut state = state.borrow_mut();
@@ -1141,6 +1199,11 @@ fn build_manifest(state: &RuntimeState) -> EvaluatedManifest {
         .iter()
         .map(|(name, module)| ManifestModule {
             name: name.clone(),
+            source: module
+                .location
+                .as_ref()
+                .map(|location| display_path(&state.root, &location.file))
+                .expect("selected modules are evaluated before manifest construction"),
             config: module.config(),
         })
         .collect();
@@ -1152,17 +1215,22 @@ fn build_manifest(state: &RuntimeState) -> EvaluatedManifest {
             .cmp(&right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
-            .then_with(|| left.declared_from.cmp(&right.declared_from))
+            .then_with(|| left.declared_at.cmp(&right.declared_at))
     });
     let mut directories = state.directories.clone();
     directories.sort_by(|left, right| {
         left.root
             .cmp(&right.root)
             .then_with(|| left.owner.cmp(&right.owner))
-            .then_with(|| left.declared_from.cmp(&right.declared_from))
+            .then_with(|| left.declared_at.cmp(&right.declared_at))
     });
 
     EvaluatedManifest {
+        sources: state
+            .sources
+            .values()
+            .map(|source| source.manifest.clone())
+            .collect(),
         inputs: state.inputs.clone(),
         target: state.target.clone(),
         observations: state.observations.values().cloned().collect(),
@@ -1267,7 +1335,7 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
             };
             format!(
                 "{} from {source} declared at {}",
-                artifact.owner, artifact.declared_from
+                artifact.owner, artifact.declared_at
             )
         })
         .collect::<Vec<_>>()
@@ -1277,30 +1345,187 @@ fn artifact_conflict(target: &str, reason: &str, artifacts: &[&EvaluatedArtifact
     ))
 }
 
-fn caller_location(lua: &Lua, state: &Rc<RefCell<RuntimeState>>) -> Location {
-    let raw = (1..=6).find_map(|level| {
-        lua.inspect_stack(level, |debug| {
-            let source = debug.source().source?.into_owned();
-            if source == "<wombat>/init.lua"
-                || source == "=[C]"
-                || source == "[C]"
-                || source == "<unknown>"
-            {
-                return None;
-            }
-            let line = debug
-                .current_line()
-                .and_then(|line| i64::try_from(line).ok())
-                .unwrap_or(0);
-            Some((source, line))
-        })
-        .flatten()
+fn execute_tracked_chunk(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    source: &str,
+    path: &Path,
+) -> Result<Value> {
+    state.borrow_mut().failure_frames.clear();
+    state.borrow_mut().failure_tail_call = false;
+    let chunk = lua
+        .load(source)
+        .set_name(format!("@{}", path.to_string_lossy()))
+        .into_function()
+        .map_err(|error| lua_diagnostic(state, error, Some(path)))?;
+    let handler_state = Rc::clone(state);
+    let handler = lua.create_function(move |lua, error: Value| {
+        let (frames, tail_call) = capture_user_frames(lua, &handler_state);
+        let mut state = handler_state.borrow_mut();
+        state.failure_frames = frames;
+        state.failure_tail_call = tail_call;
+        Ok(error)
+    })?;
+    let protected: Function = lua
+        .load(
+            "return function(chunk, handler)\n\
+             local result = table.pack(xpcall(chunk, handler))\n\
+             if not result[1] then error(result[2], 0) end\n\
+             return table.unpack(result, 2, result.n)\n\
+             end",
+        )
+        .set_name("=<wombat>/protected.lua")
+        .eval()?;
+    protected
+        .call((chunk, handler))
+        .map_err(|error| lua_diagnostic(state, error, Some(path)))
+}
+
+fn lua_diagnostic(
+    state: &Rc<RefCell<RuntimeState>>,
+    error: mlua::Error,
+    fallback_path: Option<&Path>,
+) -> WombatError {
+    let state = state.borrow();
+    let mut frames = state.failure_frames.clone();
+    if frames.is_empty()
+        && let Some(path) = fallback_path
+    {
+        frames.push(SourceLocation {
+            source: display_path(&state.root, path),
+            line: syntax_line(&error),
+            column: None,
+        });
+    }
+    let primary = frames.first().cloned();
+    let source_line = primary.as_ref().and_then(|location| {
+        let line = usize::try_from(location.line?).ok()?;
+        state
+            .sources
+            .get(&location.source)?
+            .snapshot
+            .lines()
+            .nth(line.saturating_sub(1))
+            .map(str::to_string)
     });
-    let (source, line) = raw.unwrap_or_else(|| ("<unknown>".to_string(), 0));
-    let source = source.strip_prefix('@').unwrap_or(&source);
+    let raw = error.to_string();
+    let mut diagnostic = Diagnostic::new(clean_lua_reason(&raw));
+    diagnostic.primary = primary;
+    diagnostic.source_line = source_line;
+    diagnostic.user_frames = frames;
+    if let (Some(primary), Some(caller)) = (
+        diagnostic.user_frames.first(),
+        diagnostic.user_frames.get(1),
+    ) && primary.source != caller.source
+    {
+        diagnostic.notes.push(format!("called from {caller}"));
+    }
+    if state.failure_tail_call {
+        diagnostic.notes.push(
+            "Lua reported a tail call; intermediate user frames may be unavailable".to_string(),
+        );
+    }
+    diagnostic.underlying = Some(raw);
+    WombatError::diagnostic(diagnostic)
+}
+
+fn syntax_line(error: &mlua::Error) -> Option<u32> {
+    let message = match error {
+        mlua::Error::SyntaxError { message, .. } => message,
+        _ => return None,
+    };
+    parse_lua_line(message)
+}
+
+fn parse_lua_line(message: &str) -> Option<u32> {
+    message.split(':').find_map(|part| part.parse::<u32>().ok())
+}
+
+fn clean_lua_reason(raw: &str) -> String {
+    let first = raw.split("\nstack traceback:").next().unwrap_or(raw);
+    let bytes = first.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] != b':' {
+            continue;
+        }
+        let digits_start = start + 1;
+        let mut end = digits_start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > digits_start && end < bytes.len() && bytes[end] == b':' {
+            return first[end + 1..].trim().to_string();
+        }
+    }
+    first
+        .trim()
+        .strip_prefix("runtime error:")
+        .or_else(|| first.trim().strip_prefix("syntax error:"))
+        .unwrap_or(first.trim())
+        .trim()
+        .to_string()
+}
+
+fn capture_user_frames(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+) -> (Vec<SourceLocation>, bool) {
+    let root = state.borrow().root.clone();
+    let mut frames = Vec::new();
+    let mut tail_call = false;
+    for level in 1..=48 {
+        if frames.len() == MAX_SOURCE_TRACE_FRAMES {
+            break;
+        }
+        let frame = lua
+            .inspect_stack(level, |debug| {
+                let source = debug.source().source?.into_owned();
+                if source == "<wombat>/init.lua"
+                    || source == "=<wombat>/init.lua"
+                    || source == "<wombat>/protected.lua"
+                    || source == "=<wombat>/protected.lua"
+                    || source == "=[C]"
+                    || source == "[C]"
+                    || source == "<unknown>"
+                {
+                    return None;
+                }
+                let source = source.strip_prefix('@').unwrap_or(&source);
+                Some((
+                    SourceLocation {
+                        source: display_path(&root, Path::new(source)),
+                        line: debug
+                            .current_line()
+                            .and_then(|line| u32::try_from(line).ok()),
+                        column: None,
+                    },
+                    debug.is_tail_call(),
+                ))
+            })
+            .flatten();
+        let Some((frame, is_tail_call)) = frame else {
+            continue;
+        };
+        tail_call |= is_tail_call;
+        if frames.last() != Some(&frame) {
+            frames.push(frame);
+        }
+    }
+    (frames, tail_call)
+}
+
+fn caller_location(lua: &Lua, state: &Rc<RefCell<RuntimeState>>) -> Location {
+    let (frames, _) = capture_user_frames(lua, state);
+    let primary = frames.first().cloned().unwrap_or(SourceLocation {
+        source: "<unknown>".to_string(),
+        line: None,
+        column: None,
+    });
     Location {
-        file: display_path(&state.borrow().root, Path::new(source)),
-        line,
+        trace: SourceTrace {
+            primary,
+            callers: frames.into_iter().skip(1).collect(),
+        },
     }
 }
 
@@ -1311,13 +1536,93 @@ fn display_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn read_utf8(path: &Path) -> Result<String> {
-    fs::read_to_string(path).map_err(|source| WombatError::io(path, source))
+fn load_tracked_source(state: &Rc<RefCell<RuntimeState>>, path: &Path) -> Result<String> {
+    let root = state.borrow().root.clone();
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        WombatError::configuration(format!(
+            "Lua source `{}` escapes the repository",
+            path.display()
+        ))
+    })?;
+    let mut current = root.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(WombatError::configuration(format!(
+                "Lua source `{}` contains an invalid path component",
+                path.display()
+            )));
+        };
+        current.push(component);
+        let metadata =
+            fs::symlink_metadata(&current).map_err(|error| WombatError::io(&current, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(WombatError::configuration(format!(
+                "Lua source `{}` must not contain symbolic links",
+                path.display()
+            )));
+        }
+    }
+    let before = fs::symlink_metadata(path).map_err(|error| WombatError::io(path, error))?;
+    if !before.file_type().is_file() {
+        return Err(WombatError::configuration(format!(
+            "Lua source `{}` is not a regular file",
+            path.display()
+        )));
+    }
+    let bytes = fs::read(path).map_err(|error| WombatError::io(path, error))?;
+    let after = fs::symlink_metadata(path).map_err(|error| WombatError::io(path, error))?;
+    let before_fingerprint = SourceFingerprint::from_metadata(&before);
+    if SourceFingerprint::from_metadata(&after) != before_fingerprint {
+        return Err(WombatError::configuration(format!(
+            "Lua source `{}` changed while it was being read",
+            path.display()
+        )));
+    }
+    let snapshot = String::from_utf8(bytes.clone()).map_err(|_| {
+        WombatError::configuration(format!(
+            "Lua source `{}` is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    let portable = display_path(&root, path);
+    let manifest = SourceFile {
+        path: portable.clone(),
+        digest: digest_bytes(&bytes),
+    };
+    let mut state = state.borrow_mut();
+    if let Some(existing) = state.sources.get(&portable) {
+        if existing.manifest != manifest || existing.fingerprint != before_fingerprint {
+            return Err(WombatError::configuration(format!(
+                "Lua source `{portable}` changed during evaluation"
+            )));
+        }
+        return Ok(existing.snapshot.clone());
+    }
+    state.sources.insert(
+        portable,
+        TrackedSource {
+            manifest,
+            fingerprint: before_fingerprint,
+            snapshot: snapshot.clone(),
+        },
+    );
+    Ok(snapshot)
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(7 + digest.len() * 2);
+    output.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    output
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_path_ancestor, validate_module_name};
+    use super::{helper_module_path, is_path_ancestor, validate_module_name};
 
     #[test]
     fn validates_initial_module_names() {
@@ -1331,5 +1636,12 @@ mod tests {
         assert!(is_path_ancestor("nvim", "nvim/init.lua"));
         assert!(!is_path_ancestor("nvim", "nvim-old/init.lua"));
         assert!(!is_path_ancestor("nvim", "nvim"));
+    }
+
+    #[test]
+    fn normalizes_safe_repository_helper_names() {
+        assert_eq!(helper_module_path("theme.colors").unwrap(), "theme/colors");
+        assert!(helper_module_path("../theme").is_err());
+        assert!(helper_module_path("theme/path").is_err());
     }
 }

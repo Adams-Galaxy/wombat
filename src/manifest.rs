@@ -5,7 +5,52 @@ use crate::frozen::FrozenValue;
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 6;
+pub const MANIFEST_FORMAT_VERSION: u32 = 7;
+
+pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFile {
+    pub path: String,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceLocation {
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+}
+
+impl std::fmt::Display for SourceLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.source)?;
+        if let Some(line) = self.line {
+            write!(formatter, ":{line}")?;
+            if let Some(column) = self.column {
+                write!(formatter, ":{column}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceTrace {
+    pub primary: SourceLocation,
+    pub callers: Vec<SourceLocation>,
+}
+
+impl std::fmt::Display for SourceTrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.primary.fmt(formatter)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,6 +58,7 @@ pub struct Manifest {
     pub format_version: u32,
     pub wombat_version: String,
     pub build_id: String,
+    pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
@@ -45,7 +91,7 @@ pub struct BuildInput {
     pub kind: BuildInputKind,
     pub value: FrozenValue,
     pub origin: BuildInputOrigin,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -67,6 +113,7 @@ pub struct Observation {
 #[serde(deny_unknown_fields)]
 pub struct ManifestModule {
     pub name: String,
+    pub source: String,
     pub config: FrozenValue,
 }
 
@@ -76,7 +123,7 @@ pub struct Dependency {
     pub kind: DependencyKind,
     pub from: String,
     pub to: String,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -96,7 +143,7 @@ pub struct Artifact {
     pub target: TargetPath,
     pub content: FileContent,
     pub owner: String,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -127,6 +174,7 @@ pub struct FileContent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EvaluatedManifest {
+    pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
@@ -145,7 +193,7 @@ pub(crate) struct EvaluatedArtifact {
     pub target: TargetPath,
     pub fingerprint: SourceFingerprint,
     pub owner: String,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,7 +208,7 @@ pub(crate) struct EvaluatedDirectory {
     pub root: String,
     pub target_root: EvaluatedTargetRoot,
     pub owner: String,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
     pub snapshot: Vec<DirectoryLeaf>,
 }
 

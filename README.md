@@ -4,11 +4,14 @@ Wombat is an experimental Lua-powered dotfiles compiler. It evaluates Lua
 configuration into an explicit, inspectable manifest before any target mutation
 takes place.
 
-The project is in early vertical-slice development. `build` evaluates
+The project is in early vertical-slice development. `init` creates the smallest
+conventional source repository, and `build` evaluates
 configuration and materialises a deterministic, self-contained build product
 without changing a target. `diff`, `apply`, and `deploy` then inspect or
-guardedly reconcile that exact product with a target home. `add` is an explicit
-authoring command that copies one existing home file into Wombat source state.
+guardedly reconcile that exact product with a target home. `inspect`, `explain`,
+and `compare` make exact completed products understandable without evaluating
+Lua. `add` is an explicit authoring command that copies one existing home file
+or regular-file directory tree into Wombat source state.
 
 ## Repository shape
 
@@ -138,6 +141,21 @@ holds locking, staging, ownership, and recovery state. Rebuilding is staged and
 verified before publication; it reports whether the product was created,
 updated, unchanged, or repaired.
 
+Create the minimal conventional repository at the selected source with:
+
+```sh
+wombat init
+
+# Or scaffold an explicit source without changing Wombat's user configuration.
+wombat init ./dotfiles
+```
+
+Initialization creates `wombat.lua`, a selected `modules/auto.lua` generated
+region, and a new `.gitignore` for the default build workspace. It permits
+unrelated files, is idempotent for the exact scaffold, and refuses to overwrite
+handwritten policy or traverse reserved symlinks. It does not initialize Git,
+build, deploy, or change the configured repository.
+
 ## Parameterised builds and context
 
 Repositories may declare their own typed build inputs. They live after `--`, in
@@ -198,9 +216,44 @@ end
 ```
 
 Only facts actually consulted during evaluation enter manifest provenance.
-Resolved inputs, the concrete target, and consulted observations are stored in
-manifest v6 and participate in build identity. Explicit template context is
-still the only route from these values into rendered files.
+Resolved inputs, the concrete target, consulted observations, and typed Lua
+source provenance are stored in manifest v7 and participate in build identity.
+Every Wombat-owned root, module, and repository `require()` load contributes its
+repository-relative path and digest. Consequently a comment or declaration
+line movement can produce a new exact build identity even when artifact bytes
+are unchanged. Explicit template context is still the only route from context
+values into rendered files.
+
+## Inspecting completed products
+
+Inspection opens and verifies exact products; it never evaluates repository
+Lua:
+
+```sh
+wombat inspect
+wombat inspect inputs
+wombat inspect target
+wombat inspect modules
+wombat inspect dependencies
+wombat inspect artifacts
+wombat inspect sources
+
+wombat explain ~/.config/starship.toml
+wombat compare build/server
+wombat compare build/linux build/macos
+```
+
+`inspect` provides an overview or focused manifest view. `explain` connects one
+artifact to its owner, declaration trace, source origin, production mode,
+target inference, frozen template context, and module relationships. A source
+excerpt is shown only when the current repository file matches the product's
+recorded digest. `compare` reports semantic source, input, target, module,
+dependency, and artifact changes while hiding unchanged data.
+
+Relative product paths remain relative to the selected source. Absolute
+relocated products can be inspected and compared without their original
+repository. The manifest remains the machine-readable product contract; these
+commands intentionally provide human views rather than a second JSON schema.
 
 ## Diffing and deployment
 
@@ -260,7 +313,7 @@ Human-facing output uses semantic color when its stream is a terminal. Set
 honors `NO_COLOR` and keeps redirected output plain. Color is never the only
 status signal.
 
-## Adding an existing file
+## Adding existing files and directories
 
 An initialized repository selects a normal generated module once:
 
@@ -278,10 +331,11 @@ local w = require("wombat")
 -- wombat:add end
 ```
 
-Then an existing regular file can be imported with:
+Then an existing regular file or directory can be imported with:
 
 ```sh
 cargo run -- --source /path/to/dotfiles add ~/.config/starship.toml
+cargo run -- --source /path/to/dotfiles add ~/.config/nvim
 ```
 
 This copies its bytes to `dot_config/starship.toml` and adds an ordinary,
@@ -293,6 +347,28 @@ If an already-selected directory declaration uniquely covers the new source
 and maps it to the requested target, `add` copies only the file and reports the
 owning module. That route works without `modules/auto.lua`; the generated module
 remains the conservative fallback for files not covered by a directory.
+
+A directory import recursively copies hidden and ordinary regular files,
+preserves normalized executable intent, and writes one generated directory
+`install()` declaration. Every leaf is preflighted before mutation. Symlinks,
+special files, empty trees, conflicting ownership, partial coverage, and
+different existing source state are refused without partial source mutation.
+
+## Diagnostics
+
+Wombat renders Lua and template failures as source-aware compiler diagnostics.
+The concise default leads with the reason, user file and line, available source
+excerpt, and relevant Wombat context such as module selection. Bundled Lua and C
+frames are hidden.
+
+```sh
+wombat build
+wombat --trace build
+```
+
+Global `--trace` adds up to eight filtered user frames and the underlying error
+as fallback evidence. Tail-call frame loss is reported explicitly. Wombat does
+not expose Lua's debug library or capture arbitrary locals and upvalues.
 
 ## Development
 

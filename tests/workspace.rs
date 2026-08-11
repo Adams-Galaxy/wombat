@@ -256,7 +256,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 }
 
 #[test]
-fn verifier_rejects_v5_unknown_v6_fields_and_internally_inconsistent_provenance() {
+fn verifier_rejects_v6_unknown_v7_fields_and_internally_inconsistent_provenance() {
     let repository = Repository::new();
     repository.build().unwrap();
 
@@ -265,15 +265,15 @@ fn verifier_rejects_v5_unknown_v6_fields_and_internally_inconsistent_provenance(
     let legacy_manifest = legacy.join("manifest.json");
     let mut json: serde_json::Value =
         serde_json::from_slice(&fs::read(&legacy_manifest).unwrap()).unwrap();
-    json["format_version"] = serde_json::Value::from(5);
+    json["format_version"] = serde_json::Value::from(6);
     fs::write(&legacy_manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     let error = verify_build(&legacy).unwrap_err().to_string();
     assert!(
-        error.contains("unsupported manifest format version 5"),
+        error.contains("unsupported manifest format version 6"),
         "{error}"
     );
 
-    let unknown = repository.temporary.path().join("unknown-v6-field");
+    let unknown = repository.temporary.path().join("unknown-v7-field");
     copy_product(&repository.build_dir, &unknown);
     let unknown_manifest = unknown.join("manifest.json");
     let mut json: serde_json::Value =
@@ -297,6 +297,24 @@ fn verifier_rejects_v5_unknown_v6_fields_and_internally_inconsistent_provenance(
     .unwrap();
     let error = verify_build(&provenance).unwrap_err().to_string();
     assert!(error.contains("does not match declared source"), "{error}");
+
+    let uncatalogued = repository.temporary.path().join("uncatalogued-source");
+    copy_product(&repository.build_dir, &uncatalogued);
+    let uncatalogued_manifest = uncatalogued.join("manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&uncatalogued_manifest).unwrap()).unwrap();
+    json["artifacts"][0]["declared_at"]["primary"]["source"] =
+        serde_json::Value::String("lua/missing.lua".to_string());
+    fs::write(
+        &uncatalogued_manifest,
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    let error = verify_build(&uncatalogued).unwrap_err().to_string();
+    assert!(
+        error.contains("uncatalogued source `lua/missing.lua`"),
+        "{error}"
+    );
 }
 
 #[cfg(unix)]

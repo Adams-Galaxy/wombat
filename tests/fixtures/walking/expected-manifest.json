@@ -1,7 +1,17 @@
 {
-  "format_version": 6,
+  "format_version": 7,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:30fcce93ef03a414cfd3ba6f81fa2792f09511127e7c147e4828730fde6321af",
+  "build_id": "sha256:61dd3cbac4e8f0d321faa76a04ac509df16954c5467db214ea81056f6b1f27ef",
+  "sources": [
+    {
+      "path": "modules/dot_config/starship.lua",
+      "digest": "sha256:aae94e2d3854d1203bbae6f6bfea9c9e4b882cf327d9a921c8cd6c554d5becad"
+    },
+    {
+      "path": "wombat.lua",
+      "digest": "sha256:dd62564843db4450724c6385050ebc64b533d6c49363f4799b50a7e79c58b9a1"
+    }
+  ],
   "inputs": [],
   "target": {
     "os": {
@@ -15,6 +25,7 @@
   "modules": [
     {
       "name": "starship",
+      "source": "modules/dot_config/starship.lua",
       "config": {}
     }
   ],
@@ -23,7 +34,13 @@
       "kind": "use",
       "from": "<root>",
       "to": "starship",
-      "declared_from": "wombat.lua"
+      "declared_at": {
+        "primary": {
+          "source": "wombat.lua",
+          "line": 5
+        },
+        "callers": []
+      }
     }
   ],
   "artifacts": [
@@ -53,7 +70,13 @@
         "executable": false
       },
       "owner": "starship",
-      "declared_from": "modules/dot_config/starship.lua"
+      "declared_at": {
+        "primary": {
+          "source": "modules/dot_config/starship.lua",
+          "line": 3
+        },
+        "callers": []
+      }
     }
   ]
 }

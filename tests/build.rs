@@ -98,20 +98,20 @@ fn repeated_builds_are_byte_identical_and_non_mutating() {
 }
 
 #[test]
-fn root_selection_order_does_not_change_the_manifest() {
+fn root_selection_order_preserves_outputs_but_changes_exact_source_identity() {
     let temporary = tempfile::tempdir().unwrap();
-    let first = manifest_json(
-        &build_at(&fixture("lifecycle-order-a"), &temporary.path().join("a"))
-            .unwrap()
-            .manifest,
-    );
-    let second = manifest_json(
-        &build_at(&fixture("lifecycle-order-b"), &temporary.path().join("b"))
-            .unwrap()
-            .manifest,
-    );
+    let first = build_at(&fixture("lifecycle-order-a"), &temporary.path().join("a"))
+        .unwrap()
+        .manifest;
+    let second = build_at(&fixture("lifecycle-order-b"), &temporary.path().join("b"))
+        .unwrap()
+        .manifest;
 
-    assert_eq!(first, second);
+    assert_ne!(first.build_id, second.build_id);
+    assert_ne!(first.sources, second.sources);
+    assert_eq!(first.modules, second.modules);
+    assert_eq!(first.artifacts, second.artifacts);
+    let first = manifest_json(&first);
     assert!(first.contains(r#""name": "helper""#));
     assert!(first.contains(r#""kind": "using""#));
     assert!(first.contains(r#""name": "kanagawa""#));
@@ -119,7 +119,7 @@ fn root_selection_order_does_not_change_the_manifest() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v6() {
+fn path_fixture_matches_the_exact_manifest_v7() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -133,7 +133,7 @@ fn path_fixture_matches_the_exact_manifest_v6() {
 }
 
 #[test]
-fn directory_fixture_matches_manifest_v6_and_materialised_tree() {
+fn directory_fixture_matches_manifest_v7_and_materialised_tree() {
     let root = fixture("directories");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");

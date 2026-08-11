@@ -168,6 +168,43 @@ fn diff_apply_update_and_unchanged_form_a_complete_workflow() {
 }
 
 #[test]
+fn source_only_identity_changes_advance_complete_state_without_rewriting_targets() {
+    let repository = Repository::new("theme = 'dark'\n");
+    let first = repository.build();
+    apply(&repository.options(), ConflictPolicy::Fail).unwrap();
+    let before = fs::metadata(repository.target())
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let module = repository.root.join("modules/dot_config/app.lua");
+    let original = fs::read_to_string(&module).unwrap();
+    fs::write(&module, format!("-- provenance only\n{original}")).unwrap();
+    let second = repository.build();
+    assert_ne!(first.build_id, second.build_id);
+    assert_eq!(
+        first.manifest.artifacts[0].content,
+        second.manifest.artifacts[0].content
+    );
+
+    let outcome = apply(&repository.options(), ConflictPolicy::Fail).unwrap();
+    assert_eq!(outcome.status, ApplyStatus::Applied);
+    assert_eq!(outcome.created + outcome.updated + outcome.removed, 0);
+    assert_eq!(outcome.state_advanced, 1);
+    assert_eq!(
+        fs::metadata(repository.target())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        repository.state_json()["complete_build_id"],
+        serde_json::Value::String(second.build_id)
+    );
+}
+
+#[test]
 fn downstream_changes_fail_skip_and_overwrite_with_incomplete_state() {
     let repository = Repository::new("version = 1\n");
     repository.build();
@@ -942,11 +979,11 @@ fn unsupported_target_state_versions_are_rejected() {
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
     let state_path = repository.state_dir().join("state.json");
     let mut state = repository.state_json();
-    state["format_version"] = serde_json::json!(2);
+    state["format_version"] = serde_json::json!(3);
     fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let error = diff(&repository.options()).unwrap_err().to_string();
     assert!(
-        error.contains("unsupported target state format version 2"),
+        error.contains("unsupported target state format version 3") && error.contains("expected 2"),
         "{error}"
     );
 }

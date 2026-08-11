@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::manifest::{Artifact, ArtifactKind, FileContent, Production, SourceOrigin, TargetPath};
+use crate::manifest::{
+    Artifact, ArtifactKind, FileContent, Production, SourceOrigin, SourceTrace, TargetPath,
+};
 use crate::{Result, WombatError};
 
-pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 1;
+pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +33,7 @@ pub(crate) struct AppliedArtifact {
     pub content: FileContent,
     pub mode: u32,
     pub owner: String,
-    pub declared_from: String,
+    pub declared_at: SourceTrace,
 }
 
 impl AppliedArtifact {
@@ -50,7 +52,7 @@ impl AppliedArtifact {
             content: artifact.content,
             mode,
             owner: artifact.owner,
-            declared_from: artifact.declared_from,
+            declared_at: artifact.declared_at,
         }
     }
 
@@ -63,7 +65,7 @@ impl AppliedArtifact {
             target: self.target.clone(),
             content: self.content.clone(),
             owner: self.owner.clone(),
-            declared_from: self.declared_from.clone(),
+            declared_at: self.declared_at.clone(),
         }
     }
 }
@@ -330,6 +332,16 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
         wombat_version: env!("CARGO_PKG_VERSION").to_string(),
         build_id: String::new(),
+        sources: artifacts
+            .iter()
+            .map(|artifact| artifact.declared_at.primary.source.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|path| crate::manifest::SourceFile {
+                path,
+                digest: format!("sha256:{}", "0".repeat(64)),
+            })
+            .collect(),
         inputs: Vec::new(),
         target: crate::context::ResolvedTarget {
             platform: crate::context::TargetPlatform::minimal(
@@ -337,7 +349,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
                 crate::context::Architecture::Aarch64,
             ),
             origin: crate::context::TargetOrigin::HostDefault,
-            declared_from: None,
+            declared_at: None,
         },
         observations: Vec::new(),
         modules: Vec::new(),
