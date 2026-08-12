@@ -313,13 +313,7 @@ fn target_changed(path: &Path) -> WombatError {
 }
 
 fn digest_string(bytes: impl AsRef<[u8]>) -> String {
-    let mut output = String::with_capacity(7 + bytes.as_ref().len() * 2);
-    output.push_str("sha256:");
-    for byte in bytes.as_ref() {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    output
+    crate::storage::digest::prefixed_hex(bytes)
 }
 
 #[cfg(test)]

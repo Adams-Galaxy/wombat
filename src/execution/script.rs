@@ -2,11 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mlua::Lua;
@@ -14,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::ladder::RungId;
+use crate::execution::ladder::RungId;
 use crate::manifest::{
     ExecutionMode, Script, ScriptOutcome, ScriptOutcomeStatus, ScriptSchedule, ScriptScope,
     TaskLogPolicy,
@@ -387,13 +386,7 @@ fn run_process(
         command.args(script.runner.args()).arg(entrypoint);
         command
     };
-    command
-        .args(protocol)
-        .current_dir(work)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .envs(&script.env);
+    command.args(protocol).current_dir(work).envs(&script.env);
     if script.runner.is_python() && script.python_helper {
         let helper = state_root.join("python-helper");
         ensure_private_directory(&helper)?;
@@ -410,11 +403,6 @@ fn run_process(
             })?,
         );
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
     run_streaming(command, &script.identity, script.timeout_seconds)
 }
 
@@ -425,123 +413,92 @@ fn run_lua(
     source_dir: &Path,
     protocol: &[String],
 ) -> Result<RunResult> {
-    static PROCESS_DIRECTORY: OnceLock<Mutex<()>> = OnceLock::new();
-    let _directory_guard = PROCESS_DIRECTORY
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let bytes = fs::read(entrypoint).map_err(|error| WombatError::io(entrypoint, error))?;
-    let lua = Lua::new();
-    let previous_directory =
-        std::env::current_dir().map_err(|error| WombatError::io("current directory", error))?;
-    std::env::set_current_dir(work).map_err(|error| WombatError::io(work, error))?;
-    let _restore_directory = DirectoryRestore(previous_directory);
-    let args = lua.create_table()?;
-    args.set(0, entrypoint.to_string_lossy().as_ref())?;
-    for (index, value) in protocol.iter().enumerate() {
-        args.set(index + 1, value.as_str())?;
-    }
-    lua.globals().set("arg", args)?;
-    let package: mlua::Table = lua.globals().get("package")?;
-    let existing_path: String = package.get("path")?;
-    package.set(
-        "path",
-        format!(
-            "{}/?.lua;{}/?/init.lua;{existing_path}",
-            source_dir.display(),
-            source_dir.display()
-        ),
-    )?;
-    let declared_env = script.env.clone();
-    let os: mlua::Table = lua.globals().get("os")?;
-    os.set(
-        "getenv",
-        lua.create_function(move |_, key: String| {
-            Ok(declared_env
-                .get(&key)
-                .cloned()
-                .or_else(|| std::env::var(key).ok()))
-        })?,
-    )?;
-    let output = Arc::new(Mutex::new(Captured {
-        bytes: Vec::new(),
-        overflow: false,
-    }));
-    let printed = Arc::clone(&output);
-    lua.globals().set(
-        "print",
-        lua.create_function(move |_, values: mlua::Variadic<mlua::Value>| {
-            let mut line = values
-                .iter()
-                .map(|value| match value {
-                    mlua::Value::String(value) => value.to_string_lossy(),
-                    value => format!("{value:?}"),
-                })
-                .collect::<Vec<_>>()
-                .join("\t")
-                .into_bytes();
-            line.push(b'\n');
-            let mut capture = printed.lock().expect("Lua output capture");
-            let available = MAX_LOG_SIZE.saturating_sub(capture.bytes.len());
-            capture
-                .bytes
-                .extend_from_slice(&line[..line.len().min(available)]);
-            capture.overflow |= line.len() > available;
-            Ok(())
-        })?,
-    )?;
-    if let Some(seconds) = script.timeout_seconds {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
-        lua.set_hook(
-            mlua::HookTriggers::new().every_nth_instruction(10_000),
-            move |_, _| {
-                if Instant::now() >= deadline {
-                    Err(mlua::Error::runtime("script timeout"))
-                } else {
-                    Ok(mlua::VmState::Continue)
-                }
-            },
-        )?;
-    }
-    let result = lua
-        .load(&bytes)
-        .set_name(format!("@{}", entrypoint.display()))
-        .exec();
-    drop(lua);
-    let stdout = Arc::try_unwrap(output)
-        .expect("Lua output capture still referenced")
-        .into_inner()
-        .expect("Lua output capture lock");
-    let mut execution = match result {
-        Ok(()) => RunResult::success(),
-        Err(error) => RunResult::failure(error.to_string()),
-    };
-    execution.stdout = stdout;
-    if !execution.stdout.bytes.is_empty() {
-        let mut destination = std::io::stdout();
-        for line in execution
-            .stdout
-            .bytes
-            .split_inclusive(|byte| *byte == b'\n')
-        {
-            destination
-                .write_all(format!("[{}] ", script.identity).as_bytes())
-                .and_then(|()| destination.write_all(line))
-                .map_err(|error| WombatError::io("embedded Lua stdout", error))?;
+    super::process::with_working_directory(work, || {
+        let lua = Lua::new();
+        let args = lua.create_table()?;
+        args.set(0, entrypoint.to_string_lossy().as_ref())?;
+        for (index, value) in protocol.iter().enumerate() {
+            args.set(index + 1, value.as_str())?;
         }
-        destination
-            .flush()
-            .map_err(|error| WombatError::io("embedded Lua stdout", error))?;
-    }
-    Ok(execution)
-}
-
-struct DirectoryRestore(PathBuf);
-
-impl Drop for DirectoryRestore {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.0);
-    }
+        lua.globals().set("arg", args)?;
+        let package: mlua::Table = lua.globals().get("package")?;
+        let existing_path: String = package.get("path")?;
+        package.set(
+            "path",
+            format!(
+                "{}/?.lua;{}/?/init.lua;{existing_path}",
+                source_dir.display(),
+                source_dir.display()
+            ),
+        )?;
+        let declared_env = script.env.clone();
+        let os: mlua::Table = lua.globals().get("os")?;
+        os.set(
+            "getenv",
+            lua.create_function(move |_, key: String| {
+                Ok(declared_env
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| std::env::var(key).ok()))
+            })?,
+        )?;
+        let output = Arc::new(Mutex::new(Captured {
+            bytes: Vec::new(),
+            overflow: false,
+        }));
+        let printed = Arc::clone(&output);
+        lua.globals().set(
+            "print",
+            lua.create_function(move |_, values: mlua::Variadic<mlua::Value>| {
+                let mut line = values
+                    .iter()
+                    .map(|value| match value {
+                        mlua::Value::String(value) => value.to_string_lossy(),
+                        value => format!("{value:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+                    .into_bytes();
+                line.push(b'\n');
+                let mut capture = printed.lock().expect("Lua output capture");
+                let available = MAX_LOG_SIZE.saturating_sub(capture.bytes.len());
+                capture
+                    .bytes
+                    .extend_from_slice(&line[..line.len().min(available)]);
+                capture.overflow |= line.len() > available;
+                Ok(())
+            })?,
+        )?;
+        if let Some(seconds) = script.timeout_seconds {
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            lua.set_hook(
+                mlua::HookTriggers::new().every_nth_instruction(10_000),
+                move |_, _| {
+                    if Instant::now() >= deadline {
+                        Err(mlua::Error::runtime("script timeout"))
+                    } else {
+                        Ok(mlua::VmState::Continue)
+                    }
+                },
+            )?;
+        }
+        let result = lua
+            .load(&bytes)
+            .set_name(format!("@{}", entrypoint.display()))
+            .exec();
+        drop(lua);
+        let stdout = Arc::try_unwrap(output)
+            .expect("Lua output capture still referenced")
+            .into_inner()
+            .expect("Lua output capture lock");
+        let mut execution = match result {
+            Ok(()) => RunResult::success(),
+            Err(error) => RunResult::failure(error.to_string()),
+        };
+        execution.stdout = stdout;
+        Ok(execution)
+    })
 }
 
 #[derive(Debug)]
@@ -590,96 +547,23 @@ impl RunResult {
 }
 
 fn run_streaming(mut command: Command, identity: &str, timeout: Option<u64>) -> Result<RunResult> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| WombatError::io("script process", error))?;
-    let process_id = child.id();
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
-    let stdout_identity = identity.to_string();
-    let stderr_identity = identity.to_string();
-    let stdout_thread = thread::spawn(move || stream(stdout, &stdout_identity, false));
-    let stderr_thread = thread::spawn(move || stream(stderr, &stderr_identity, true));
-    let started = Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| WombatError::io("script process", error))?
-        {
-            break status;
-        }
-        if timeout.is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds)) {
-            terminate_group(process_id);
-            let _ = child.kill();
-            timed_out = true;
-            break child
-                .wait()
-                .map_err(|error| WombatError::io("script process", error))?;
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let stdout = stdout_thread
-        .join()
-        .map_err(|_| WombatError::configuration("script stdout reader panicked"))?
-        .map_err(|error| WombatError::io("script stdout", error))?;
-    let stderr = stderr_thread
-        .join()
-        .map_err(|_| WombatError::configuration("script stderr reader panicked"))?
-        .map_err(|error| WombatError::io("script stderr", error))?;
+    let outcome = super::process::run(
+        &mut command,
+        identity,
+        timeout.map(Duration::from_secs),
+        MAX_LOG_SIZE,
+    )?;
     Ok(RunResult {
-        success: status.success() && !timed_out,
-        status: if timed_out {
-            "timeout".to_string()
-        } else {
-            status.to_string()
+        success: outcome.success,
+        status: outcome.status,
+        stdout: Captured {
+            bytes: outcome.stdout.bytes,
+            overflow: outcome.stdout.truncated,
         },
-        stdout,
-        stderr,
-    })
-}
-
-fn stream(mut pipe: impl Read, identity: &str, stderr: bool) -> std::io::Result<Captured> {
-    let mut retained = Vec::new();
-    let mut overflow = false;
-    let mut buffer = [0_u8; 8192];
-    let prefix = format!("[{identity}] ");
-    let mut line_start = true;
-    loop {
-        let count = pipe.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        if retained.len() < MAX_LOG_SIZE {
-            let available = MAX_LOG_SIZE - retained.len();
-            retained.extend_from_slice(&buffer[..count.min(available)]);
-            overflow |= count > available;
-        } else {
-            overflow = true;
-        }
-        let destination: &mut dyn Write = if stderr {
-            &mut std::io::stderr()
-        } else {
-            &mut std::io::stdout()
-        };
-        let mut start = 0;
-        while start < count {
-            if line_start {
-                destination.write_all(prefix.as_bytes())?;
-            }
-            let end = buffer[start..count]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(count, |offset| start + offset + 1);
-            destination.write_all(&buffer[start..end])?;
-            line_start = buffer[end - 1] == b'\n';
-            start = end;
-        }
-        destination.flush()?;
-    }
-    Ok(Captured {
-        bytes: retained,
-        overflow,
+        stderr: Captured {
+            bytes: outcome.stderr.bytes,
+            overflow: outcome.stderr.truncated,
+        },
     })
 }
 
@@ -775,13 +659,7 @@ fn short_digest(value: &str) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!(
-        "sha256:{}",
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+    crate::storage::digest::sha256(bytes)
 }
 
 fn resolve_command(command: &str) -> Option<PathBuf> {
@@ -797,14 +675,7 @@ fn resolve_command(command: &str) -> Option<PathBuf> {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|error| WombatError::io(path, error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| WombatError::io(path, error))?;
-    }
-    Ok(())
+    crate::storage::permissions::ensure_private_directory(path)
 }
 
 fn reset_directory(path: &Path) -> Result<()> {
@@ -862,16 +733,6 @@ fn make_read_only(root: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(unix)]
-fn terminate_group(process_id: u32) {
-    let _ = Command::new("kill")
-        .args(["-TERM", "--", &format!("-{process_id}")])
-        .status();
-}
-
-#[cfg(not(unix))]
-fn terminate_group(_process_id: u32) {}
 
 fn script_error(script: &Script, message: &str) -> WombatError {
     WombatError::configuration(format!("script `{}` failed: {message}", script.identity))

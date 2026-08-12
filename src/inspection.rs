@@ -41,10 +41,12 @@ pub enum PlanInspectSection {
 
 pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
     let product = open_build(build_dir)?;
-    let journal = crate::ladder::read(build_dir).ok().filter(|journal| {
-        journal.plan_id == product.manifest.plan_id
-            && journal.build_id.as_deref() == Some(product.manifest.build_id.as_str())
-    });
+    let journal = crate::execution::ladder::read(build_dir)
+        .ok()
+        .filter(|journal| {
+            journal.plan_id == product.manifest.plan_id
+                && journal.build_id.as_deref() == Some(product.manifest.build_id.as_str())
+        });
     Ok(render_section(&product.manifest, journal.as_ref(), section))
 }
 
@@ -156,7 +158,7 @@ fn render_observations(
     output
 }
 
-fn render_ladder(ladder: &crate::ladder::ExecutionLadder) -> String {
+fn render_ladder(ladder: &crate::execution::ladder::ExecutionLadder) -> String {
     render_list(
         &format!("Ladder {}", ladder.name),
         ladder.flattened.iter().map(|rung| {
@@ -390,7 +392,7 @@ pub fn compare(left: &Path, right: &Path) -> Result<String> {
 
 fn render_section(
     manifest: &Manifest,
-    journal: Option<&crate::ladder::ExecutionJournal>,
+    journal: Option<&crate::execution::ladder::ExecutionJournal>,
     section: InspectSection,
 ) -> String {
     match section {

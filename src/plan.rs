@@ -116,11 +116,11 @@ pub(crate) fn publish(
     write_json(&plan_path, plan)?;
     write_json(&staging.path().join("execution.json"), execution)?;
     materialise_provider_payloads(source_root, staging.path(), "providers", &plan.providers)?;
-    crate::scripts::publish_payloads(
+    crate::execution::script::publish_payloads(
         source_root,
         staging.path(),
         &plan.scripts,
-        crate::scripts::PayloadKind::Plan,
+        crate::execution::script::PayloadKind::Plan,
     )?;
     sync_directory(staging.path())?;
 
@@ -165,10 +165,10 @@ pub fn read(build_dir: &Path) -> Result<BuildPlan> {
     let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
     let plan: BuildPlan = serde_json::from_slice(&bytes)?;
     validate(&plan)?;
-    crate::scripts::verify_payloads(
+    crate::execution::script::verify_payloads(
         &build_dir.join(".wombat/plan"),
         &plan.scripts,
-        crate::scripts::PayloadKind::Plan,
+        crate::execution::script::PayloadKind::Plan,
     )?;
     Ok(plan)
 }
@@ -247,7 +247,7 @@ fn validate_sha_identity(value: &str, label: &str) -> Result<()> {
 }
 
 pub(crate) fn validate_actions(
-    ladder: &crate::ladder::ExecutionLadder,
+    ladder: &crate::execution::ladder::ExecutionLadder,
     tasks: &[crate::manifest::Task],
     scripts: &[crate::manifest::Script],
 ) -> Result<()> {
@@ -296,7 +296,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         modules: &'a [crate::manifest::ManifestModule],
         dependencies: &'a [crate::manifest::Dependency],
         project_identity: &'a str,
-        ladder: &'a crate::ladder::ExecutionLadder,
+        ladder: &'a crate::execution::ladder::ExecutionLadder,
         providers: &'a [Provider],
         requirements: &'a [crate::manifest::Requirement],
         preparations: &'a [crate::manifest::ProviderPreparation],

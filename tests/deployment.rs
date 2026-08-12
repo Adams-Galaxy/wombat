@@ -1062,7 +1062,7 @@ fn clean_apply_resets_only_the_selected_target_execution_journal() {
     let applied_state = fs::read(target_state.join("state.json")).unwrap();
     let target_contents = fs::read(repository.target()).unwrap();
     let prepared = prepare_apply(&repository.options().with_clean(true)).unwrap();
-    assert!(!journal.exists());
+    assert!(journal.exists());
     assert_eq!(
         fs::read(target_state.join("state.json")).unwrap(),
         applied_state

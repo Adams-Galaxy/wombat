@@ -271,26 +271,7 @@ fn write_file(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() => {
-            return Err(WombatError::configuration(format!(
-                "cache path `{}` must be a non-symlink directory",
-                path.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(path).map_err(|error| WombatError::io(path, error))?;
-        }
-        Err(error) => return Err(WombatError::io(path, error)),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| WombatError::io(path, error))?;
-    }
-    Ok(())
+    crate::storage::permissions::ensure_private_directory(path)
 }
 
 fn set_private_file(file: &File, path: &Path) -> Result<()> {
@@ -304,7 +285,7 @@ fn set_private_file(file: &File, path: &Path) -> Result<()> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_digest(bytes))
+    crate::storage::digest::sha256(bytes)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

@@ -150,7 +150,7 @@ pub fn add(root: &Path, target_root: &Path, requested: &Path) -> Result<AddOutco
         )?;
     }
 
-    let evaluated = crate::runtime::evaluate(&root)?;
+    let evaluated = crate::lua::evaluate(&root)?;
     let coverage = reconcile_coverage(
         &evaluated.directories,
         &evaluated.artifacts,

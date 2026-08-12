@@ -1,16 +1,14 @@
-use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::Write;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
 
 use crate::manifest::{
     Artifact, ArtifactKind, EvaluatedTargetOrigin, FileContent, Production, SourceOrigin,
     SourceTrace, TargetPath, Task, TaskCachePolicy, TaskLogPolicy, TaskOutput, TaskRunner,
     TaskTargetRoot,
 };
+use crate::storage::{atomic, digest, locking, permissions};
 use crate::{Result, WombatError};
 
 pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 3;
@@ -98,13 +96,7 @@ pub(crate) struct TargetStateGuard {
     directory: PathBuf,
     state_path: PathBuf,
     target_root: String,
-    _lock: File,
-}
-
-impl Drop for TargetStateGuard {
-    fn drop(&mut self) {
-        let _ = File::unlock(&self._lock);
-    }
+    _lock: locking::Guard,
 }
 
 impl TargetStateGuard {
@@ -143,17 +135,15 @@ impl TargetStateGuard {
             .write(true)
             .open(&lock_path)
             .map_err(|error| WombatError::io(&lock_path, error))?;
-        set_private_file_permissions(&lock, &lock_path)?;
-        let result = match mode {
-            LockMode::Shared => lock.try_lock_shared(),
-            LockMode::Exclusive => lock.try_lock(),
-        };
-        result.map_err(|error| match error {
-            TryLockError::WouldBlock => WombatError::configuration(format!(
-                "target `{target_root_string}` is in use by another Wombat process"
-            )),
-            TryLockError::Error(error) => WombatError::io(&lock_path, error),
-        })?;
+        permissions::set_private_file(&lock, &lock_path)?;
+        let lock = locking::Guard::try_acquire(
+            lock,
+            &lock_path,
+            match mode {
+                LockMode::Shared => locking::Mode::Shared,
+                LockMode::Exclusive => locking::Mode::Exclusive,
+            },
+        )?;
         Ok(Self {
             state_path: directory.join("state.json"),
             directory,
@@ -258,22 +248,7 @@ impl TargetStateGuard {
             ));
         }
         validate_state_artifacts(&state.artifacts)?;
-        let mut bytes = serde_json::to_vec_pretty(state)?;
-        bytes.push(b'\n');
-        let mut temporary = NamedTempFile::new_in(&self.directory)
-            .map_err(|error| WombatError::io(&self.directory, error))?;
-        set_private_file_permissions(temporary.as_file(), temporary.path())?;
-        temporary
-            .write_all(&bytes)
-            .map_err(|error| WombatError::io(temporary.path(), error))?;
-        temporary
-            .as_file_mut()
-            .sync_all()
-            .map_err(|error| WombatError::io(temporary.path(), error))?;
-        temporary
-            .persist(&self.state_path)
-            .map_err(|error| WombatError::io(&self.state_path, error.error))?;
-        sync_directory(&self.directory)
+        atomic::write_json_pretty(&self.state_path, state, true)
     }
 
     #[cfg(test)]
@@ -310,31 +285,11 @@ pub(crate) fn resolve_state_root(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn target_key(target_root: &Path) -> String {
-    let digest = Sha256::digest(target_root.as_os_str().as_encoded_bytes());
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    output
+    digest::hex_sha256(target_root.as_os_str().as_encoded_bytes())
 }
 
 fn create_private_directories(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|error| WombatError::io(path, error))?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| WombatError::io(path, error))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        return Err(WombatError::configuration(format!(
-            "target state directory `{}` must be a non-symlink directory",
-            path.display()
-        )));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| WombatError::io(path, error))?;
-    }
-    Ok(())
+    permissions::ensure_private_directory(path)
 }
 
 fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
@@ -383,7 +338,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         modules: Vec::new(),
         dependencies: Vec::new(),
         project_identity: format!("sha256:{}", "0".repeat(64)),
-        ladder: crate::ladder::ExecutionLadder::default(),
+        ladder: crate::execution::ladder::ExecutionLadder::default(),
         providers: Vec::new(),
         requirements: Vec::new(),
         preparations: Vec::new(),
@@ -422,7 +377,7 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
                 enabled: false,
                 revision: None,
             },
-            at: crate::ladder::CoreRung::MaterialiseTasks.into(),
+            at: crate::execution::ladder::CoreRung::MaterialiseTasks.into(),
             target_root: Some(TaskTargetRoot {
                 path: String::new(),
                 origin: EvaluatedTargetOrigin::Explicit {
@@ -449,23 +404,6 @@ fn valid_digest(value: &str) -> bool {
     value.len() == 71
         && value.starts_with("sha256:")
         && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn set_private_file_permissions(file: &File, path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| WombatError::io(path, error))?;
-    }
-    Ok(())
-}
-
-fn sync_directory(path: &Path) -> Result<()> {
-    let directory = File::open(path).map_err(|error| WombatError::io(path, error))?;
-    directory
-        .sync_all()
-        .map_err(|error| WombatError::io(path, error))
 }
 
 #[cfg(test)]

@@ -1,9 +1,8 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::thread;
+use std::process::Command;
 
 use mlua::{Lua, Value};
 use serde::Serialize;
@@ -63,14 +62,14 @@ struct TaskKey<'a> {
     target_root: &'a Option<crate::manifest::TaskTargetRoot>,
     revision: &'a Option<String>,
     interpreter_identity: &'a str,
-    at: &'a crate::ladder::RungId,
+    at: &'a crate::execution::ladder::RungId,
 }
 
 pub(crate) fn execute_task(
     source_root: &Path,
     build_dir: &Path,
     desired: &mut EvaluatedManifest,
-    rung: &crate::ladder::RungId,
+    rung: &crate::execution::ladder::RungId,
     identity: &str,
 ) -> Result<()> {
     execute_tasks_selected(source_root, build_dir, desired, rung, Some(identity))
@@ -80,7 +79,7 @@ fn execute_tasks_selected(
     source_root: &Path,
     build_dir: &Path,
     desired: &mut EvaluatedManifest,
-    rung: &crate::ladder::RungId,
+    rung: &crate::execution::ladder::RungId,
     identity: Option<&str>,
 ) -> Result<()> {
     if desired.tasks.is_empty() {
@@ -252,7 +251,7 @@ fn execute_tasks_selected(
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_at.cmp(&right.declared_at))
     });
-    crate::runtime::validate_artifact_conflicts(&desired.artifacts)
+    crate::lua::validate_artifact_conflicts(&desired.artifacts)
 }
 
 pub(crate) fn check_runners(tasks: &[crate::manifest::Task]) -> Result<()> {
@@ -355,90 +354,18 @@ fn run_task(
 }
 
 fn run_streaming(mut command: Command, identity: &str) -> Result<RunResult> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| WombatError::io("task process", error))?;
-    let stdout = child.stdout.take().expect("piped stdout is available");
-    let stderr = child.stderr.take().expect("piped stderr is available");
-    let stdout_identity = identity.to_string();
-    let stderr_identity = identity.to_string();
-    let stdout_thread = thread::spawn(move || stream(stdout, &stdout_identity, false));
-    let stderr_thread = thread::spawn(move || stream(stderr, &stderr_identity, true));
-    let status = child
-        .wait()
-        .map_err(|error| WombatError::io("task process", error))?;
-    let stdout = stdout_thread
-        .join()
-        .map_err(|_| WombatError::configuration("task stdout reader panicked"))?
-        .map_err(|error| WombatError::io("task stdout", error))?;
-    let stderr = stderr_thread
-        .join()
-        .map_err(|_| WombatError::configuration("task stderr reader panicked"))?
-        .map_err(|error| WombatError::io("task stderr", error))?;
+    let outcome = super::process::run(&mut command, identity, None, MAX_LOG_SIZE)?;
     Ok(RunResult {
-        success: status.success(),
-        status: display_status(status),
-        stdout,
-        stderr,
-    })
-}
-
-fn stream(mut pipe: impl Read, identity: &str, stderr: bool) -> std::io::Result<CapturedStream> {
-    if stderr {
-        let mut destination = std::io::stderr().lock();
-        stream_to(&mut pipe, identity, &mut destination)
-    } else {
-        let mut destination = std::io::stdout().lock();
-        stream_to(&mut pipe, identity, &mut destination)
-    }
-}
-
-fn stream_to(
-    pipe: &mut impl Read,
-    identity: &str,
-    destination: &mut impl Write,
-) -> std::io::Result<CapturedStream> {
-    let mut retained = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0_u8; 8 * 1024];
-    let prefix = format!("[{identity}] ");
-    let mut line_start = true;
-    loop {
-        let read = pipe.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        let chunk = &buffer[..read];
-        if retained.len() < MAX_LOG_SIZE {
-            let remaining = MAX_LOG_SIZE - retained.len();
-            retained.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            truncated |= chunk.len() > remaining;
-        } else {
-            truncated = true;
-        }
-        let mut start = 0;
-        while start < chunk.len() {
-            if line_start {
-                destination.write_all(prefix.as_bytes())?;
-                line_start = false;
-            }
-            let end = chunk[start..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(chunk.len(), |offset| start + offset + 1);
-            destination.write_all(&chunk[start..end])?;
-            if chunk[end - 1] == b'\n' {
-                line_start = true;
-            }
-            start = end;
-        }
-        destination.flush()?;
-    }
-    Ok(CapturedStream {
-        bytes: retained,
-        truncated,
+        success: outcome.success,
+        status: outcome.status.replace("exit status: ", "exit status "),
+        stdout: CapturedStream {
+            bytes: outcome.stdout.bytes,
+            truncated: outcome.stdout.truncated,
+        },
+        stderr: CapturedStream {
+            bytes: outcome.stderr.bytes,
+            truncated: outcome.stderr.truncated,
+        },
     })
 }
 
@@ -449,9 +376,7 @@ fn run_lua(
     protocol: &[String],
 ) -> Result<RunResult> {
     let bytes = fs::read(entrypoint).map_err(|error| WombatError::io(entrypoint, error))?;
-    let old = env::current_dir().map_err(|error| WombatError::io("current directory", error))?;
-    env::set_current_dir(workspace).map_err(|error| WombatError::io(workspace, error))?;
-    let execution = (|| -> Result<()> {
+    super::process::with_working_directory(workspace, || {
         let lua = Lua::new();
         if let Ok(os) = lua.globals().get::<mlua::Table>("os") {
             os.set("exit", Value::Nil)?;
@@ -471,22 +396,19 @@ fn run_lua(
         lua.load(&bytes)
             .set_name(format!("@{}", task.entrypoint))
             .exec()
-            .map_err(|error| task_error(task, &format!("Lua execution failed: {error}")))
-    })();
-    let restore = env::set_current_dir(&old).map_err(|error| WombatError::io(&old, error));
-    execution?;
-    restore?;
-    Ok(RunResult {
-        success: true,
-        status: "success".to_string(),
-        stdout: CapturedStream {
-            bytes: Vec::new(),
-            truncated: false,
-        },
-        stderr: CapturedStream {
-            bytes: Vec::new(),
-            truncated: false,
-        },
+            .map_err(|error| task_error(task, &format!("Lua execution failed: {error}")))?;
+        Ok(RunResult {
+            success: true,
+            status: "success".to_string(),
+            stdout: CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            stderr: CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+        })
     })
 }
 
@@ -741,20 +663,7 @@ fn reset_private_directory(path: &Path) -> Result<()> {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(WombatError::configuration(format!(
-                "task workspace `{}` must be a non-symlink directory",
-                path.display()
-            )));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(path).map_err(|error| WombatError::io(path, error))?;
-        }
-        Err(error) => return Err(WombatError::io(path, error)),
-    }
-    set_private_directory(path)
+    crate::storage::permissions::ensure_private_directory(path)
 }
 
 fn set_private_directory(path: &Path) -> Result<()> {
@@ -825,7 +734,7 @@ fn short_digest(value: &str) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_digest(bytes))
+    crate::storage::digest::sha256(bytes)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -836,12 +745,6 @@ fn hex_digest(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
     }
     output
-}
-
-fn display_status(status: ExitStatus) -> String {
-    status
-        .code()
-        .map_or_else(|| status.to_string(), |code| format!("exit status {code}"))
 }
 
 fn task_error(task: &crate::manifest::Task, reason: &str) -> WombatError {
