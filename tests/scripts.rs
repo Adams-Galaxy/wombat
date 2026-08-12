@@ -463,9 +463,13 @@ fn bash_direct_and_configured_runners_execute_and_timeouts_reap_children() {
     let marker = temporary.path().join("runners");
     fs::create_dir_all(root.join("scripts")).unwrap();
     for (name, value) in [("one.bash", "b"), ("two", "d"), ("three.custom", "c")] {
+        // `two` is run as a direct executable rather than through an
+        // interpreter, so it needs a shebang. Darwin's execve falls back to a
+        // shell for shebang-less text files; Linux returns ENOEXEC.
+        let shebang = if name == "two" { "#!/bin/sh\n" } else { "" };
         fs::write(
             root.join("scripts").join(name),
-            format!("printf {value} >> '{}'\n", marker.display()),
+            format!("{shebang}printf {value} >> '{}'\n", marker.display()),
         )
         .unwrap();
     }
