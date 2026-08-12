@@ -3,6 +3,18 @@ use std::fs;
 use tempfile::tempdir;
 use wombat::{BuildOptions, build, ladder};
 
+/// A deterministic macOS host for tests that declare the Homebrew provider.
+///
+/// Provider selection is host-dependent — Homebrew refuses a non-macOS target —
+/// so these tests describe their host instead of inheriting the machine running
+/// them. Without this they pass only on macOS.
+fn macos_fixture_host() -> wombat::HostContext {
+    wombat::HostContext::fixture(wombat::TargetPlatform::minimal(
+        wombat::OperatingSystemName::Macos,
+        wombat::Architecture::Aarch64,
+    ))
+}
+
 #[test]
 fn materialisation_records_the_fixed_core_ladder() {
     let temporary = tempdir().unwrap();
@@ -72,7 +84,12 @@ fn rungs_normalize_and_compile_only_products_record_skipped_gates() {
         "local w = require('wombat')\nw.providers({ 'brew' })\nw.need.command('sh', { when = 'materialise.tasks' })\nw.install('.config', { to = '.config/test' })\n",
     )
     .unwrap();
-    let built = build(BuildOptions::new(&source, "build").with_compile_only(true)).unwrap();
+    let built = build(
+        BuildOptions::new(&source, "build")
+            .with_host(macos_fixture_host())
+            .with_compile_only(true),
+    )
+    .unwrap();
     assert_eq!(
         built.manifest.execution_mode,
         wombat::manifest::ExecutionMode::CompileOnly
@@ -111,7 +128,7 @@ fn unified_requirements_are_the_only_persisted_requirement_scope() {
         "local w = require('wombat')\nassert(type(w.rungs.materialise.tasks) == 'table')\nassert(tostring(w.rungs.materialise.tasks) == 'materialise.tasks')\nlocal ok = pcall(function() w.rungs.materialise.tasks.value = 'changed' end)\nassert(not ok)\nw.providers({ 'brew' })\nw.need.command('sh', { when = w.rungs.materialise.tasks })\n",
     )
     .unwrap();
-    let built = build(BuildOptions::new(&source, "build")).unwrap();
+    let built = build(BuildOptions::new(&source, "build").with_host(macos_fixture_host())).unwrap();
     let encoded = serde_json::to_string(&built.manifest).unwrap();
     assert!(encoded.contains("materialise.tasks"));
     assert!(!encoded.contains("build_requirements"));
@@ -128,7 +145,8 @@ fn duplicate_requirement_merges_to_its_earliest_deadline() {
         "local w = require('wombat')\nw.providers({ 'brew' })\nw.need.command('sh', { when = w.rungs.materialise.tasks })\nw.need.command('sh')\n",
     )
     .unwrap();
-    let plan = wombat::plan(BuildOptions::new(&source, "build")).unwrap();
+    let plan =
+        wombat::plan(BuildOptions::new(&source, "build").with_host(macos_fixture_host())).unwrap();
     assert_eq!(plan.plan.requirements.len(), 1);
     assert_eq!(
         plan.plan.requirements[0].when,
@@ -220,7 +238,8 @@ fn requirement_authorization_is_ephemeral_and_not_journal_state() {
         "local w = require('wombat')\nw.providers({ 'brew' })\nw.need.command('sh')\n",
     )
     .unwrap();
-    let plan = wombat::plan(BuildOptions::new(&source, "build")).unwrap();
+    let plan =
+        wombat::plan(BuildOptions::new(&source, "build").with_host(macos_fixture_host())).unwrap();
     let journal = ladder::ExecutionJournal::new(
         plan.plan.plan_id.clone(),
         ladder::CoreRung::MaterialiseAfter,
@@ -243,12 +262,7 @@ fn normal_materialisation_refuses_an_incompatible_target_without_requirements() 
         "local w=require('wombat')\nw.target('linux/x86_64')\n",
     )
     .unwrap();
-    let options = BuildOptions::new(&source, "build").with_host(wombat::HostContext::fixture(
-        wombat::TargetPlatform::minimal(
-            wombat::OperatingSystemName::Macos,
-            wombat::Architecture::Aarch64,
-        ),
-    ));
+    let options = BuildOptions::new(&source, "build").with_host(macos_fixture_host());
     let error = build(options.clone()).unwrap_err().to_string();
     assert!(error.contains("--compile-only"), "{error}");
     let built = build(options.with_compile_only(true)).unwrap();
