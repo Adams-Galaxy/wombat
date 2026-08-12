@@ -1,10 +1,12 @@
 # Wombat
 
-Wombat is an experimental Lua-powered dotfiles compiler. It evaluates Lua
-configuration into an explicit, inspectable manifest before any target mutation
-takes place.
+Wombat is a pre-release Lua-powered dotfiles compiler and local machine bring-up
+orchestrator for macOS and Linux. It evaluates Lua configuration into an
+explicit, inspectable plan before executing requirements, scripts, generated
+artifacts, or target mutation.
 
-The project is in early vertical-slice development. `plan construct` evaluates
+The implemented pre-0.2 product is usable but its formats and Lua interface are
+still intentionally unstable. `plan construct` evaluates
 configuration and persists one executable plan; `plan materialise` consumes that
 exact plan without running Lua again. `build` composes those stages. `inspect`,
 `explain`, `compare`, `diff`, and `check` make exact completed products
@@ -450,6 +452,30 @@ Human-facing output uses semantic color when its stream is a terminal. Set
 honors `NO_COLOR` and keeps redirected output plain. Color is never the only
 status signal.
 
+## Safety and current limits
+
+Wombat owns only declared artifacts. It compares the previous applied state,
+the current target, and one verified desired product before changing managed
+paths. Unknown neighboring files remain untouched, downstream edits become
+explicit conflicts, and provider or deployment mutation requires authorization.
+
+Repository Lua, tasks, scripts, and custom providers are trusted code. Treat a
+Wombat repository like any other program before running `build`, `apply`, or
+`setup`. Frozen template context and persisted plans are not secret stores.
+
+The current product deliberately does not provide:
+
+- whole-deployment rollback;
+- remote deployment or remote package reconciliation;
+- encrypted secret management;
+- symlink artifacts;
+- Windows support;
+- stable pre-1.0 Lua, Rust-library, or persisted-format compatibility.
+
+Cross-target products can be constructed explicitly, but local machine
+bring-up is meaningful only when the observed host is the target. Use
+compile-only policy for non-local construction.
+
 ## Adding existing files and directories
 
 An initialized repository selects a normal generated module once:
@@ -511,8 +537,8 @@ not expose Lua's debug library or capture arbitrary locals and upvalues.
 
 ## Development
 
-Wombat requires a current stable Rust toolchain. Lua 5.5.0 is built into the
-binary, so a separate Lua installation is not required.
+Wombat supports Rust 1.89 and newer stable toolchains. Lua 5.5.0 is built into
+the binary, so a separate Lua installation is not required.
 
 ```sh
 cargo build
@@ -535,5 +561,5 @@ VS Code users can open the committed workspace:
 code wombat.code-workspace
 ```
 
-The Lua API and manifest are intentionally provisional while the core model is
-being proven against real dotfiles.
+The Lua API, Rust library facade, and persisted formats remain intentionally
+provisional until Wombat 1.0.

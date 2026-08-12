@@ -2,8 +2,12 @@
 name = "wombat"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 publish = false
 description = "A Lua-powered dotfiles compiler"
+readme = "README.md"
+repository = "https://github.com/Adams-Galaxy/wombat"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
