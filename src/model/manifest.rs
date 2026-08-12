@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::context::ResolvedTarget;
 use crate::execution::ladder::{ExecutionLadder, RungId};
-use crate::frozen::FrozenValue;
+use crate::model::context::ResolvedTarget;
+use crate::model::frozen::FrozenValue;
 
-use crate::source::{DirectoryLeaf, SourceFingerprint};
+use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
 pub const MANIFEST_FORMAT_VERSION: u32 = 15;
 pub const BUILD_PLAN_FORMAT_VERSION: u32 = 6;
@@ -912,4 +912,27 @@ pub enum TargetOrigin {
     Explicit { declared: String },
     Inferred { source: String },
     DirectoryExplicit { declared: String, relative: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRunner;
+
+    #[test]
+    fn task_runner_wire_shape_cannot_represent_partial_or_mixed_runners() {
+        let missing_command = serde_json::json!({
+            "kind": "interpreter",
+            "contract_version": 1,
+            "family": "python",
+            "args": []
+        });
+        assert!(serde_json::from_value::<TaskRunner>(missing_command).is_err());
+
+        let mixed_embedded = serde_json::json!({
+            "kind": "embedded_lua",
+            "contract_version": 1,
+            "command": "lua"
+        });
+        assert!(serde_json::from_value::<TaskRunner>(mixed_embedded).is_err());
+    }
 }

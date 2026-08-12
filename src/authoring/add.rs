@@ -6,13 +6,13 @@ use std::path::{Component, Path, PathBuf};
 
 use tempfile::{Builder, NamedTempFile};
 
-use crate::manifest::{EvaluatedDirectory, EvaluatedTargetOrigin};
-use crate::path::{join_relative, reject_legacy_artifact_trees, validate_relative_path};
-use crate::selection::{
+use crate::model::manifest::{EvaluatedDirectory, EvaluatedTargetOrigin};
+use crate::model::path::{join_relative, reject_legacy_artifact_trees, validate_relative_path};
+use crate::model::selection::{
     compile_selector, encode_target_path, hidden_components_authorized, is_excluded, matcher,
     project_physical,
 };
-use crate::source::SourceFingerprint;
+use crate::model::source::SourceFingerprint;
 use crate::{Result, WombatError};
 
 const AUTO_MODULE: &str = "modules/auto.lua";
@@ -205,7 +205,7 @@ pub fn add(root: &Path, target_root: &Path, requested: &Path) -> Result<AddOutco
 
 fn reconcile_coverage(
     directories: &[EvaluatedDirectory],
-    artifacts: &[crate::manifest::EvaluatedArtifact],
+    artifacts: &[crate::model::manifest::EvaluatedArtifact],
     source_root: &str,
     target_root: &str,
     directory: bool,
@@ -315,7 +315,7 @@ fn prospective_target(selection: &EvaluatedDirectory, source: &str) -> Result<Op
         }
     } else if relative
         .split('/')
-        .any(crate::selection::is_hidden_component)
+        .any(crate::model::selection::is_hidden_component)
     {
         return Ok(None);
     }
@@ -357,7 +357,7 @@ fn prospective_target(selection: &EvaluatedDirectory, source: &str) -> Result<Op
 
 fn prepare_auto_update(
     root: &Path,
-    evaluated: &crate::manifest::EvaluatedManifest,
+    evaluated: &crate::model::manifest::EvaluatedManifest,
     target: &str,
 ) -> Result<AutoUpdate> {
     let path = root.join(AUTO_MODULE);

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use tempfile::NamedTempFile;
 
-use crate::manifest::ExecutionMode;
+use crate::model::manifest::ExecutionMode;
 use crate::{Result, WombatError};
 
 pub const EXECUTION_JOURNAL_FORMAT_VERSION: u32 = 3;

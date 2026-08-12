@@ -70,7 +70,7 @@ pub(super) fn declare_module_from(
         )));
     }
     let projection = if physical_relative.is_empty() {
-        crate::manifest::SourceProjection {
+        crate::model::manifest::SourceProjection {
             physical: String::new(),
             logical: String::new(),
             allocated: true,

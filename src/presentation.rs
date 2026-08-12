@@ -1,4 +1,8 @@
 use std::env;
+use std::io::{self, IsTerminal as _, Write as _};
+use std::sync::OnceLock;
+
+use crate::{Result, WombatError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorPolicy {
@@ -38,6 +42,58 @@ pub enum Role {
     Identity,
     Muted,
     Heading,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Event {
+    Log { level: LogLevel, message: String },
+    Progress(String),
+}
+
+static HUMAN_EVENTS: OnceLock<Presenter> = OnceLock::new();
+
+#[doc(hidden)]
+pub fn install_human_event_sink(presenter: Presenter) {
+    let _ = HUMAN_EVENTS.set(presenter);
+}
+
+pub(crate) fn emit(event: Event) {
+    let Some(presenter) = HUMAN_EVENTS.get().copied() else {
+        return;
+    };
+    let (role, message) = match event {
+        Event::Log { level, message } => (
+            match level {
+                LogLevel::Warn => Role::Warning,
+                LogLevel::Error => Role::Error,
+                _ => Role::Muted,
+            },
+            message,
+        ),
+        Event::Progress(message) => (Role::Muted, message),
+    };
+    eprintln!("{}", presenter.paint(role, message));
+}
+
+pub(crate) fn confirm(prompt: &str, operation: &str) -> Result<()> {
+    if HUMAN_EVENTS.get().is_none() || !io::stdin().is_terminal() {
+        return Err(WombatError::policy(format!(
+            "{operation} requires --yes when interactive confirmation is unavailable"
+        )));
+    }
+    eprint!("{prompt}");
+    io::stderr()
+        .flush()
+        .map_err(|error| WombatError::io("standard error", error))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| WombatError::io("standard input", error))?;
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+        Ok(())
+    } else {
+        Err(WombatError::policy(format!("{operation} cancelled")))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

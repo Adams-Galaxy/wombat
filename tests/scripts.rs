@@ -416,6 +416,43 @@ printf x > "$cache/marker"
     assert_eq!(marker_contents(&state), "xx");
 }
 
+#[test]
+fn embedded_lua_execution_serializes_process_global_working_directories() {
+    fn embedded_repository(root: &Path) {
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(
+            root.join("wombat.lua"),
+            "local w=require('wombat')\nw.script('mark.lua', {}, { schedule='always' })\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("scripts/mark.lua"),
+            "local f=assert(io.open('marker','w')); f:write('local'); f:close()\n",
+        )
+        .unwrap();
+    }
+
+    let temporary = tempdir().unwrap();
+    let first_root = temporary.path().join("first");
+    let second_root = temporary.path().join("second");
+    embedded_repository(&first_root);
+    embedded_repository(&second_root);
+    let first_state = temporary.path().join("first-state");
+    let second_state = temporary.path().join("second-state");
+    let first = std::thread::spawn(move || {
+        build(BuildOptions::new(&first_root, "build").with_script_state_root(&first_state))
+            .unwrap();
+        first_state
+    });
+    let second = std::thread::spawn(move || {
+        build(BuildOptions::new(&second_root, "build").with_script_state_root(&second_state))
+            .unwrap();
+        second_state
+    });
+    assert_eq!(marker_contents(&first.join().unwrap()), "local");
+    assert_eq!(marker_contents(&second.join().unwrap()), "local");
+}
+
 #[cfg(unix)]
 #[test]
 fn bash_direct_and_configured_runners_execute_and_timeouts_reap_children() {

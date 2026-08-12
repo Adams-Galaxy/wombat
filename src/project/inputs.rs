@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 
-use crate::context::HostContext;
-use crate::frozen::FrozenValue;
-use crate::manifest::{BuildInput, BuildInputKind, BuildInputOrigin, SourceTrace};
+use crate::model::context::HostContext;
+use crate::model::frozen::FrozenValue;
+use crate::model::manifest::{BuildInput, BuildInputKind, BuildInputOrigin, SourceTrace};
 use crate::{Result, WombatError};
 
 #[derive(Clone, Debug)]
@@ -385,7 +385,7 @@ fn parse_value(spec: &InputSpec, value: &str) -> Result<FrozenValue> {
             Ok(FrozenValue::Integer(value))
         }
         BuildInputKind::Target => Ok(FrozenValue::String(
-            crate::context::TargetPlatform::parse_compact(value)?.compact(),
+            crate::model::context::TargetPlatform::parse_compact(value)?.compact(),
         )),
     }
 }
@@ -564,9 +564,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
 
-    use crate::context::{Architecture, HostContext, OperatingSystemName, TargetPlatform};
-    use crate::frozen::FrozenValue;
-    use crate::manifest::{SourceLocation, SourceTrace};
+    use crate::model::context::{Architecture, HostContext, OperatingSystemName, TargetPlatform};
+    use crate::model::frozen::FrozenValue;
+    use crate::model::manifest::{SourceLocation, SourceTrace};
 
     use super::{InputSpec, resolve};
 

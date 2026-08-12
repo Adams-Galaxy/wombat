@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::manifest::SourceLocation;
+use crate::model::manifest::SourceLocation;
 
 pub type Result<T> = std::result::Result<T, WombatError>;
 

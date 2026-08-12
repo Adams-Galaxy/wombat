@@ -1,12 +1,11 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use tempfile::{Builder, NamedTempFile};
+use tempfile::Builder;
 
-use crate::manifest::{
+use crate::model::manifest::{
     BUILD_PLAN_FORMAT_VERSION, BuildPlan, EvaluatedManifest, EvaluatedProduction, PlannedArtifact,
     PlannedProduction, Provider, ProviderOrigin, RendererIdentity,
 };
@@ -22,7 +21,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         let production = match &artifact.production {
             EvaluatedProduction::Static => {
                 let path = source_root.join(&artifact.source);
-                crate::source::validate_source_components(source_root, &path)?;
+                crate::model::source::validate_source_components(source_root, &path)?;
                 let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
                 PlannedProduction::Static {
                     source_digest: digest(&bytes),
@@ -33,7 +32,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
             }
             EvaluatedProduction::Template { context } => {
                 let path = source_root.join(&artifact.source);
-                crate::source::validate_source_components(source_root, &path)?;
+                crate::model::source::validate_source_components(source_root, &path)?;
                 let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
                 PlannedProduction::Template {
                     renderer: RendererIdentity {
@@ -248,8 +247,8 @@ fn validate_sha_identity(value: &str, label: &str) -> Result<()> {
 
 pub(crate) fn validate_actions(
     ladder: &crate::execution::ladder::ExecutionLadder,
-    tasks: &[crate::manifest::Task],
-    scripts: &[crate::manifest::Script],
+    tasks: &[crate::model::manifest::Task],
+    scripts: &[crate::model::manifest::Script],
 ) -> Result<()> {
     let mut identities = std::collections::BTreeSet::new();
     for task in tasks {
@@ -275,8 +274,11 @@ pub(crate) fn validate_actions(
             )));
         }
         for payload in &script.payloads {
-            crate::path::validate_relative_path(&payload.source, "script payload source")?;
-            crate::path::validate_relative_path(&payload.relative, "script payload relative path")?;
+            crate::model::path::validate_relative_path(&payload.source, "script payload source")?;
+            crate::model::path::validate_relative_path(
+                &payload.relative,
+                "script payload relative path",
+            )?;
             validate_sha_identity(&payload.digest, "script payload digest")?;
         }
     }
@@ -288,23 +290,23 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
     struct Identity<'a> {
         format_version: u32,
         wombat_version: &'a str,
-        sources: &'a [crate::manifest::SourceFile],
-        inputs: &'a [crate::manifest::BuildInput],
-        target: &'a crate::context::ResolvedTarget,
-        observations: &'a [crate::manifest::Observation],
-        process_observations: &'a [crate::manifest::ProcessObservation],
-        modules: &'a [crate::manifest::ManifestModule],
-        dependencies: &'a [crate::manifest::Dependency],
+        sources: &'a [crate::model::manifest::SourceFile],
+        inputs: &'a [crate::model::manifest::BuildInput],
+        target: &'a crate::model::context::ResolvedTarget,
+        observations: &'a [crate::model::manifest::Observation],
+        process_observations: &'a [crate::model::manifest::ProcessObservation],
+        modules: &'a [crate::model::manifest::ManifestModule],
+        dependencies: &'a [crate::model::manifest::Dependency],
         project_identity: &'a str,
         ladder: &'a crate::execution::ladder::ExecutionLadder,
         providers: &'a [Provider],
-        requirements: &'a [crate::manifest::Requirement],
-        preparations: &'a [crate::manifest::ProviderPreparation],
-        tasks: &'a [crate::manifest::Task],
-        scripts: &'a [crate::manifest::Script],
-        artifact_policy: &'a crate::manifest::ArtifactPolicy,
-        artifact_notices: &'a [crate::manifest::ArtifactNotice],
-        artifact_selections: &'a [crate::manifest::ArtifactSelection],
+        requirements: &'a [crate::model::manifest::Requirement],
+        preparations: &'a [crate::model::manifest::ProviderPreparation],
+        tasks: &'a [crate::model::manifest::Task],
+        scripts: &'a [crate::model::manifest::Script],
+        artifact_policy: &'a crate::model::manifest::ArtifactPolicy,
+        artifact_notices: &'a [crate::model::manifest::ArtifactNotice],
+        artifact_selections: &'a [crate::model::manifest::ArtifactSelection],
         artifacts: &'a [PlannedArtifact],
     }
     let identity = Identity {
@@ -344,7 +346,7 @@ fn materialise_provider_payloads(
         };
         for file in files {
             let source = source_root.join(&file.source);
-            crate::source::validate_source_components(source_root, &source)?;
+            crate::model::source::validate_source_components(source_root, &source)?;
             let bytes = fs::read(&source).map_err(|error| WombatError::io(&source, error))?;
             if digest(&bytes) != file.digest || u64::try_from(bytes.len()).ok() != Some(file.size) {
                 return Err(WombatError::configuration(format!(
@@ -375,39 +377,15 @@ fn materialise_provider_payloads(
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
-    let parent = path.parent().expect("plan files have parents");
-    let mut temporary =
-        NamedTempFile::new_in(parent).map_err(|error| WombatError::io(parent, error))?;
-    set_private_file(temporary.as_file(), temporary.path())?;
-    temporary
-        .write_all(&bytes)
-        .map_err(|error| WombatError::io(temporary.path(), error))?;
-    temporary
-        .as_file_mut()
-        .sync_all()
-        .map_err(|error| WombatError::io(temporary.path(), error))?;
-    temporary
-        .persist(path)
-        .map_err(|error| WombatError::io(path, error.error))?;
-    Ok(())
+    crate::storage::atomic::write_json_pretty(path, value, true)
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| WombatError::io(path, error))
+    crate::storage::atomic::sync_directory(path)
 }
 
-fn set_private_file(file: &File, path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| WombatError::io(path, error))?;
-    }
-    Ok(())
+fn set_private_file(file: &std::fs::File, path: &Path) -> Result<()> {
+    crate::storage::permissions::set_private_file(file, path)
 }
 
 #[cfg(unix)]
@@ -422,12 +400,5 @@ fn executable(_metadata: &fs::Metadata) -> bool {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(7 + digest.len() * 2);
-    output.push_str("sha256:");
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    output
+    crate::storage::digest::sha256(bytes)
 }

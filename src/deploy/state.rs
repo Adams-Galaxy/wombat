@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{
+use crate::model::manifest::{
     Artifact, ArtifactKind, EvaluatedTargetOrigin, FileContent, Production, SourceOrigin,
     SourceTrace, TargetPath, Task, TaskCachePolicy, TaskLogPolicy, TaskOutput, TaskRunner,
     TaskTargetRoot,
@@ -29,7 +29,7 @@ pub(crate) struct AppliedArtifact {
     pub source: String,
     pub source_origin: SourceOrigin,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_projection: Option<crate::manifest::SourceProjection>,
+    pub source_projection: Option<crate::model::manifest::SourceProjection>,
     pub production: Production,
     pub target: TargetPath,
     pub content: FileContent,
@@ -174,14 +174,14 @@ impl TargetStateGuard {
         };
         let state: TargetState = serde_json::from_str(&contents)?;
         if state.format_version != TARGET_STATE_FORMAT_VERSION {
-            return Err(WombatError::configuration(format!(
+            return Err(WombatError::corrupt_state(format!(
                 "unsupported target state format version {} in `{}`; expected {TARGET_STATE_FORMAT_VERSION}",
                 state.format_version,
                 self.state_path.display()
             )));
         }
         if state.target_root != self.target_root {
-            return Err(WombatError::configuration(format!(
+            return Err(WombatError::corrupt_state(format!(
                 "target state `{}` belongs to `{}`, not `{}`",
                 self.state_path.display(),
                 state.target_root,
@@ -193,7 +193,7 @@ impl TargetStateGuard {
             .windows(2)
             .all(|pair| pair[0].target.key().cmp(pair[1].target.key()).is_lt())
         {
-            return Err(WombatError::configuration(format!(
+            return Err(WombatError::corrupt_state(format!(
                 "target state artifacts in `{}` are not uniquely sorted",
                 self.state_path.display()
             )));
@@ -202,7 +202,7 @@ impl TargetStateGuard {
         if let Some(build_id) = &state.complete_build_id
             && !valid_digest(build_id)
         {
-            return Err(WombatError::configuration(format!(
+            return Err(WombatError::corrupt_state(format!(
                 "target state complete build ID in `{}` is invalid",
                 self.state_path.display()
             )));
@@ -307,30 +307,30 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         }
     }
     let tasks = state_tasks(artifacts);
-    let manifest = crate::manifest::Manifest {
-        format_version: crate::manifest::MANIFEST_FORMAT_VERSION,
+    let manifest = crate::model::manifest::Manifest {
+        format_version: crate::model::manifest::MANIFEST_FORMAT_VERSION,
         wombat_version: env!("CARGO_PKG_VERSION").to_string(),
         build_id: String::new(),
         plan_id: format!("sha256:{}", "0".repeat(64)),
-        execution_mode: crate::manifest::ExecutionMode::Normal,
+        execution_mode: crate::model::manifest::ExecutionMode::Normal,
         skipped_requirement_gates: Vec::new(),
         sources: artifacts
             .iter()
             .map(|artifact| artifact.declared_at.primary.source.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .map(|path| crate::manifest::SourceFile {
+            .map(|path| crate::model::manifest::SourceFile {
                 path,
                 digest: format!("sha256:{}", "0".repeat(64)),
             })
             .collect(),
         inputs: Vec::new(),
-        target: crate::context::ResolvedTarget {
-            platform: crate::context::TargetPlatform::minimal(
-                crate::context::OperatingSystemName::Macos,
-                crate::context::Architecture::Aarch64,
+        target: crate::model::context::ResolvedTarget {
+            platform: crate::model::context::TargetPlatform::minimal(
+                crate::model::context::OperatingSystemName::Macos,
+                crate::model::context::Architecture::Aarch64,
             ),
-            origin: crate::context::TargetOrigin::HostDefault,
+            origin: crate::model::context::TargetOrigin::HostDefault,
             declared_at: None,
         },
         observations: Vec::new(),
@@ -344,7 +344,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         preparations: Vec::new(),
         tasks,
         scripts: Vec::new(),
-        artifact_policy: crate::manifest::ArtifactPolicy::default(),
+        artifact_policy: crate::model::manifest::ArtifactPolicy::default(),
         artifact_notices: Vec::new(),
         artifact_selections: Vec::new(),
         artifacts: artifacts.iter().map(AppliedArtifact::to_artifact).collect(),
@@ -367,7 +367,7 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
             owner: artifact.owner.clone(),
             entrypoint: "tasks/target-state-placeholder".to_string(),
             entrypoint_digest: format!("sha256:{}", "0".repeat(64)),
-            params: crate::frozen::FrozenValue::empty_map(),
+            params: crate::model::frozen::FrozenValue::empty_map(),
             runner: TaskRunner::EmbeddedLua {
                 contract_version: 1,
             },

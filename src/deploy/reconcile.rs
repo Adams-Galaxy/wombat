@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{Artifact, FileContent, Manifest};
-use crate::source::SourceFingerprint;
-use crate::state::TargetState;
+use crate::deploy::state::TargetState;
+use crate::model::manifest::{Artifact, FileContent, Manifest};
+use crate::model::source::SourceFingerprint;
 use crate::{Result, WombatError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +88,7 @@ pub(crate) fn plan_reconciliation(
     let previous_artifacts = previous
         .artifacts
         .iter()
-        .map(crate::state::AppliedArtifact::to_artifact)
+        .map(crate::deploy::state::AppliedArtifact::to_artifact)
         .collect::<Vec<_>>();
     let previous_by_target = previous_artifacts
         .iter()
@@ -319,7 +319,7 @@ fn digest_string(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ActualArtifact, ReconciliationAction, classify, expected_mode};
-    use crate::manifest::{
+    use crate::model::manifest::{
         Artifact, ArtifactKind, FileContent, Production, SourceLocation, SourceOrigin, SourceTrace,
         TargetOrigin, TargetPath,
     };

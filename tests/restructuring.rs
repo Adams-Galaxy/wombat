@@ -1,14 +1,10 @@
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 use wombat::{BuildOptions, build};
 
-fn write(root: &Path, relative: &str, contents: &str) {
-    let path = root.join(relative);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, contents).unwrap();
-}
+mod support;
+use support::write;
 
 #[test]
 fn cli_surfaces_consolidated_unallocated_warnings() {

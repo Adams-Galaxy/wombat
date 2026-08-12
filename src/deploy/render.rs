@@ -42,7 +42,7 @@ pub(super) fn render_item(
     output: &mut String,
     opened: &OpenedBuild,
     target_root: &Path,
-    item: &crate::reconcile::ReconciliationItem,
+    item: &crate::deploy::reconcile::ReconciliationItem,
     include_patch: bool,
 ) -> Result<()> {
     use std::fmt::Write as _;
@@ -84,7 +84,7 @@ const fn action_word(action: ReconciliationAction) -> &'static str {
 }
 
 pub(super) fn validate_target_compatibility(
-    manifest: &crate::manifest::Manifest,
+    manifest: &crate::model::manifest::Manifest,
     host: &HostContext,
     target_root_explicit: bool,
 ) -> Result<Vec<String>> {
@@ -113,7 +113,7 @@ fn append_content_diff(
     output: &mut String,
     opened: &OpenedBuild,
     target_root: &Path,
-    item: &crate::reconcile::ReconciliationItem,
+    item: &crate::deploy::reconcile::ReconciliationItem,
 ) -> Result<()> {
     let old = if matches!(item.actual, ActualArtifact::File { .. }) {
         let bytes = fs::read(&item.path).map_err(|error| WombatError::io(&item.path, error))?;
@@ -180,7 +180,7 @@ fn append_content_diff(
                 (
                     artifact.content.digest.as_str(),
                     artifact.content.size,
-                    format!("{:04o}", crate::reconcile::expected_mode(artifact)),
+                    format!("{:04o}", crate::deploy::reconcile::expected_mode(artifact)),
                 )
             },
         );

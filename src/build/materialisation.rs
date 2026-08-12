@@ -5,9 +5,9 @@ use super::*;
 pub(super) fn materialise_product(
     source_root: &Path,
     product_root: &Path,
-    desired: crate::manifest::EvaluatedManifest,
-    cache: &crate::cache::BuildCache,
-    execution_mode: crate::manifest::ExecutionMode,
+    desired: crate::model::manifest::EvaluatedManifest,
+    cache: &crate::build::cache::BuildCache,
+    execution_mode: crate::model::manifest::ExecutionMode,
     skipped_requirement_gates: Vec<String>,
 ) -> Result<Manifest> {
     materialise_inner(
@@ -27,11 +27,11 @@ pub(super) enum MaterialisationPoint {
     BeforeFinalValidation,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn materialise_with_hook(
     source_root: &Path,
     product_root: &Path,
-    desired: crate::manifest::EvaluatedManifest,
+    desired: crate::model::manifest::EvaluatedManifest,
     hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
     materialise_inner(
@@ -39,7 +39,7 @@ pub(super) fn materialise_with_hook(
         product_root,
         desired,
         None,
-        crate::manifest::ExecutionMode::Normal,
+        crate::model::manifest::ExecutionMode::Normal,
         Vec::new(),
         hook,
     )
@@ -48,9 +48,9 @@ pub(super) fn materialise_with_hook(
 fn materialise_inner(
     source_root: &Path,
     product_root: &Path,
-    desired: crate::manifest::EvaluatedManifest,
-    cache: Option<&crate::cache::BuildCache>,
-    execution_mode: crate::manifest::ExecutionMode,
+    desired: crate::model::manifest::EvaluatedManifest,
+    cache: Option<&crate::build::cache::BuildCache>,
+    execution_mode: crate::model::manifest::ExecutionMode,
     skipped_requirement_gates: Vec<String>,
     mut hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
@@ -106,13 +106,13 @@ fn materialise_inner(
 fn materialise_provider_payloads(
     source_root: &Path,
     product_root: &Path,
-    providers: &[crate::manifest::Provider],
+    providers: &[crate::model::manifest::Provider],
 ) -> Result<()> {
     let custom = providers
         .iter()
         .filter_map(|provider| match &provider.origin {
-            crate::manifest::ProviderOrigin::Custom { files, .. } => Some(files.as_slice()),
-            crate::manifest::ProviderOrigin::Builtin { .. } => None,
+            crate::model::manifest::ProviderOrigin::Custom { files, .. } => Some(files.as_slice()),
+            crate::model::manifest::ProviderOrigin::Builtin { .. } => None,
         })
         .flatten()
         .collect::<Vec<_>>();
@@ -134,9 +134,7 @@ fn materialise_provider_payloads(
             )));
         }
         let destination = payload_root.join(&file.payload);
-        let parent = destination
-            .parent()
-            .expect("provider payload files have a parent");
+        let parent = crate::storage::path::parent(&destination)?;
         fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
         write_bytes(&destination, &bytes)?;
         set_normalized_permissions(
@@ -154,7 +152,7 @@ fn materialise_provider_payloads(
 
 fn revalidate_lua_sources(
     source_root: &Path,
-    sources: &[crate::manifest::SourceFile],
+    sources: &[crate::model::manifest::SourceFile],
 ) -> Result<()> {
     for source in sources {
         let path = source_root.join(source.path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -183,11 +181,11 @@ fn materialise_artifact(
     source_root: &Path,
     tree: &Path,
     artifact: &EvaluatedArtifact,
-    cache: Option<&crate::cache::BuildCache>,
+    cache: Option<&crate::build::cache::BuildCache>,
 ) -> Result<Artifact> {
     let source_path = source_root.join(&artifact.source);
     let destination = tree.join(&artifact.target.path);
-    let parent = destination.parent().expect("file artifacts have a parent");
+    let parent = crate::storage::path::parent(&destination)?;
     fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
     let (production, content) = match &artifact.production {
         EvaluatedProduction::Static => {
@@ -197,10 +195,12 @@ fn materialise_artifact(
                 copy_and_hash(
                     &source_path,
                     &destination,
-                    artifact
-                        .fingerprint
-                        .as_ref()
-                        .expect("static artifacts have fingerprints"),
+                    artifact.fingerprint.as_ref().ok_or_else(|| {
+                        WombatError::invariant(format!(
+                            "static artifact `{}` has no frozen fingerprint",
+                            artifact.source
+                        ))
+                    })?,
                 )?,
             )
         }
@@ -210,10 +210,12 @@ fn materialise_artifact(
                 &source_path,
                 &artifact.source,
                 &destination,
-                artifact
-                    .fingerprint
-                    .as_ref()
-                    .expect("template artifacts have fingerprints"),
+                artifact.fingerprint.as_ref().ok_or_else(|| {
+                    WombatError::invariant(format!(
+                        "template artifact `{}` has no frozen fingerprint",
+                        artifact.source
+                    ))
+                })?,
                 context,
                 cache,
             )?;
@@ -291,8 +293,8 @@ fn render_and_hash(
     source_name: &str,
     destination: &Path,
     expected: &SourceFingerprint,
-    context: &crate::frozen::FrozenValue,
-    cache: Option<&crate::cache::BuildCache>,
+    context: &crate::model::frozen::FrozenValue,
+    cache: Option<&crate::build::cache::BuildCache>,
 ) -> Result<(String, FileContent)> {
     let mut input = File::open(source).map_err(|error| WombatError::io(source, error))?;
     let before = input
@@ -327,7 +329,7 @@ fn render_and_hash(
         renderer: &'a str,
         contract_version: u32,
         source_digest: &'a str,
-        context: &'a crate::frozen::FrozenValue,
+        context: &'a crate::model::frozen::FrozenValue,
     }
     let cache_key = cache
         .map(|cache| {
@@ -442,7 +444,7 @@ fn template_diagnostic(
     let line = position.and_then(|(line, _)| u32::try_from(line).ok());
     let column = position.and_then(|(_, column)| u32::try_from(column).ok());
     let mut diagnostic = crate::Diagnostic::new(message);
-    diagnostic.primary = Some(crate::manifest::SourceLocation {
+    diagnostic.primary = Some(crate::model::manifest::SourceLocation {
         source: source_name.to_string(),
         line,
         column,
@@ -696,25 +698,29 @@ pub(super) fn revalidate_sources(
             .exclusions
             .iter()
             .map(|value| {
-                crate::selection::compile_selector(value, directory.hidden)
-                    .and_then(|selector| crate::selection::matcher(&selector.physical))
+                crate::model::selection::compile_selector(value, directory.hidden)
+                    .and_then(|selector| crate::model::selection::matcher(&selector.physical))
             })
             .collect::<Result<Vec<_>>>()?;
         let snapshot =
             snapshot_directory_filtered(source_root, &source, |relative, is_directory| {
                 let visible = if directory.glob {
-                    crate::selection::in_static_scope(relative, &directory.static_root)
-                        && crate::selection::hidden_components_authorized(
+                    crate::model::selection::in_static_scope(relative, &directory.static_root)
+                        && crate::model::selection::hidden_components_authorized(
                             relative,
                             &directory.physical_selector,
                         )
                 } else {
                     !relative
                         .split('/')
-                        .any(crate::selection::is_hidden_component)
+                        .any(crate::model::selection::is_hidden_component)
                 };
                 visible
-                    && !crate::selection::is_excluded(&exclusion_matchers, relative, is_directory)
+                    && !crate::model::selection::is_excluded(
+                        &exclusion_matchers,
+                        relative,
+                        is_directory,
+                    )
             })?;
         if snapshot != directory.snapshot {
             return Err(WombatError::configuration(format!(

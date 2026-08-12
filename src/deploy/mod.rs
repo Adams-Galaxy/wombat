@@ -8,18 +8,22 @@ use sha2::{Digest as _, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::build::{OpenedBuild, open_build};
-use crate::context::HostContext;
-use crate::execution::ladder::{CoreRung, ExecutionJournal, ExecutionStatus};
-use crate::manifest::{Artifact, Production};
-use crate::reconcile::{
+use crate::deploy::reconcile::{
     ActualArtifact, ReconciliationAction, ReconciliationPlan, inspect_actual, plan_reconciliation,
     target_key,
 };
-use crate::state::{AppliedArtifact, LockMode, TargetState, TargetStateGuard, resolve_state_root};
+use crate::deploy::state::{
+    AppliedArtifact, LockMode, TargetState, TargetStateGuard, resolve_state_root,
+};
+use crate::execution::ladder::{CoreRung, ExecutionJournal, ExecutionStatus};
+use crate::model::context::HostContext;
+use crate::model::manifest::{Artifact, Production};
 use crate::{Result, WombatError};
 
 mod apply;
+pub mod reconcile;
 mod render;
+pub(crate) mod state;
 
 use apply::execute;
 use render::{
@@ -233,7 +237,7 @@ pub fn diff(options: &DeploymentOptions) -> Result<DiffOutcome> {
     let previous = state_guard.load()?;
     let plan = plan_reconciliation(&options.target_root, &opened.manifest, &previous)?;
     let mut output = render_diff(&opened, &plan, options.patch)?;
-    if let Ok(pending) = crate::plan::read(&options.build_dir)
+    if let Ok(pending) = crate::model::plan::read(&options.build_dir)
         && pending.plan_id != opened.manifest.plan_id
     {
         output = format!(
@@ -253,7 +257,7 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     let requirement_authorization = if options.requirement_authorization.is_some() {
         options.requirement_authorization.clone()
     } else if options.reconcile_requirements
-        && opened.manifest.execution_mode == crate::manifest::ExecutionMode::Normal
+        && opened.manifest.execution_mode == crate::model::manifest::ExecutionMode::Normal
         && opened.manifest.requirements.iter().any(|requirement| {
             opened
                 .manifest

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -11,10 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use mlua::Lua;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
 
 use crate::execution::ladder::RungId;
-use crate::manifest::{
+use crate::model::manifest::{
     ExecutionMode, Script, ScriptOutcome, ScriptOutcomeStatus, ScriptSchedule, ScriptScope,
     TaskLogPolicy,
 };
@@ -86,9 +84,9 @@ struct ScriptState {
 
 #[derive(Serialize)]
 struct ChangeIdentity<'a> {
-    payloads: &'a [crate::manifest::ScriptPayload],
-    params: &'a crate::frozen::FrozenValue,
-    runner: &'a crate::manifest::TaskRunner,
+    payloads: &'a [crate::model::manifest::ScriptPayload],
+    params: &'a crate::model::frozen::FrozenValue,
+    runner: &'a crate::model::manifest::TaskRunner,
     python_helper: bool,
     logs: TaskLogPolicy,
     env: &'a BTreeMap<String, String>,
@@ -251,13 +249,10 @@ fn execute(script: &Script, options: &ScriptExecutionOptions<'_>) -> Result<Scri
     reset_directory(&payload)?;
     copy_verified_payload(script, options, &payload)?;
 
-    let source_dir = payload.join(
-        Path::new(&script.entrypoint)
-            .strip_prefix("scripts")
-            .expect("script entrypoint is scripts-relative")
-            .parent()
-            .unwrap_or_else(|| Path::new("")),
-    );
+    let entrypoint_source = Path::new(&script.entrypoint)
+        .strip_prefix("scripts")
+        .map_err(|_| script_error(script, "entrypoint is not scripts-relative"))?;
+    let source_dir = payload.join(entrypoint_source.parent().unwrap_or_else(|| Path::new("")));
     let entrypoint_relative = script
         .payloads
         .iter()
@@ -552,6 +547,7 @@ fn run_streaming(mut command: Command, identity: &str, timeout: Option<u64>) -> 
         identity,
         timeout.map(Duration::from_secs),
         MAX_LOG_SIZE,
+        None,
     )?;
     Ok(RunResult {
         success: outcome.success,
@@ -629,17 +625,7 @@ fn read_state(path: &Path, identity: &str) -> Result<Option<ScriptState>> {
 }
 
 fn write_state(path: &Path, state: &ScriptState) -> Result<()> {
-    let parent = path.expect_parent()?;
-    let mut temporary =
-        NamedTempFile::new_in(parent).map_err(|error| WombatError::io(parent, error))?;
-    serde_json::to_writer_pretty(&mut temporary, state)?;
-    temporary
-        .write_all(b"\n")
-        .map_err(|error| WombatError::io(path, error))?;
-    temporary
-        .persist(path)
-        .map_err(|error| WombatError::io(path, error.error))?;
-    Ok(())
+    crate::storage::atomic::write_json_pretty(path, state, true)
 }
 
 fn script_payload_root(root: &Path, kind: PayloadKind, identity: &str) -> PathBuf {

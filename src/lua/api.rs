@@ -336,7 +336,10 @@ pub(super) fn emit_lua_log(
             serde_json::to_string(&FrozenValue::from_lua(fields)?)?
         )
     };
-    eprintln!("{:?}: {message}{fields} ({})", level, location.display());
+    crate::presentation::emit(crate::presentation::Event::Log {
+        level,
+        message: format!("{message}{fields} ({})", location.display()),
+    });
     Ok(())
 }
 
@@ -388,10 +391,7 @@ pub(super) fn run_observed_process(
         process.args(&argv[1..]);
         (process, ProcessInvocation::Exec { argv })
     };
-    command
-        .current_dir(&options.cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.current_dir(&options.cwd);
     for change in &options.environment {
         match &change.value {
             Some(value) => {
@@ -402,90 +402,37 @@ pub(super) fn run_observed_process(
             }
         }
     }
-    if options.stdin.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
-    let mut child = command.spawn().map_err(|error| {
-        WombatError::configuration(format!(
-            "failed to spawn construction process at {}: {error}",
+    let output_limit = usize::try_from(options.max_output)
+        .map_err(|_| WombatError::configuration("process output limit exceeds usize"))?;
+    let outcome = crate::execution::process::run(
+        &mut command,
+        "construction",
+        options.timeout_ms.map(Duration::from_millis),
+        output_limit,
+        options.stdin.as_deref(),
+    )?;
+    if outcome.timed_out {
+        return Err(WombatError::process(format!(
+            "construction process timed out after {} ms at {}",
+            options.timeout_ms.unwrap_or_default(),
             location.display()
-        ))
-    })?;
-    if let Some(stdin) = options.stdin.as_ref() {
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(stdin)
-            .map_err(|error| {
-                WombatError::configuration(format!(
-                    "failed to write construction process stdin: {error}"
-                ))
-            })?;
+        )));
     }
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            WombatError::configuration(format!(
-                "failed to wait for construction process at {}: {error}",
-                location.display()
-            ))
-        })? {
-            break status;
-        }
-        if let Some(timeout_ms) = options.timeout_ms
-            && started.elapsed() >= Duration::from_millis(timeout_ms)
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(WombatError::configuration(format!(
-                "construction process timed out after {} ms at {}",
-                timeout_ms,
-                location.display()
-            )));
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| WombatError::configuration("construction stdout reader panicked"))?
-        .map_err(|error| {
-            WombatError::configuration(format!("failed to read construction stdout: {error}"))
-        })?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| WombatError::configuration("construction stderr reader panicked"))?
-        .map_err(|error| {
-            WombatError::configuration(format!("failed to read construction stderr: {error}"))
-        })?;
-    let stdout_size = u64::try_from(stdout.len())
-        .map_err(|_| WombatError::configuration("process stdout exceeds u64"))?;
-    let stderr_size = u64::try_from(stderr.len())
-        .map_err(|_| WombatError::configuration("process stderr exceeds u64"))?;
-    if stdout_size > options.max_output || stderr_size > options.max_output {
-        return Err(WombatError::configuration(format!(
+    if outcome.stdout.truncated || outcome.stderr.truncated {
+        return Err(WombatError::process(format!(
             "construction process output exceeded the {} byte limit at {}",
             options.max_output,
             location.display()
         )));
     }
-    let code = status.code();
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt as _;
-        status.signal()
-    };
-    #[cfg(not(unix))]
-    let signal = None;
+    let stdout = outcome.stdout.bytes;
+    let stderr = outcome.stderr.bytes;
+    let stdout_size = u64::try_from(stdout.len())
+        .map_err(|_| WombatError::configuration("process stdout exceeds u64"))?;
+    let stderr_size = u64::try_from(stderr.len())
+        .map_err(|_| WombatError::configuration("process stderr exceeds u64"))?;
+    let code = outcome.code;
+    let signal = outcome.signal;
     let observation = ProcessObservation {
         invocation,
         cwd: options.cwd_display,
@@ -494,7 +441,7 @@ pub(super) fn run_observed_process(
         timeout_ms: options.timeout_ms,
         max_output: options.max_output,
         sensitive: options.sensitive,
-        ok: status.success(),
+        ok: outcome.success,
         code,
         signal,
         stdout_size,
@@ -506,19 +453,13 @@ pub(super) fn run_observed_process(
     state.borrow_mut().process_observations.push(observation);
     process_result(
         lua,
-        status.success(),
+        outcome.success,
         code,
         signal,
         &stdout,
         &stderr,
         location,
     )
-}
-
-pub(super) fn read_process_stream(mut stream: impl std::io::Read) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 fn parse_process_options(root: &Path, value: Value, location: Location) -> Result<ProcessOptions> {

@@ -1,6 +1,6 @@
 //! Shared subprocess execution and process-global working-directory serialization.
 
-use std::io::Read;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -21,6 +21,9 @@ pub(crate) struct ProcessOutcome {
     pub(crate) status: String,
     pub(crate) stdout: Captured,
     pub(crate) stderr: Captured,
+    pub(crate) code: Option<i32>,
+    pub(crate) signal: Option<i32>,
+    pub(crate) timed_out: bool,
 }
 
 pub(crate) fn run(
@@ -28,9 +31,14 @@ pub(crate) fn run(
     label: &str,
     timeout: Option<Duration>,
     output_limit: usize,
+    stdin: Option<&[u8]>,
 ) -> Result<ProcessOutcome> {
     command
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -51,6 +59,14 @@ pub(crate) fn run(
     })?;
     let stdout_thread = thread::spawn(move || read_bounded(stdout, output_limit));
     let stderr_thread = thread::spawn(move || read_bounded(stderr, output_limit));
+    if let Some(input) = stdin {
+        let mut child_stdin = child.stdin.take().ok_or_else(|| {
+            WombatError::invariant(format!("{label} process stdin was not piped"))
+        })?;
+        child_stdin
+            .write_all(input)
+            .map_err(|error| WombatError::io(format!("{label} stdin"), error))?;
+    }
     let started = Instant::now();
     let mut timed_out = false;
     let status = loop {
@@ -72,6 +88,14 @@ pub(crate) fn run(
     };
     let stdout = join_reader(stdout_thread, label, "stdout")?;
     let stderr = join_reader(stderr_thread, label, "stderr")?;
+    let code = status.code();
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal = None;
     Ok(ProcessOutcome {
         success: status.success() && !timed_out,
         status: if timed_out {
@@ -81,6 +105,48 @@ pub(crate) fn run(
         },
         stdout,
         stderr,
+        code,
+        signal,
+        timed_out,
+    })
+}
+
+pub(crate) fn run_inherited(command: &mut Command, label: &str) -> Result<ProcessOutcome> {
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let status = command
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .map_err(|error| WombatError::io(format!("{label} process"), error))?;
+    let code = status.code();
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal = None;
+    Ok(ProcessOutcome {
+        success: status.success(),
+        status: status.to_string(),
+        stdout: Captured {
+            bytes: Vec::new(),
+            truncated: false,
+        },
+        stderr: Captured {
+            bytes: Vec::new(),
+            truncated: false,
+        },
+        code,
+        signal,
+        timed_out: false,
     })
 }
 

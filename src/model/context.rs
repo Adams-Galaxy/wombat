@@ -6,9 +6,9 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::SourceTrace;
+use crate::model::manifest::SourceTrace;
 
-use crate::frozen::FrozenValue;
+use crate::model::frozen::FrozenValue;
 use crate::{Result, WombatError};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

@@ -2,11 +2,8 @@ use std::fs;
 
 use wombat::{BuildOptions, build};
 
-fn write(root: &std::path::Path, relative: &str, contents: &str) {
-    let path = root.join(relative);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, contents).unwrap();
-}
+mod support;
+use support::write;
 
 #[test]
 fn target_framed_sources_and_composable_metadata_are_generic() {

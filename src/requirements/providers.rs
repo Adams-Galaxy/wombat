@@ -129,7 +129,7 @@ pub(super) fn preflight(
                     &[operation, "--dry-run", brew_flag(kind), name],
                     &brew_environment(),
                 )?;
-                if !output.status.success() {
+                if !output.success {
                     return Err(WombatError::configuration(format!(
                         "Homebrew preflight failed for `{name}`: {}",
                         output_detail(&output)
@@ -144,7 +144,7 @@ pub(super) fn preflight(
                     &["--simulate", "install", name],
                     &apt_environment(),
                 )?;
-                if !output.status.success() {
+                if !output.success {
                     return Err(WombatError::configuration(format!(
                         "Apt preflight failed for `{name}`: {}",
                         output_detail(&output)
@@ -176,17 +176,15 @@ pub(super) fn reconcile_requirement(
                 WombatError::configuration("Homebrew disappeared before bootstrap")
             })?;
             let operation = brew_operation(&requirement.binding)?;
-            let child_status = Command::new(&brew)
+            let mut command = Command::new(&brew);
+            command
                 .args([operation, brew_flag(kind), name])
-                .envs(brew_environment())
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .map_err(|error| WombatError::io(&brew, error))?;
-            if !child_status.success() {
+                .envs(brew_environment());
+            let child_status = crate::execution::process::run_inherited(&mut command, "Homebrew")?;
+            if !child_status.success {
                 return Err(WombatError::configuration(format!(
-                    "Homebrew {operation} failed for `{name}` with {child_status}"
+                    "Homebrew {operation} failed for `{name}` with {}",
+                    child_status.status
                 )));
             }
         }
@@ -446,8 +444,8 @@ pub(super) fn process_context(
                 )
                 .map_err(mlua::Error::external)?;
                 let table = lua.create_table()?;
-                table.set("success", status.success())?;
-                table.set("code", status.code())?;
+                table.set("success", status.success)?;
+                table.set("code", status.code)?;
                 Ok(table)
             })?,
         )?;
@@ -471,17 +469,17 @@ pub(super) fn process_spec(spec: Table) -> mlua::Result<ProcessSpec> {
     Ok((program, args, env, elevated))
 }
 
-pub(super) fn output_table(lua: &Lua, output: &Output) -> mlua::Result<Table> {
+pub(super) fn output_table(lua: &Lua, output: &ProcessOutcome) -> mlua::Result<Table> {
     let table = lua.create_table()?;
-    table.set("success", output.status.success())?;
-    table.set("code", output.status.code())?;
+    table.set("success", output.success)?;
+    table.set("code", output.code)?;
     table.set(
         "stdout",
-        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
     )?;
     table.set(
         "stderr",
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        String::from_utf8_lossy(&output.stderr.bytes).into_owned(),
     )?;
     Ok(table)
 }
@@ -518,7 +516,9 @@ pub(super) fn ensure_compatible_host(manifest: &Manifest) -> Result<()> {
     ensure_compatible_platform(&manifest.target.platform)
 }
 
-pub(super) fn ensure_compatible_platform(platform: &crate::context::TargetPlatform) -> Result<()> {
+pub(super) fn ensure_compatible_platform(
+    platform: &crate::model::context::TargetPlatform,
+) -> Result<()> {
     let host = HostContext::observe()?;
     if !platform.locally_compatible_with(&host.platform) {
         return Err(WombatError::configuration(format!(
@@ -670,13 +670,13 @@ pub(super) fn require_command(command: &str, purpose: &str) -> Result<PathBuf> {
 pub(super) fn effective_uid_is_root() -> Result<bool> {
     let id = which("id").unwrap_or_else(|| PathBuf::from("/usr/bin/id"));
     let output = run_bounded(&id, &["-u"], &BTreeMap::new())?;
-    if !output.status.success() {
+    if !output.success {
         return Err(WombatError::configuration(format!(
             "could not determine the effective user: {}",
             output_detail(&output)
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
+    Ok(String::from_utf8_lossy(&output.stdout.bytes).trim() == "0")
 }
 
 pub(super) fn preflight_elevation(elevated: bool) -> Result<()> {
@@ -697,13 +697,8 @@ pub(super) fn authorize_elevation(noninteractive: bool) -> Result<()> {
     } else {
         command.arg("-v");
     }
-    let status = command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| WombatError::io(&sudo, error))?;
-    if !status.success() {
+    let status = crate::execution::process::run_inherited(&mut command, "sudo authorization")?;
+    if !status.success {
         return Err(WombatError::configuration(if noninteractive {
             "non-interactive bootstrap requires existing passwordless sudo authorization"
         } else {
@@ -719,7 +714,7 @@ pub(super) fn mutating_status(
     environment: &BTreeMap<String, String>,
     elevated: bool,
     noninteractive: bool,
-) -> Result<std::process::ExitStatus> {
+) -> Result<ProcessOutcome> {
     let through_sudo = elevated && !effective_uid_is_root()?;
     let mut command = if through_sudo {
         let sudo = require_command("sudo", "elevated provider mutation")?;
@@ -743,12 +738,7 @@ pub(super) fn mutating_status(
     if !through_sudo {
         command.envs(environment);
     }
-    command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| WombatError::io(program, error))
+    crate::execution::process::run_inherited(&mut command, &program.display().to_string())
 }
 
 pub(super) fn run_mutating(
@@ -759,27 +749,28 @@ pub(super) fn run_mutating(
     noninteractive: bool,
 ) -> Result<()> {
     let status = mutating_status(program, args, environment, elevated, noninteractive)?;
-    if status.success() {
+    if status.success {
         Ok(())
     } else {
         Err(WombatError::configuration(format!(
-            "provider command `{}` failed with {status}",
-            program.display()
+            "provider command `{}` failed with {}",
+            program.display(),
+            status.status
         )))
     }
 }
 
 pub(super) fn observe_command_version(path: &Path) -> Result<String> {
     let output = run_bounded(path, &["--version"], &BTreeMap::new())?;
-    if !output.status.success() {
+    if !output.success {
         return Err(WombatError::configuration(format!(
             "version probe `{}` failed: {}",
             path.display(),
             output_detail(&output)
         )));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     first_version(&stdout)
         .or_else(|| first_version(&stderr))
         .ok_or_else(|| {
@@ -856,13 +847,17 @@ pub(super) fn run_bounded(
     path: &Path,
     args: &[&str],
     environment: &BTreeMap<String, String>,
-) -> Result<Output> {
-    let output = Command::new(path)
-        .args(args)
-        .envs(environment)
-        .output()
-        .map_err(|error| WombatError::io(path, error))?;
-    if output.stdout.len() > OUTPUT_LIMIT || output.stderr.len() > OUTPUT_LIMIT {
+) -> Result<ProcessOutcome> {
+    let mut command = Command::new(path);
+    command.args(args).envs(environment);
+    let output = crate::execution::process::run(
+        &mut command,
+        &path.display().to_string(),
+        None,
+        OUTPUT_LIMIT,
+        None,
+    )?;
+    if output.stdout.truncated || output.stderr.truncated {
         return Err(WombatError::configuration(format!(
             "process `{}` exceeded the {} byte observation limit",
             path.display(),
@@ -872,9 +867,9 @@ pub(super) fn run_bounded(
     Ok(output)
 }
 
-pub(super) fn output_detail(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+pub(super) fn output_detail(output: &ProcessOutcome) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes);
     stderr
         .trim()
         .lines()

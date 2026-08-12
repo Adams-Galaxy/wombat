@@ -43,7 +43,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     }
     manifest.ladder.validate()?;
     validate_sha256(&manifest.project_identity, "manifest project identity")?;
-    crate::plan::validate_actions(&manifest.ladder, &manifest.tasks, &manifest.scripts)?;
+    crate::model::plan::validate_actions(&manifest.ladder, &manifest.tasks, &manifest.scripts)?;
     validate_sha256(&manifest.plan_id, "manifest build plan identity")?;
     if !manifest
         .sources
@@ -63,10 +63,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         validate_relative_path(&source.path, "manifest Lua source path")?;
         validate_sha256(&source.digest, "manifest Lua source digest")?;
     }
-    crate::context::TargetPlatform::from_frozen(&manifest.target.platform.to_frozen())?;
+    crate::model::context::TargetPlatform::from_frozen(&manifest.target.platform.to_frozen())?;
     match (&manifest.target.origin, &manifest.target.declared_at) {
-        (crate::context::TargetOrigin::HostDefault, None)
-        | (crate::context::TargetOrigin::RootOverride, Some(_)) => {}
+        (crate::model::context::TargetOrigin::HostDefault, None)
+        | (crate::model::context::TargetOrigin::RootOverride, Some(_)) => {}
         _ => {
             return Err(WombatError::configuration(
                 "manifest target origin and declaration location are inconsistent",
@@ -103,24 +103,24 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "manifest input declaration",
         )?;
         match input.kind {
-            crate::manifest::BuildInputKind::Flag
-                if !matches!(input.value, crate::frozen::FrozenValue::Boolean(_)) =>
+            crate::model::manifest::BuildInputKind::Flag
+                if !matches!(input.value, crate::model::frozen::FrozenValue::Boolean(_)) =>
             {
                 return Err(WombatError::configuration(
                     "manifest flag input is not boolean",
                 ));
             }
-            crate::manifest::BuildInputKind::Choice
-            | crate::manifest::BuildInputKind::String
-            | crate::manifest::BuildInputKind::Target
-                if !matches!(input.value, crate::frozen::FrozenValue::String(_)) =>
+            crate::model::manifest::BuildInputKind::Choice
+            | crate::model::manifest::BuildInputKind::String
+            | crate::model::manifest::BuildInputKind::Target
+                if !matches!(input.value, crate::model::frozen::FrozenValue::String(_)) =>
             {
                 return Err(WombatError::configuration(
                     "manifest textual input is not a string",
                 ));
             }
-            crate::manifest::BuildInputKind::Integer
-                if !matches!(input.value, crate::frozen::FrozenValue::Integer(_)) =>
+            crate::model::manifest::BuildInputKind::Integer
+                if !matches!(input.value, crate::model::frozen::FrozenValue::Integer(_)) =>
             {
                 return Err(WombatError::configuration(
                     "manifest integer input is not an integer",
@@ -128,10 +128,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             }
             _ => {}
         }
-        if input.kind == crate::manifest::BuildInputKind::Target
-            && let crate::frozen::FrozenValue::String(value) = &input.value
+        if input.kind == crate::model::manifest::BuildInputKind::Target
+            && let crate::model::frozen::FrozenValue::String(value) = &input.value
         {
-            let parsed = crate::context::TargetPlatform::parse_compact(value)?;
+            let parsed = crate::model::context::TargetPlatform::parse_compact(value)?;
             if parsed.compact() != *value {
                 return Err(WombatError::configuration(
                     "manifest target input is not canonical",
@@ -177,7 +177,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             )));
         }
         if let Some(base) = &module.source_base {
-            let compiled = crate::selection::compile_selector(&base.declared, base.hidden)?;
+            let compiled = crate::model::selection::compile_selector(&base.declared, base.hidden)?;
             let expected_physical = if compiled.physical == "." {
                 "src".to_string()
             } else {
@@ -190,7 +190,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 )));
             }
             let projection = if compiled.physical == "." {
-                crate::manifest::SourceProjection {
+                crate::model::manifest::SourceProjection {
                     physical: String::new(),
                     logical: String::new(),
                     allocated: true,
@@ -198,7 +198,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                     components: Vec::new(),
                 }
             } else {
-                crate::selection::project_physical(&compiled.physical, base.hidden)?
+                crate::model::selection::project_physical(&compiled.physical, base.hidden)?
             };
             if base.logical != projection.logical || (base.target.is_none() && projection.allocated)
             {
@@ -308,7 +308,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 .map(|component| component.physical.as_str())
                 .collect::<Vec<_>>()
                 .join("/");
-            let expected = crate::selection::project_physical(&relative, projection.hidden)?;
+            let expected = crate::model::selection::project_physical(&relative, projection.hidden)?;
             if expected.logical != projection.logical
                 || expected.allocated != projection.allocated
                 || expected.hidden != projection.hidden
@@ -416,7 +416,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                         "manifest template source digest is not a SHA-256 identity",
                     ));
                 }
-                if !matches!(context, crate::frozen::FrozenValue::Map(_)) {
+                if !matches!(context, crate::model::frozen::FrozenValue::Map(_)) {
                     return Err(WombatError::configuration(
                         "manifest template context must be a map",
                     ));
@@ -486,12 +486,12 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
 }
 
 pub(crate) fn validate_artifact_metadata(
-    policy: crate::manifest::ArtifactPolicy,
-    notices: &[crate::manifest::ArtifactNotice],
-    selections: &[crate::manifest::ArtifactSelection],
+    policy: crate::model::manifest::ArtifactPolicy,
+    notices: &[crate::model::manifest::ArtifactNotice],
+    selections: &[crate::model::manifest::ArtifactSelection],
     source_paths: &std::collections::BTreeSet<&str>,
 ) -> Result<()> {
-    use crate::manifest::{ArtifactNoticeKind, ArtifactSelectionKind, UnallocatedPolicy};
+    use crate::model::manifest::{ArtifactNoticeKind, ArtifactSelectionKind, UnallocatedPolicy};
 
     for selection in selections {
         validate_source_trace(
@@ -517,7 +517,8 @@ pub(crate) fn validate_artifact_metadata(
         if let Some(target) = &selection.explicit_target {
             parse_explicit_target_root(target)?;
         }
-        let compiled = crate::selection::compile_selector(&selection.declared, selection.hidden)?;
+        let compiled =
+            crate::model::selection::compile_selector(&selection.declared, selection.hidden)?;
         let relaxed_template = selection.kind == ArtifactSelectionKind::Exact
             && !compiled.physical.ends_with(".tmpl")
             && selection.physical == format!("{}.tmpl", compiled.physical)
@@ -550,7 +551,7 @@ pub(crate) fn validate_artifact_metadata(
             ));
         }
         for exclusion in &selection.exclusions {
-            crate::selection::compile_selector(exclusion, selection.hidden)?;
+            crate::model::selection::compile_selector(exclusion, selection.hidden)?;
         }
         for (label, paths) in [
             ("matches", &selection.matches),
@@ -625,7 +626,7 @@ fn validate_tasks(
         }
         validate_sha256(&task.entrypoint_digest, "manifest task entrypoint digest")?;
         validate_source_trace(&task.declared_at, source_paths, "manifest task declaration")?;
-        if !matches!(task.params, crate::frozen::FrozenValue::Map(_))
+        if !matches!(task.params, crate::model::frozen::FrozenValue::Map(_))
             || task.runner.contract_version() != 1
             || task.runner.command().is_some_and(str::is_empty)
             || task.cache.revision.as_deref().is_some_and(str::is_empty)
@@ -691,9 +692,9 @@ fn validate_tasks(
 }
 
 fn validate_provider_scope(
-    providers: &[crate::manifest::Provider],
-    requirements: &[crate::manifest::Requirement],
-    preparations: &[crate::manifest::ProviderPreparation],
+    providers: &[crate::model::manifest::Provider],
+    requirements: &[crate::model::manifest::Requirement],
+    preparations: &[crate::model::manifest::ProviderPreparation],
     source_paths: &std::collections::BTreeSet<&str>,
     scope: &str,
 ) -> Result<()> {
@@ -711,7 +712,7 @@ fn validate_provider_scope(
                 "manifest {scope} provider priorities must be contiguous and ordered"
             )));
         }
-        if !matches!(provider.config, crate::frozen::FrozenValue::Map(_)) {
+        if !matches!(provider.config, crate::model::frozen::FrozenValue::Map(_)) {
             return Err(WombatError::configuration(format!(
                 "manifest provider `{}` config must be a map",
                 provider.name
@@ -723,7 +724,7 @@ fn validate_provider_scope(
             "manifest provider declaration",
         )?;
         match &provider.origin {
-            crate::manifest::ProviderOrigin::Builtin { contract_version } => {
+            crate::model::manifest::ProviderOrigin::Builtin { contract_version } => {
                 if !matches!(provider.name.as_str(), "brew" | "apt") || *contract_version != 1 {
                     return Err(WombatError::configuration(format!(
                         "unsupported built-in provider contract `{}-v{contract_version}`",
@@ -731,7 +732,7 @@ fn validate_provider_scope(
                     )));
                 }
             }
-            crate::manifest::ProviderOrigin::Custom { entrypoint, files } => {
+            crate::model::manifest::ProviderOrigin::Custom { entrypoint, files } => {
                 validate_relative_path(entrypoint, "manifest provider entrypoint")?;
                 if files.is_empty()
                     || !files
@@ -779,19 +780,22 @@ fn validate_provider_scope(
         }
         let selected = &requirement.candidates[requirement.selected as usize];
         let expected_kind = match selected {
-            crate::manifest::RequirementCandidate::Command { .. } => {
-                crate::manifest::RequirementKind::Command
+            crate::model::manifest::RequirementCandidate::Command { .. } => {
+                crate::model::manifest::RequirementKind::Command
             }
-            crate::manifest::RequirementCandidate::Package { .. } => {
-                crate::manifest::RequirementKind::Package
+            crate::model::manifest::RequirementCandidate::Package { .. } => {
+                crate::model::manifest::RequirementKind::Package
             }
         };
         if requirement.kind != expected_kind
             || requirement.candidates.iter().any(|candidate| {
                 matches!(
                     candidate,
-                    crate::manifest::RequirementCandidate::Command { .. }
-                ) != matches!(requirement.kind, crate::manifest::RequirementKind::Command)
+                    crate::model::manifest::RequirementCandidate::Command { .. }
+                ) != matches!(
+                    requirement.kind,
+                    crate::model::manifest::RequirementKind::Command
+                )
             })
         {
             return Err(WombatError::configuration(
@@ -800,10 +804,10 @@ fn validate_provider_scope(
         }
         for candidate in &requirement.candidates {
             let valid_name = match candidate {
-                crate::manifest::RequirementCandidate::Command { name, .. } => {
+                crate::model::manifest::RequirementCandidate::Command { name, .. } => {
                     valid_product_name(name)
                 }
-                crate::manifest::RequirementCandidate::Package { name, .. } => {
+                crate::model::manifest::RequirementCandidate::Package { name, .. } => {
                     valid_package_name(name)
                 }
             };
@@ -816,7 +820,7 @@ fn validate_provider_scope(
                     "manifest requirement contains an invalid candidate",
                 ));
             }
-            if let crate::manifest::RequirementCandidate::Package {
+            if let crate::model::manifest::RequirementCandidate::Package {
                 provider,
                 publications,
                 with,
@@ -824,7 +828,7 @@ fn validate_provider_scope(
             } = candidate
             {
                 if !provider_names.contains(provider.as_str())
-                    || !matches!(with, crate::frozen::FrozenValue::Map(_))
+                    || !matches!(with, crate::model::frozen::FrozenValue::Map(_))
                 {
                     return Err(WombatError::configuration(
                         "manifest package candidate has an invalid provider or options",
@@ -836,7 +840,10 @@ fn validate_provider_scope(
         validate_publications(&requirement.binding.publications)?;
         if !provider_names.contains(requirement.binding.provider.as_str())
             || requirement.binding.identity.trim().is_empty()
-            || !matches!(requirement.binding.data, crate::frozen::FrozenValue::Map(_))
+            || !matches!(
+                requirement.binding.data,
+                crate::model::frozen::FrozenValue::Map(_)
+            )
         {
             return Err(WombatError::configuration(
                 "manifest requirement has an invalid selected binding",
@@ -848,7 +855,7 @@ fn validate_provider_scope(
             .filter(|attempt| {
                 matches!(
                     attempt.outcome,
-                    crate::manifest::ResolutionOutcome::Selected
+                    crate::model::manifest::ResolutionOutcome::Selected
                 )
             })
             .count();
@@ -856,7 +863,7 @@ fn validate_provider_scope(
             || requirement.attempts.last().is_none_or(|attempt| {
                 !matches!(
                     attempt.outcome,
-                    crate::manifest::ResolutionOutcome::Selected
+                    crate::model::manifest::ResolutionOutcome::Selected
                 ) || attempt.candidate != requirement.selected
                     || attempt.provider != requirement.binding.provider
             })
@@ -868,8 +875,9 @@ fn validate_provider_scope(
         let mut expected_attempts = Vec::new();
         'candidates: for (candidate_index, candidate) in requirement.candidates.iter().enumerate() {
             for provider in providers {
-                if let crate::manifest::RequirementCandidate::Package {
-                    provider: required, ..
+                if let crate::model::manifest::RequirementCandidate::Package {
+                    provider: required,
+                    ..
                 } = candidate
                     && provider.name != *required
                 {
@@ -892,7 +900,7 @@ fn validate_provider_scope(
                     (attempt.candidate, attempt.provider.as_str()) != expected
                         || matches!(
                             &attempt.outcome,
-                            crate::manifest::ResolutionOutcome::Unsupported { reason }
+                            crate::model::manifest::ResolutionOutcome::Unsupported { reason }
                                 if reason.trim().is_empty()
                         )
                 })
@@ -903,13 +911,13 @@ fn validate_provider_scope(
         }
         let expected_choice = if requirement.selected == 0 {
             match requirement.choice {
-                crate::manifest::RequirementChoice::Required => {
-                    crate::manifest::RequirementChoice::Required
+                crate::model::manifest::RequirementChoice::Required => {
+                    crate::model::manifest::RequirementChoice::Required
                 }
-                _ => crate::manifest::RequirementChoice::Preferred,
+                _ => crate::model::manifest::RequirementChoice::Preferred,
             }
         } else {
-            crate::manifest::RequirementChoice::Accepted
+            crate::model::manifest::RequirementChoice::Accepted
         };
         if requirement.choice != expected_choice {
             return Err(WombatError::configuration(
@@ -935,7 +943,7 @@ fn validate_provider_scope(
         previous_priority = Some(priority);
         if preparation.identity.trim().is_empty()
             || preparation.description.trim().is_empty()
-            || !matches!(preparation.data, crate::frozen::FrozenValue::Map(_))
+            || !matches!(preparation.data, crate::model::frozen::FrozenValue::Map(_))
             || !preparation_identities
                 .insert((preparation.provider.as_str(), preparation.identity.as_str()))
         {
@@ -971,7 +979,7 @@ fn valid_package_name(name: &str) -> bool {
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
 }
 
-fn validate_publications(publications: &crate::manifest::Publications) -> Result<()> {
+fn validate_publications(publications: &crate::model::manifest::Publications) -> Result<()> {
     if !publications
         .commands
         .windows(2)
@@ -1001,11 +1009,11 @@ fn validate_sha256(value: &str, label: &str) -> Result<()> {
 }
 
 fn validate_source_trace(
-    trace: &crate::manifest::SourceTrace,
+    trace: &crate::model::manifest::SourceTrace,
     sources: &std::collections::BTreeSet<&str>,
     label: &str,
 ) -> Result<()> {
-    if trace.callers.len() + 1 > crate::manifest::MAX_SOURCE_TRACE_FRAMES {
+    if trace.callers.len() + 1 > crate::model::manifest::MAX_SOURCE_TRACE_FRAMES {
         return Err(WombatError::configuration(format!(
             "{label} exceeds the maximum source trace depth"
         )));
@@ -1087,7 +1095,7 @@ fn verify_provider_payloads(root: &Path, manifest: &Manifest) -> Result<()> {
     let providers_root = root.join("providers");
     let mut expected = BTreeMap::new();
     for provider in &manifest.providers {
-        if let crate::manifest::ProviderOrigin::Custom { files, .. } = &provider.origin {
+        if let crate::model::manifest::ProviderOrigin::Custom { files, .. } = &provider.origin {
             for file in files {
                 expected.insert(file.payload.as_str(), file);
             }
@@ -1118,7 +1126,7 @@ fn verify_provider_payloads(root: &Path, manifest: &Manifest) -> Result<()> {
 fn verify_provider_directory<'a>(
     root: &Path,
     directory: &Path,
-    expected: &BTreeMap<&'a str, &'a crate::manifest::ProviderFile>,
+    expected: &BTreeMap<&'a str, &'a crate::model::manifest::ProviderFile>,
     seen: &mut BTreeSet<String>,
 ) -> Result<()> {
     let mut entries = fs::read_dir(directory)

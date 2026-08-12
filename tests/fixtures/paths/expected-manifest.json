@@ -1,8 +1,10 @@
 {
-  "format_version": 11,
+  "format_version": 15,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:9ca722f09313d37b7d95630ff178d23701613cd6719f323445fe728382ecd713",
-  "plan_id": "sha256:a1d92ef218de3e67a9104a86eb052e18ea232e4a2efefd0810f579ce57996d05",
+  "build_id": "sha256:f05cb7b56f2b767f2bf3cd1ade7646ee0f676fe55d5426ff17e529e437eea218",
+  "plan_id": "sha256:14c72442cf30702da4353dfb5912a78e52acce8c8307af0e818d19d68498eefa",
+  "execution_mode": "normal",
+  "skipped_requirement_gates": [],
   "sources": [
     {
       "path": "modules/auto.lua",
@@ -35,6 +37,7 @@
     "origin": "host_default"
   },
   "observations": [],
+  "process_observations": [],
   "modules": [
     {
       "name": "auto",
@@ -131,13 +134,99 @@
       }
     }
   ],
-  "build_providers": [],
-  "build_requirements": [],
-  "build_preparations": [],
+  "project_identity": "sha256:240eed9cb7186ec6b18ef4013657726ebce878e161aaf0adcd4f0092060e18fb",
+  "ladder": {
+    "name": "default",
+    "roots": [
+      {
+        "id": "materialise.before",
+        "children": []
+      },
+      {
+        "id": "materialise.tasks",
+        "children": []
+      },
+      {
+        "id": "materialise.artifacts",
+        "children": []
+      },
+      {
+        "id": "materialise.publish",
+        "children": []
+      },
+      {
+        "id": "materialise.after",
+        "children": []
+      },
+      {
+        "id": "deploy.before",
+        "children": []
+      },
+      {
+        "id": "deploy.apply",
+        "children": []
+      },
+      {
+        "id": "deploy.after",
+        "children": []
+      }
+    ],
+    "flattened": [
+      {
+        "id": "materialise.before",
+        "parent": null,
+        "depth": 0,
+        "core": "materialise.before"
+      },
+      {
+        "id": "materialise.tasks",
+        "parent": null,
+        "depth": 0,
+        "core": "materialise.tasks"
+      },
+      {
+        "id": "materialise.artifacts",
+        "parent": null,
+        "depth": 0,
+        "core": "materialise.artifacts"
+      },
+      {
+        "id": "materialise.publish",
+        "parent": null,
+        "depth": 0,
+        "core": "materialise.publish"
+      },
+      {
+        "id": "materialise.after",
+        "parent": null,
+        "depth": 0,
+        "core": "materialise.after"
+      },
+      {
+        "id": "deploy.before",
+        "parent": null,
+        "depth": 0,
+        "core": "deploy.before"
+      },
+      {
+        "id": "deploy.apply",
+        "parent": null,
+        "depth": 0,
+        "core": "deploy.apply"
+      },
+      {
+        "id": "deploy.after",
+        "parent": null,
+        "depth": 0,
+        "core": "deploy.after"
+      }
+    ]
+  },
   "providers": [],
   "requirements": [],
   "preparations": [],
   "tasks": [],
+  "scripts": [],
   "artifact_policy": {
     "unallocated": "warn"
   },

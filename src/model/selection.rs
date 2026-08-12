@@ -1,8 +1,8 @@
 use globset::{GlobBuilder, GlobMatcher};
 use std::path::Path;
 
-use crate::manifest::{SourceAttribute, SourceComponent, SourceProjection};
-use crate::path::validate_relative_path;
+use crate::model::manifest::{SourceAttribute, SourceComponent, SourceProjection};
+use crate::model::path::validate_relative_path;
 use crate::{Result, WombatError};
 
 const DOT_PREFIX: &str = "dot_";
@@ -309,7 +309,7 @@ mod tests {
         compile_selector, encode_target_path, hidden_components_authorized, matcher,
         project_physical,
     };
-    use crate::manifest::SourceAttribute;
+    use crate::model::manifest::SourceAttribute;
 
     #[test]
     fn metadata_composes_and_literal_stops_parsing() {
@@ -359,5 +359,36 @@ mod tests {
             ".external/.secret",
             ".external/**"
         ));
+    }
+
+    #[test]
+    fn metadata_projection_is_stable_across_composed_prefixes() {
+        for (physical, logical, allocated) in [
+            ("dot_config", ".config", true),
+            ("unalloc_config", "config", false),
+            ("unalloc_dot_config", ".config", false),
+            ("literal_dot_config", "dot_config", true),
+            ("dot_literal_dot_config", ".dot_config", true),
+        ] {
+            let first = project_physical(physical, false).unwrap();
+            let second = project_physical(physical, false).unwrap();
+            assert_eq!(
+                first, second,
+                "projection must be deterministic for {physical}"
+            );
+            assert_eq!(first.logical, logical);
+            assert_eq!(first.allocated, allocated);
+        }
+    }
+
+    #[test]
+    fn selector_globs_never_authorize_hidden_components_implicitly() {
+        for pattern in ["*", "**", "dir/**", "**/*.toml", "**@**"] {
+            let selector = compile_selector(pattern, false).unwrap();
+            assert!(!hidden_components_authorized(
+                ".hidden/value",
+                &selector.physical
+            ));
+        }
     }
 }

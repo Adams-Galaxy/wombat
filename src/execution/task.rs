@@ -8,13 +8,13 @@ use mlua::{Lua, Value};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::cache::{BuildCache, CachedOutput};
-use crate::manifest::{
+use crate::build::cache::{BuildCache, CachedOutput};
+use crate::model::manifest::{
     ArtifactKind, EvaluatedArtifact, EvaluatedManifest, EvaluatedProduction, EvaluatedTargetRoot,
     SourceOrigin, TaskLogPolicy, TaskOutput,
 };
-use crate::path::{expand_target_root, validate_relative_path};
-use crate::source::{fingerprint_regular_file, validate_source_components};
+use crate::model::path::{expand_target_root, validate_relative_path};
+use crate::model::source::{fingerprint_regular_file, validate_source_components};
 use crate::{Result, WombatError};
 
 const MAX_TASK_FILES: usize = 4_096;
@@ -56,10 +56,10 @@ struct TaskKey<'a> {
     identity: &'a str,
     runner_contract: u32,
     entrypoint_digest: &'a str,
-    params: &'a crate::frozen::FrozenValue,
-    runner: &'a crate::manifest::TaskRunner,
+    params: &'a crate::model::frozen::FrozenValue,
+    runner: &'a crate::model::manifest::TaskRunner,
     python_helper: bool,
-    target_root: &'a Option<crate::manifest::TaskTargetRoot>,
+    target_root: &'a Option<crate::model::manifest::TaskTargetRoot>,
     revision: &'a Option<String>,
     interpreter_identity: &'a str,
     at: &'a crate::execution::ladder::RungId,
@@ -142,14 +142,20 @@ fn execute_tasks_selected(
             None
         };
         if restored.is_some() {
-            eprintln!("task {}: cache hit", task.identity);
+            crate::presentation::emit(crate::presentation::Event::Progress(format!(
+                "task {}: cache hit",
+                task.identity
+            )));
             let empty = CapturedStream {
                 bytes: Vec::new(),
                 truncated: false,
             };
             apply_log_policy(task, &workspace, &empty, &empty, true)?;
         } else {
-            eprintln!("task {}: running", task.identity);
+            crate::presentation::emit(crate::presentation::Event::Progress(format!(
+                "task {}: running",
+                task.identity
+            )));
             let result = run_task(
                 task,
                 &entrypoint,
@@ -185,15 +191,18 @@ fn execute_tasks_selected(
         if restored.is_none() && task.cache.enabled {
             cache.store_task(&key, &outputs, &output)?;
         }
+        let target_root = task.target_root.as_ref();
 
         let mut recorded_outputs = Vec::with_capacity(outputs.len());
         for cached in &outputs {
             let path = portable_join(&output, &cached.relative);
             let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
-            let target_root = task
-                .target_root
-                .as_ref()
-                .expect("nonempty task output has a target root");
+            let target_root = target_root.ok_or_else(|| {
+                task_error(
+                    task,
+                    "task outputs cannot be projected without a target anchor",
+                )
+            })?;
             let target = expand_target_root(
                 &EvaluatedTargetRoot {
                     path: target_root.path.clone(),
@@ -226,7 +235,7 @@ fn execute_tasks_selected(
             });
             recorded_outputs.push(TaskOutput {
                 relative: cached.relative.clone(),
-                content: crate::manifest::FileContent {
+                content: crate::model::manifest::FileContent {
                     digest: cached.digest.clone(),
                     size: cached.size,
                     executable: cached.executable,
@@ -254,7 +263,7 @@ fn execute_tasks_selected(
     crate::lua::validate_artifact_conflicts(&desired.artifacts)
 }
 
-pub(crate) fn check_runners(tasks: &[crate::manifest::Task]) -> Result<()> {
+pub(crate) fn check_runners(tasks: &[crate::model::manifest::Task]) -> Result<()> {
     for task in tasks {
         if task.runner.is_embedded_lua() || task.runner.is_direct() {
             continue;
@@ -290,7 +299,7 @@ struct CapturedStream {
 }
 
 fn run_task(
-    task: &crate::manifest::Task,
+    task: &crate::model::manifest::Task,
     entrypoint: &Path,
     workspace: &Path,
     output: &Path,
@@ -354,7 +363,7 @@ fn run_task(
 }
 
 fn run_streaming(mut command: Command, identity: &str) -> Result<RunResult> {
-    let outcome = super::process::run(&mut command, identity, None, MAX_LOG_SIZE)?;
+    let outcome = super::process::run(&mut command, identity, None, MAX_LOG_SIZE, None)?;
     Ok(RunResult {
         success: outcome.success,
         status: outcome.status.replace("exit status: ", "exit status "),
@@ -370,7 +379,7 @@ fn run_streaming(mut command: Command, identity: &str) -> Result<RunResult> {
 }
 
 fn run_lua(
-    task: &crate::manifest::Task,
+    task: &crate::model::manifest::Task,
     entrypoint: &Path,
     workspace: &Path,
     protocol: &[String],
@@ -413,7 +422,7 @@ fn run_lua(
 }
 
 fn apply_log_policy(
-    task: &crate::manifest::Task,
+    task: &crate::model::manifest::Task,
     workspace: &Path,
     stdout: &CapturedStream,
     stderr: &CapturedStream,
@@ -589,7 +598,7 @@ fn reject_python_helper_conflict(entrypoint: &Path) -> Result<()> {
     Ok(())
 }
 
-fn interpreter_identity(task: &crate::manifest::Task, _entrypoint: &Path) -> Result<String> {
+fn interpreter_identity(task: &crate::model::manifest::Task, _entrypoint: &Path) -> Result<String> {
     if task.runner.is_embedded_lua() {
         return Ok(format!(
             "embedded-lua-{}",
@@ -747,7 +756,7 @@ fn hex_digest(bytes: &[u8]) -> String {
     output
 }
 
-fn task_error(task: &crate::manifest::Task, reason: &str) -> WombatError {
+fn task_error(task: &crate::model::manifest::Task, reason: &str) -> WombatError {
     let mut diagnostic =
         crate::Diagnostic::new(format!("task `{}` failed: {reason}", task.identity));
     diagnostic.primary = Some(task.declared_at.primary.clone());

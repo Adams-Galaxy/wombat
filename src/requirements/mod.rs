@@ -1,16 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Command;
 
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
 
 use crate::build::{OpenedBuild, open_build};
-use crate::context::HostContext;
-use crate::frozen::FrozenValue;
-use crate::manifest::{
+use crate::execution::process::ProcessOutcome;
+use crate::model::context::HostContext;
+use crate::model::frozen::FrozenValue;
+use crate::model::manifest::{
     BuildPlan, Manifest, Provider, ProviderBinding, ProviderOrigin, ProviderPreparation,
     Requirement, RequirementCandidate, RequirementKind,
 };
@@ -229,18 +229,18 @@ pub fn authorize_target_plan_until(
         .filter(|operation| pending_providers.contains(operation.provider.as_str()))
         .collect::<Vec<_>>();
     preflight(&context, &preparations, &pending)?;
-    eprintln!("materialise will reconcile:");
+    emit_progress("materialise will reconcile:");
     let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
     for (_, item) in &pending {
         grouped.entry(&item.provider).or_default().push(item);
     }
     for (provider, items) in grouped {
-        eprintln!("  {provider}");
+        emit_progress(format!("  {provider}"));
         for operation in preparations
             .iter()
             .filter(|operation| operation.provider == provider)
         {
-            eprintln!(
+            emit_progress(format!(
                 "    prepare {}{}",
                 operation.description,
                 if operation.elevated {
@@ -248,10 +248,14 @@ pub fn authorize_target_plan_until(
                 } else {
                     ""
                 }
-            );
+            ));
         }
         for item in items {
-            eprintln!("    {} ({})", item.requirement, item.status.as_str());
+            emit_progress(format!(
+                "    {} ({})",
+                item.requirement,
+                item.status.as_str()
+            ));
         }
     }
     confirm("materialise", yes)?;
@@ -363,14 +367,14 @@ fn authorize_context(
         .filter(|operation| pending_providers.contains(operation.provider.as_str()))
         .collect::<Vec<_>>();
     preflight(&context, &preparations, &pending)?;
-    eprintln!("{operation_name} will reconcile:");
+    emit_progress(format!("{operation_name} will reconcile:"));
     for (_, item) in &pending {
-        eprintln!(
+        emit_progress(format!(
             "  {} via {} ({})",
             item.requirement,
             item.provider,
             item.status.as_str()
-        );
+        ));
     }
     confirm(operation_name, yes)?;
     if preparations.iter().any(|operation| operation.elevated)
@@ -481,18 +485,18 @@ fn reconcile_context_inner(
         })
         .collect::<Vec<_>>();
     preflight(context, &preparations, &pending)?;
-    eprintln!("{operation_name} will reconcile:");
+    emit_progress(format!("{operation_name} will reconcile:"));
     let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
     for (_, item) in &pending {
         grouped.entry(&item.provider).or_default().push(item);
     }
     for (provider, items) in grouped {
-        eprintln!("  {provider}");
+        emit_progress(format!("  {provider}"));
         for operation in preparations
             .iter()
             .filter(|operation| operation.provider == provider)
         {
-            eprintln!(
+            emit_progress(format!(
                 "    prepare {}{}",
                 operation.description,
                 if operation.elevated {
@@ -500,10 +504,14 @@ fn reconcile_context_inner(
                 } else {
                     ""
                 }
-            );
+            ));
         }
         for item in items {
-            eprintln!("    {} ({})", item.requirement, item.status.as_str());
+            emit_progress(format!(
+                "    {} ({})",
+                item.requirement,
+                item.status.as_str()
+            ));
         }
     }
     if authorization.is_none() {
@@ -595,20 +603,9 @@ fn confirm(operation_name: &str, yes: bool) -> Result<()> {
     if yes {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
-        return Err(WombatError::configuration(format!(
-            "{operation_name} requires --yes when standard input is not a terminal"
-        )));
-    }
-    eprint!("continue? [y/N] ");
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| WombatError::io("standard input", error))?;
-    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-        return Err(WombatError::configuration(format!(
-            "{operation_name} cancelled"
-        )));
-    }
-    Ok(())
+    crate::presentation::confirm("continue? [y/N] ", operation_name)
+}
+
+fn emit_progress(message: impl Into<String>) {
+    crate::presentation::emit(crate::presentation::Event::Progress(message.into()));
 }

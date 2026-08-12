@@ -2,11 +2,8 @@ use std::fs;
 
 use wombat::{BuildOptions, build};
 
-fn write(root: &std::path::Path, relative: &str, contents: &str) {
-    let path = root.join(relative);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, contents).unwrap();
-}
+mod support;
+use support::write;
 
 #[test]
 fn grouped_installs_mix_static_and_templates_with_shared_context_and_exclusions() {

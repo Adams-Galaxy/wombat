@@ -114,7 +114,7 @@ pub(super) fn register_artifact(
             |relative, is_directory| {
                 !relative
                     .split('/')
-                    .any(crate::selection::is_hidden_component)
+                    .any(crate::model::selection::is_hidden_component)
                     && !is_excluded(&exclusion_matchers, relative, is_directory)
             },
         )?;
@@ -184,7 +184,7 @@ pub(super) fn register_artifact(
         let hidden_authorized = hidden_components_authorized(&relative, &selector.physical);
         if relative
             .split('/')
-            .any(crate::selection::is_hidden_component)
+            .any(crate::model::selection::is_hidden_component)
             && !hidden_authorized
         {
             continue;
@@ -208,20 +208,20 @@ pub(super) fn register_artifact(
                 projection
                     .allocated
                     .then(|| {
-                        base_target
-                            .as_ref()
-                            .map(|base| crate::path::join_relative(base, &projection.logical))
+                        base_target.as_ref().map(|base| {
+                            crate::model::path::join_relative(base, &projection.logical)
+                        })
                     })
                     .flatten()
             })
         } else if let Some(root) = &explicit_root {
             relative_projection
                 .allocated
-                .then(|| crate::path::join_relative(&root.path, &projected_relative))
+                .then(|| crate::model::path::join_relative(&root.path, &projected_relative))
         } else if projection.allocated {
             base_target
                 .as_ref()
-                .map(|base| crate::path::join_relative(base, &projection.logical))
+                .map(|base| crate::model::path::join_relative(base, &projection.logical))
         } else {
             None
         };
@@ -263,9 +263,9 @@ pub(super) fn register_artifact(
         let target = if !set_selector && explicit_target.is_some() {
             parse_explicit_target(&target_path)?
         } else if let Some(root) = &explicit_root {
-            crate::manifest::TargetPath {
+            crate::model::manifest::TargetPath {
                 path: target_path,
-                origin: crate::manifest::TargetOrigin::DirectoryExplicit {
+                origin: crate::model::manifest::TargetOrigin::DirectoryExplicit {
                     declared: root.path.clone(),
                     relative: projected_relative,
                 },
@@ -302,8 +302,8 @@ pub(super) fn register_artifact(
             )));
         }
         match state.artifact_policy.unallocated {
-            crate::manifest::UnallocatedPolicy::Ignore => {}
-            crate::manifest::UnallocatedPolicy::Warn => {
+            crate::model::manifest::UnallocatedPolicy::Ignore => {}
+            crate::model::manifest::UnallocatedPolicy::Warn => {
                 state.artifact_notices.push(ArtifactNotice {
                     kind: ArtifactNoticeKind::UnallocatedSkipped,
                     owner: owner.clone(),
@@ -312,7 +312,7 @@ pub(super) fn register_artifact(
                     declared_at: location.trace.clone(),
                 })
             }
-            crate::manifest::UnallocatedPolicy::Error => {
+            crate::model::manifest::UnallocatedPolicy::Error => {
                 return Err(WombatError::configuration(format!(
                     "artifact selector `{source_path}` contains unallocated children without an explicit `to`"
                 )));

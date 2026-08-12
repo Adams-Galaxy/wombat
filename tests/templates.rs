@@ -24,27 +24,8 @@ fn manifest_json(manifest: &wombat::Manifest) -> String {
     serde_json::to_string_pretty(manifest).unwrap()
 }
 
-fn comparable_manifest_json(value: &str) -> serde_json::Value {
-    let mut value: serde_json::Value = serde_json::from_str(value).unwrap();
-    let object = value.as_object_mut().unwrap();
-    for key in [
-        "format_version",
-        "build_id",
-        "plan_id",
-        "execution_mode",
-        "skipped_requirement_gates",
-        "process_observations",
-        "build_providers",
-        "build_requirements",
-        "build_preparations",
-        "project_identity",
-        "ladder",
-        "scripts",
-        "script_outcomes",
-    ] {
-        object.remove(key);
-    }
-    value
+fn exact_manifest_json(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap()
 }
 
 struct Repository {
@@ -172,15 +153,15 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 }
 
 #[test]
-fn template_fixture_matches_exact_manifest_v11_and_rendered_tree() {
+fn template_fixture_matches_exact_manifest_v15_and_rendered_tree() {
     let root = fixture("templates");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
     let outcome = build(BuildOptions::new(&root, &build_dir).with_host(fixture_host())).unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
     assert_eq!(
-        comparable_manifest_json(&manifest_json(&outcome.manifest)),
-        comparable_manifest_json(&expected)
+        exact_manifest_json(&manifest_json(&outcome.manifest)),
+        exact_manifest_json(&expected)
     );
     let starship = fs::read_to_string(build_dir.join("tree/.config/starship.toml")).unwrap();
     assert!(starship.contains("format = \"wombat\""));

@@ -26,27 +26,8 @@ fn manifest_json(manifest: &Manifest) -> String {
     serde_json::to_string_pretty(manifest).unwrap()
 }
 
-fn comparable_manifest_json(value: &str) -> serde_json::Value {
-    let mut value: serde_json::Value = serde_json::from_str(value).unwrap();
-    let object = value.as_object_mut().unwrap();
-    for key in [
-        "format_version",
-        "build_id",
-        "plan_id",
-        "execution_mode",
-        "skipped_requirement_gates",
-        "process_observations",
-        "build_providers",
-        "build_requirements",
-        "build_preparations",
-        "project_identity",
-        "ladder",
-        "scripts",
-        "script_outcomes",
-    ] {
-        object.remove(key);
-    }
-    value
+fn exact_manifest_json(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap()
 }
 
 fn build_at(root: &Path, build_dir: &Path) -> wombat::Result<BuildOutcome> {
@@ -99,10 +80,7 @@ fn walking_fixture_matches_the_expected_manifest() {
             .manifest,
     );
 
-    assert_eq!(
-        comparable_manifest_json(&actual),
-        comparable_manifest_json(&expected)
-    );
+    assert_eq!(exact_manifest_json(&actual), exact_manifest_json(&expected));
 }
 
 #[test]
@@ -145,7 +123,7 @@ fn root_selection_order_preserves_outputs_but_changes_exact_source_identity() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v11() {
+fn path_fixture_matches_the_exact_manifest_v15() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -155,14 +133,11 @@ fn path_fixture_matches_the_exact_manifest_v11() {
             .manifest,
     );
 
-    assert_eq!(
-        comparable_manifest_json(&actual),
-        comparable_manifest_json(&expected)
-    );
+    assert_eq!(exact_manifest_json(&actual), exact_manifest_json(&expected));
 }
 
 #[test]
-fn directory_fixture_matches_manifest_v11_and_materialised_tree() {
+fn directory_fixture_matches_manifest_v15_and_materialised_tree() {
     let root = fixture("directories");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
@@ -170,8 +145,8 @@ fn directory_fixture_matches_manifest_v11_and_materialised_tree() {
     let outcome = build_at(&root, &build_dir).unwrap();
 
     assert_eq!(
-        comparable_manifest_json(&manifest_json(&outcome.manifest)),
-        comparable_manifest_json(&expected)
+        exact_manifest_json(&manifest_json(&outcome.manifest)),
+        exact_manifest_json(&expected)
     );
     assert_eq!(
         fs::read(build_dir.join("tree/.config/app/.hidden")).unwrap(),

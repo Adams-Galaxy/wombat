@@ -4,9 +4,12 @@ use std::path::Path;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{ArtifactPolicy, SourceFile, UnallocatedPolicy};
+use crate::model::manifest::{ArtifactPolicy, SourceFile, UnallocatedPolicy};
 use crate::presentation::LogLevel;
 use crate::{Result, WombatError};
+
+pub mod config;
+pub(crate) mod inputs;
 
 const PROJECT_FORMAT_VERSION: u32 = 3;
 

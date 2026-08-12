@@ -51,7 +51,7 @@ pub fn resolve_home() -> Result<PathBuf> {
 }
 
 #[doc(hidden)]
-pub fn resolve_runners() -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
+pub fn resolve_runners() -> Result<BTreeMap<String, crate::model::manifest::TaskRunner>> {
     let home = env::var_os("HOME").map(PathBuf::from);
     let config_root = match env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
         Some(path) if path.is_absolute() => path,
@@ -80,7 +80,7 @@ fn task_interpreters_from_config(
     path: &Path,
     contents: &str,
     home: &Path,
-) -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
+) -> Result<BTreeMap<String, crate::model::manifest::TaskRunner>> {
     configured_task_interpreters(parse_config(path, contents)?, path, Some(home))
 }
 
@@ -88,14 +88,14 @@ fn configured_task_interpreters(
     config: UserConfig,
     path: &Path,
     home: Option<&Path>,
-) -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
+) -> Result<BTreeMap<String, crate::model::manifest::TaskRunner>> {
     let mut interpreters = BTreeMap::new();
     for (name, configured) in config.runners {
         let family = match name.as_str() {
-            "python" => crate::manifest::InterpreterFamily::Python,
-            "shell" => crate::manifest::InterpreterFamily::PosixShell,
-            "bash" => crate::manifest::InterpreterFamily::Bash,
-            "lua" => crate::manifest::InterpreterFamily::Custom,
+            "python" => crate::model::manifest::InterpreterFamily::Python,
+            "shell" => crate::model::manifest::InterpreterFamily::PosixShell,
+            "bash" => crate::model::manifest::InterpreterFamily::Bash,
+            "lua" => crate::model::manifest::InterpreterFamily::Custom,
             _ => {
                 return Err(WombatError::configuration(format!(
                     "unknown task interpreter `{name}` in `{}`; expected python, shell, bash, or lua",
@@ -112,7 +112,7 @@ fn configured_task_interpreters(
         let command = expand_interpreter_command(&configured.command, home, path)?;
         interpreters.insert(
             name,
-            crate::manifest::TaskRunner::Interpreter {
+            crate::model::manifest::TaskRunner::Interpreter {
                 contract_version: 1,
                 family,
                 command,

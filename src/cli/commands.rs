@@ -13,6 +13,7 @@ pub(crate) fn run() -> ExitCode {
     };
     let stdout = wombat::Presenter::new(cli.color.into(), io::stdout().is_terminal());
     let stderr = wombat::Presenter::new(cli.color.into(), io::stderr().is_terminal());
+    wombat::presentation::install_human_event_sink(stderr);
     let trace = cli.trace;
     let requested_log_level = cli.log_level.map(Into::into);
     let log_adjustment = cli.verbose as i8 - cli.quiet as i8;

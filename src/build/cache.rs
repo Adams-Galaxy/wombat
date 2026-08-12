@@ -3,7 +3,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::{Result, WombatError};
@@ -95,7 +94,8 @@ impl BuildCache {
         let mut previous = None;
         let mut blobs = Vec::with_capacity(record.outputs.len());
         for item in &record.outputs {
-            if crate::path::validate_relative_path(&item.relative, "cached task output").is_err()
+            if crate::model::path::validate_relative_path(&item.relative, "cached task output")
+                .is_err()
                 || previous.is_some_and(|value: &str| value >= item.relative.as_str())
             {
                 return Ok(None);
@@ -230,22 +230,7 @@ fn read_json_or_miss<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.expect_parent()?;
-    let bytes = serde_json::to_vec(value)?;
-    let mut temporary =
-        NamedTempFile::new_in(parent).map_err(|error| WombatError::io(parent, error))?;
-    set_private_file(temporary.as_file(), temporary.path())?;
-    temporary
-        .write_all(&bytes)
-        .map_err(|error| WombatError::io(temporary.path(), error))?;
-    temporary
-        .as_file_mut()
-        .sync_all()
-        .map_err(|error| WombatError::io(temporary.path(), error))?;
-    temporary
-        .persist(path)
-        .map_err(|error| WombatError::io(path, error.error))?;
-    Ok(())
+    crate::storage::atomic::write_json_pretty(path, value, true)
 }
 
 fn write_file(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
@@ -289,13 +274,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    output
+    crate::storage::digest::hex_sha256(bytes)
 }
 
 trait ParentPath {

@@ -1,6 +1,8 @@
 use std::path::{Component, Path};
 
-use crate::manifest::{EvaluatedTargetOrigin, EvaluatedTargetRoot, TargetOrigin, TargetPath};
+use crate::model::manifest::{
+    EvaluatedTargetOrigin, EvaluatedTargetRoot, TargetOrigin, TargetPath,
+};
 use crate::{Result, WombatError};
 
 pub(crate) fn validate_relative_path(value: &str, subject: &str) -> Result<()> {
@@ -149,5 +151,21 @@ mod tests {
         let root = parse_explicit_target_root(".config/nvim").unwrap();
         let expanded = expand_target_root(&root, "init.lua").unwrap();
         assert_eq!(expanded.path, ".config/nvim/init.lua");
+    }
+
+    #[test]
+    fn every_traversal_shape_is_rejected_at_target_boundaries() {
+        for path in [
+            "../escape",
+            "safe/../escape",
+            "./local",
+            "safe//file",
+            "safe\\file",
+        ] {
+            assert!(parse_explicit_target(path).is_err(), "accepted `{path}`");
+        }
+        for path in ["name", ".config/name", "nested/deep/name", "@literal"] {
+            assert!(parse_explicit_target(path).is_ok(), "rejected `{path}`");
+        }
     }
 }

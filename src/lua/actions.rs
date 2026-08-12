@@ -234,7 +234,7 @@ pub(super) fn declare_generated(
                 ))
             })?;
             infer_target(
-                &crate::path::join_relative(&base, name),
+                &crate::model::path::join_relative(&base, name),
                 format!("generated:{name}"),
             )?
         }

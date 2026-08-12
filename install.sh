@@ -75,6 +75,7 @@ if [ -n "$missing" ] && [ "$install_prerequisites" = true ]; then
             have git || packages="$packages git"
             have cc || packages="$packages build-essential"
             elevated apt-get update
+            # shellcheck disable=SC2086 # Every word is selected from the fixed package list above.
             elevated env DEBIAN_FRONTEND=noninteractive apt-get install --yes $packages
             ;;
         Darwin)

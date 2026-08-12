@@ -6,8 +6,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::build::open_build;
-use crate::manifest::{Artifact, BuildPlan, Manifest, Production};
+use crate::model::manifest::{Artifact, BuildPlan, Manifest, Production};
 use crate::{Result, WombatError};
+
+mod compare;
+
+use compare::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InspectSection {
@@ -133,8 +137,8 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
 }
 
 fn render_observations(
-    context: &[crate::manifest::Observation],
-    processes: &[crate::manifest::ProcessObservation],
+    context: &[crate::model::manifest::Observation],
+    processes: &[crate::model::manifest::ProcessObservation],
 ) -> String {
     let mut output = render_list(
         "Context observations",
@@ -176,7 +180,7 @@ fn render_ladder(ladder: &crate::execution::ladder::ExecutionLadder) -> String {
     )
 }
 
-fn render_scripts(scripts: &[crate::manifest::Script]) -> String {
+fn render_scripts(scripts: &[crate::model::manifest::Script]) -> String {
     render_list(
         "Scripts",
         scripts.iter().map(|script| {
@@ -196,16 +200,16 @@ fn render_scripts(scripts: &[crate::manifest::Script]) -> String {
     )
 }
 
-fn render_provider(provider: &crate::manifest::Provider) -> String {
+fn render_provider(provider: &crate::model::manifest::Provider) -> String {
     format!(
         "{} (priority {})\n  origin: {}\n  config: {}\n  declared at: {}",
         provider.name,
         provider.priority,
         match &provider.origin {
-            crate::manifest::ProviderOrigin::Builtin { contract_version } => {
+            crate::model::manifest::ProviderOrigin::Builtin { contract_version } => {
                 format!("built-in contract v{contract_version}")
             }
-            crate::manifest::ProviderOrigin::Custom { entrypoint, files } => {
+            crate::model::manifest::ProviderOrigin::Custom { entrypoint, files } => {
                 format!("custom {entrypoint}, {} files", files.len())
             }
         },
@@ -214,7 +218,7 @@ fn render_provider(provider: &crate::manifest::Provider) -> String {
     )
 }
 
-fn render_preparation(operation: &crate::manifest::ProviderPreparation) -> String {
+fn render_preparation(operation: &crate::model::manifest::ProviderPreparation) -> String {
     format!(
         "{}:{}\n  description: {}\n  elevated: {}\n  data: {}",
         operation.provider,
@@ -334,8 +338,8 @@ pub fn explain(
             .filter(|requirement| {
                 let matches_kind = matches!(
                     (kind, requirement.kind),
-                    ("command", crate::manifest::RequirementKind::Command)
-                        | ("package", crate::manifest::RequirementKind::Package)
+                    ("command", crate::model::manifest::RequirementKind::Command)
+                        | ("package", crate::model::manifest::RequirementKind::Package)
                 );
                 matches_kind
                     && requirement
@@ -479,10 +483,15 @@ fn render_section(
                         provider.name,
                         provider.priority,
                         match &provider.origin {
-                            crate::manifest::ProviderOrigin::Builtin { contract_version } => {
+                            crate::model::manifest::ProviderOrigin::Builtin {
+                                contract_version,
+                            } => {
                                 format!("built-in contract v{contract_version}")
                             }
-                            crate::manifest::ProviderOrigin::Custom { entrypoint, files } => {
+                            crate::model::manifest::ProviderOrigin::Custom {
+                                entrypoint,
+                                files,
+                            } => {
                                 format!("custom {entrypoint}, {} files", files.len())
                             }
                         },
@@ -582,13 +591,13 @@ fn render_section(
     }
 }
 
-fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
+fn render_requirement(requirement: &crate::model::manifest::Requirement) -> String {
     let selected = &requirement.candidates[requirement.selected as usize];
     format!(
         "{}:{}\n  owner: {}\n  choice: {:?}\n  when: {}\n  provider: {}\n  binding: {}\n  candidates: {}\n  declared at: {}",
         match requirement.kind {
-            crate::manifest::RequirementKind::Command => "command",
-            crate::manifest::RequirementKind::Package => "package",
+            crate::model::manifest::RequirementKind::Command => "command",
+            crate::model::manifest::RequirementKind::Package => "package",
         },
         selected.name(),
         requirement.owner,
@@ -601,7 +610,7 @@ fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
     )
 }
 
-fn render_selection(selection: &crate::manifest::ArtifactSelection) -> String {
+fn render_selection(selection: &crate::model::manifest::ArtifactSelection) -> String {
     format!(
         "{}\n  owner: {}\n  expanded: {}\n  physical: {}/{}\n  kind: {:?}\n  target: {}\n  matches: {}\n  skipped unallocated: {}\n  declared at: {}",
         selection.declared,
@@ -624,7 +633,7 @@ fn render_selection(selection: &crate::manifest::ArtifactSelection) -> String {
 fn render_requirement_explanation(
     manifest: &Manifest,
     selector: &str,
-    requirements: &[&crate::manifest::Requirement],
+    requirements: &[&crate::model::manifest::Requirement],
 ) -> String {
     let mut output = format!("Requirement {selector}\n  build: {}\n", manifest.build_id);
     for requirement in requirements {
@@ -770,246 +779,4 @@ fn artifact_aliases(artifact: &Artifact, home: Option<&Path>) -> BTreeSet<String
         aliases.insert(home.join(logical).to_string_lossy().into_owned());
     }
     aliases
-}
-
-fn render_comparison(left: &Manifest, right: &Manifest) -> String {
-    if left == right {
-        return format!("Products are identical: {}\n", left.build_id);
-    }
-    let mut output = format!(
-        "Product comparison\n  left: {}\n  right: {}\n",
-        left.build_id, right.build_id
-    );
-    compare_map(
-        &mut output,
-        "Sources",
-        keyed(&left.sources, |source| source.path.clone()),
-        keyed(&right.sources, |source| source.path.clone()),
-    );
-    compare_map(
-        &mut output,
-        "Inputs",
-        keyed(&left.inputs, |input| input.name.clone()),
-        keyed(&right.inputs, |input| input.name.clone()),
-    );
-    if left.target != right.target {
-        output.push_str(&format!(
-            "Target\n  - {}\n  + {}\n",
-            json(&left.target),
-            json(&right.target)
-        ));
-    }
-    compare_map(
-        &mut output,
-        "Observations",
-        keyed(&left.observations, |observation| {
-            format!("{:?}.{}", observation.subject, observation.path)
-        }),
-        keyed(&right.observations, |observation| {
-            format!("{:?}.{}", observation.subject, observation.path)
-        }),
-    );
-    compare_map(
-        &mut output,
-        "Modules",
-        keyed(&left.modules, |module| module.name.clone()),
-        keyed(&right.modules, |module| module.name.clone()),
-    );
-    compare_map(
-        &mut output,
-        "Dependencies",
-        keyed(&left.dependencies, |dependency| {
-            format!(
-                "{:?}:{}->{}@{}",
-                dependency.kind,
-                dependency.from,
-                dependency.to,
-                json(&dependency.declared_at)
-            )
-        }),
-        keyed(&right.dependencies, |dependency| {
-            format!(
-                "{:?}:{}->{}@{}",
-                dependency.kind,
-                dependency.from,
-                dependency.to,
-                json(&dependency.declared_at)
-            )
-        }),
-    );
-    compare_map(
-        &mut output,
-        "Providers",
-        keyed(&left.providers, |provider| provider.name.clone()),
-        keyed(&right.providers, |provider| provider.name.clone()),
-    );
-    compare_map(
-        &mut output,
-        "Requirements",
-        keyed(&left.requirements, |requirement| {
-            format!(
-                "{:?}:{}@{}",
-                requirement.kind,
-                requirement.candidates[requirement.selected as usize].name(),
-                requirement.declared_at
-            )
-        }),
-        keyed(&right.requirements, |requirement| {
-            format!(
-                "{:?}:{}@{}",
-                requirement.kind,
-                requirement.candidates[requirement.selected as usize].name(),
-                requirement.declared_at
-            )
-        }),
-    );
-    compare_map(
-        &mut output,
-        "Preparations",
-        keyed(&left.preparations, |operation| {
-            format!("{}:{}", operation.provider, operation.identity)
-        }),
-        keyed(&right.preparations, |operation| {
-            format!("{}:{}", operation.provider, operation.identity)
-        }),
-    );
-    compare_map(
-        &mut output,
-        "Artifact selections",
-        keyed(&left.artifact_selections, |selection| {
-            format!(
-                "{}:{}@{}",
-                selection.owner, selection.declared, selection.declared_at
-            )
-        }),
-        keyed(&right.artifact_selections, |selection| {
-            format!(
-                "{}:{}@{}",
-                selection.owner, selection.declared, selection.declared_at
-            )
-        }),
-    );
-    if left.artifact_policy != right.artifact_policy {
-        output.push_str(&format!(
-            "Artifact policy\n  - {}\n  + {}\n",
-            json(&left.artifact_policy),
-            json(&right.artifact_policy)
-        ));
-    }
-    compare_map(
-        &mut output,
-        "Artifact notices",
-        keyed(&left.artifact_notices, |notice| {
-            format!(
-                "{}:{}@{}",
-                notice.owner, notice.selector, notice.declared_at
-            )
-        }),
-        keyed(&right.artifact_notices, |notice| {
-            format!(
-                "{}:{}@{}",
-                notice.owner, notice.selector, notice.declared_at
-            )
-        }),
-    );
-    compare_map(
-        &mut output,
-        "Artifacts",
-        keyed(&left.artifacts, |artifact| artifact.target.path.clone()),
-        keyed(&right.artifacts, |artifact| artifact.target.path.clone()),
-    );
-    output
-}
-
-fn keyed<T: Serialize>(
-    values: &[T],
-    key: impl Fn(&T) -> String,
-) -> BTreeMap<String, serde_json::Value> {
-    values
-        .iter()
-        .map(|value| {
-            (
-                key(value),
-                serde_json::to_value(value).expect("manifest values serialize"),
-            )
-        })
-        .collect()
-}
-
-fn compare_map(
-    output: &mut String,
-    title: &str,
-    left: BTreeMap<String, serde_json::Value>,
-    right: BTreeMap<String, serde_json::Value>,
-) {
-    let keys = left
-        .keys()
-        .chain(right.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let changed = keys
-        .into_iter()
-        .filter(|key| left.get(key) != right.get(key))
-        .collect::<Vec<_>>();
-    if changed.is_empty() {
-        return;
-    }
-    output.push_str(title);
-    output.push('\n');
-    for key in changed {
-        match (left.get(&key), right.get(&key)) {
-            (Some(left), Some(right)) => {
-                output.push_str(&format!(
-                    "  Change {key}\n    - {}\n    + {}\n",
-                    json(left),
-                    json(right)
-                ));
-            }
-            (Some(left), None) => {
-                output.push_str(&format!("  Remove {key}\n    - {}\n", json(left)));
-            }
-            (None, Some(right)) => {
-                output.push_str(&format!("  Add {key}\n    + {}\n", json(right)));
-            }
-            (None, None) => unreachable!(),
-        }
-    }
-}
-
-fn production_name(production: &Production) -> &'static str {
-    match production {
-        Production::Static => "static",
-        Production::Template { .. } => "template",
-        Production::GeneratedLua { .. } => "generated Lua",
-        Production::Task { .. } => "task",
-    }
-}
-
-fn json(value: &impl Serialize) -> String {
-    serde_json::to_string(value).expect("manifest values serialize")
-}
-
-fn indented_json(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value)
-        .expect("manifest values serialize")
-        .lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn portable_join(root: &Path, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .fold(root.to_path_buf(), |path, component| path.join(component))
-}
-
-fn digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::from("sha256:");
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    output
 }

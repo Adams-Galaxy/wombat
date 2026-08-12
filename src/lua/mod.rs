@@ -3,20 +3,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::rc::Rc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use globset::{Glob, GlobSetBuilder};
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value};
 use sha2::{Digest, Sha256};
 
-use crate::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
 use crate::execution::ladder::{CoreRung, ExecutionLadder, LadderRung, RungId};
-use crate::frozen::FrozenValue;
-use crate::inputs::{self, InputSpec};
-use crate::manifest::{
+use crate::model::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
+use crate::model::frozen::FrozenValue;
+use crate::model::manifest::{
     ArtifactKind, ArtifactNotice, ArtifactNoticeKind, ArtifactPolicy, ArtifactSelection,
     ArtifactSelectionKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact,
     EvaluatedDirectory, EvaluatedManifest, EvaluatedProduction, EvaluatedTask, InterpreterFamily,
@@ -27,18 +25,19 @@ use crate::manifest::{
     ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
     SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskTargetRoot,
 };
-use crate::path::{
+use crate::model::path::{
     infer_target, infer_target_root, parse_explicit_target, parse_explicit_target_root,
     reject_legacy_artifact_trees, validate_relative_path,
 };
-use crate::selection::{
+use crate::model::selection::{
     compile_selector, hidden_components_authorized, in_static_scope, is_excluded, matcher,
     project_physical,
 };
-use crate::source::{
+use crate::model::source::{
     SourceFingerprint, fingerprint_regular_file, snapshot_directory_filtered,
     validate_source_components,
 };
+use crate::project::inputs::{self, InputSpec};
 use crate::{Diagnostic, Result, WombatError};
 
 mod actions;

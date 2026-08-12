@@ -92,14 +92,14 @@ pub(super) fn check_brew(binding: &ProviderBinding, minimum: Option<&str>) -> Re
         &["info", "--json=v2", brew_flag(kind), name],
         &BTreeMap::new(),
     )?;
-    if !output.status.success() {
+    if !output.success {
         return Ok(provider_item(
             binding,
             CheckStatus::Unavailable,
             &format!("brew info failed: {}", output_detail(&output)),
         ));
     }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     let installed = installed_brew_versions(&json, kind)?;
     let Some(observed) = installed.last() else {
         return Ok(provider_item(
@@ -108,11 +108,13 @@ pub(super) fn check_brew(binding: &ProviderBinding, minimum: Option<&str>) -> Re
             "not installed",
         ));
     };
-    if minimum.is_some_and(|minimum| !version_at_least(observed, minimum)) {
+    if let Some(minimum) = minimum
+        && !version_at_least(observed, minimum)
+    {
         return Ok(provider_item(
             binding,
             CheckStatus::Outdated,
-            &format!("observed {observed}; needs at least {}", minimum.unwrap()),
+            &format!("observed {observed}; needs at least {minimum}"),
         ));
     }
     Ok(provider_item(
@@ -136,8 +138,8 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
         &["-W", "-f=${Status}\t${Version}", name],
         &BTreeMap::new(),
     )?;
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout);
+    if output.success {
+        let text = String::from_utf8_lossy(&output.stdout.bytes);
         let Some((status, observed)) = text.trim().rsplit_once('\t') else {
             return Ok(provider_item(
                 binding,
@@ -165,7 +167,7 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
                 &["--compare-versions", observed, "ge", minimum],
                 &BTreeMap::new(),
             )?;
-            if !comparison.status.success() {
+            if !comparison.success {
                 return Ok(provider_item(
                     binding,
                     CheckStatus::Outdated,
@@ -188,14 +190,14 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
         ));
     };
     let policy = run_bounded(&apt_cache, &["policy", name], &BTreeMap::new())?;
-    if !policy.status.success() {
+    if !policy.success {
         return Ok(provider_item(
             binding,
             CheckStatus::Unavailable,
             &format!("apt-cache policy failed: {}", output_detail(&policy)),
         ));
     }
-    let policy_text = String::from_utf8_lossy(&policy.stdout);
+    let policy_text = String::from_utf8_lossy(&policy.stdout.bytes);
     let candidate = policy_text
         .lines()
         .find_map(|line| line.trim().strip_prefix("Candidate:").map(str::trim));

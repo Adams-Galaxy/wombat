@@ -108,7 +108,7 @@ pub(super) fn configure_providers(
                 .clone();
             ProviderOrigin::Custom {
                 entrypoint: format!("{name}.lua"),
-                files: vec![crate::manifest::ProviderFile {
+                files: vec![crate::model::manifest::ProviderFile {
                     source: source_path,
                     payload: format!("{name}.lua"),
                     digest,
@@ -814,7 +814,7 @@ pub(super) fn record_provider_sources(
             source.manifest.path == entrypoint || source.manifest.path.starts_with(&root_prefix)
         })
         .map(|source| {
-            Ok(crate::manifest::ProviderFile {
+            Ok(crate::model::manifest::ProviderFile {
                 source: source.manifest.path.clone(),
                 payload: source
                     .manifest
