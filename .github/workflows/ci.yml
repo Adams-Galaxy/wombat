@@ -31,6 +31,14 @@ jobs:
           toolchain: "1.89"
       - run: cargo check --locked --all-targets
 
+  shell:
+    name: Installer shell safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: sh -n install.sh
+      - run: shellcheck install.sh
+
   macos:
     name: macOS tests
     runs-on: macos-latest
