@@ -29,22 +29,26 @@ struct RequirementContext<'a> {
 
 impl<'a> RequirementContext<'a> {
     fn target(opened: &'a OpenedBuild) -> Self {
+        Self::target_manifest(&opened.manifest, &opened.product_dir)
+    }
+
+    fn target_manifest(manifest: &'a Manifest, product_dir: &Path) -> Self {
         Self {
-            id: &opened.manifest.build_id,
-            providers: &opened.manifest.providers,
-            requirements: &opened.manifest.requirements,
-            preparations: &opened.manifest.preparations,
-            payload_root: opened.product_dir.join("providers"),
+            id: &manifest.build_id,
+            providers: &manifest.providers,
+            requirements: &manifest.requirements,
+            preparations: &manifest.preparations,
+            payload_root: product_dir.join("providers"),
         }
     }
 
     fn build(plan: &'a BuildPlan, build_dir: &Path) -> Self {
         Self {
             id: &plan.plan_id,
-            providers: &plan.build_providers,
-            requirements: &plan.build_requirements,
-            preparations: &plan.build_preparations,
-            payload_root: build_dir.join(".wombat/plan/payloads/providers/build"),
+            providers: &plan.providers,
+            requirements: &plan.requirements,
+            preparations: &plan.preparations,
+            payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
         }
     }
 
@@ -54,7 +58,7 @@ impl<'a> RequirementContext<'a> {
             providers: &plan.providers,
             requirements: &plan.requirements,
             preparations: &plan.preparations,
-            payload_root: build_dir.join(".wombat/plan/payloads/providers/target"),
+            payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
         }
     }
 }
@@ -127,6 +131,15 @@ pub struct BootstrapOutcome {
     pub already_satisfied: Vec<String>,
 }
 
+/// Ephemeral approval for the provider work displayed at workflow preflight.
+/// It is intentionally not serializable and must never enter an execution
+/// journal or completed product.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequirementAuthorization {
+    approved: BTreeSet<String>,
+    prepared_providers: BTreeSet<String>,
+}
+
 impl BootstrapOutcome {
     pub fn display(&self) -> String {
         format!(
@@ -159,6 +172,294 @@ pub fn check_target_plan(build_dir: &Path, plan: &BuildPlan) -> Result<CheckOutc
 pub fn prepare_plan(build_dir: &Path, plan: &BuildPlan, yes: bool) -> Result<BootstrapOutcome> {
     let _environment_lock = EnvironmentLock::exclusive()?;
     reconcile_context(&RequirementContext::build(plan, build_dir), yes, "prepare")
+}
+
+/// Reconcile the unified requirement set immediately before its materialise
+/// deadline.  This is deliberately separate from product bootstrap: a plan is
+/// still the authority until a product has been published.
+pub fn prepare_target_plan(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    yes: bool,
+) -> Result<BootstrapOutcome> {
+    prepare_target_plan_until(
+        build_dir,
+        plan,
+        crate::ladder::CoreRung::MaterialiseAfter,
+        yes,
+    )
+}
+
+pub fn prepare_target_plan_until(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    rung: crate::ladder::CoreRung,
+    yes: bool,
+) -> Result<BootstrapOutcome> {
+    ensure_compatible_platform(&plan.target.platform)?;
+    let _environment_lock = EnvironmentLock::exclusive()?;
+    let mut eligible = plan.clone();
+    eligible
+        .requirements
+        .retain(|requirement| plan.ladder.before_or_at(&requirement.when, rung));
+    reconcile_context(
+        &RequirementContext::target_plan(&eligible, build_dir),
+        yes,
+        "materialise",
+    )
+}
+
+pub fn authorize_target_plan(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    yes: bool,
+) -> Result<RequirementAuthorization> {
+    authorize_target_plan_until(
+        build_dir,
+        plan,
+        crate::ladder::CoreRung::MaterialiseAfter,
+        yes,
+    )
+}
+
+pub fn authorize_target_plan_until(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    boundary: crate::ladder::CoreRung,
+    yes: bool,
+) -> Result<RequirementAuthorization> {
+    ensure_compatible_platform(&plan.target.platform)?;
+    let _environment_lock = EnvironmentLock::shared()?;
+    let mut eligible = plan.clone();
+    eligible
+        .requirements
+        .retain(|requirement| plan.ladder.before_or_at(&requirement.when, boundary));
+    let context = RequirementContext::target_plan(&eligible, build_dir);
+    let initial = check_context(&context)?;
+    if initial.operational_failure() {
+        return Err(WombatError::configuration(initial.display()));
+    }
+    let pending = initial
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.status != CheckStatus::Satisfied)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(RequirementAuthorization {
+            approved: BTreeSet::new(),
+            prepared_providers: BTreeSet::new(),
+        });
+    }
+    let pending_providers = pending
+        .iter()
+        .map(|(_, item)| item.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    let preparations = context
+        .preparations
+        .iter()
+        .filter(|operation| pending_providers.contains(operation.provider.as_str()))
+        .collect::<Vec<_>>();
+    preflight(&context, &preparations, &pending)?;
+    eprintln!("materialise will reconcile:");
+    let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
+    for (_, item) in &pending {
+        grouped.entry(&item.provider).or_default().push(item);
+    }
+    for (provider, items) in grouped {
+        eprintln!("  {provider}");
+        for operation in preparations
+            .iter()
+            .filter(|operation| operation.provider == provider)
+        {
+            eprintln!(
+                "    prepare {}{}",
+                operation.description,
+                if operation.elevated {
+                    " (elevated)"
+                } else {
+                    ""
+                }
+            );
+        }
+        for item in items {
+            eprintln!("    {} ({})", item.requirement, item.status.as_str());
+        }
+    }
+    confirm("materialise", yes)?;
+    let requires_elevation = preparations.iter().any(|operation| operation.elevated)
+        || pending
+            .iter()
+            .any(|(index, _)| context.requirements[*index].binding.provider == "apt");
+    if requires_elevation {
+        authorize_elevation(yes)?;
+    }
+    Ok(RequirementAuthorization {
+        approved: pending
+            .into_iter()
+            .map(|(_, item)| item.requirement.clone())
+            .collect(),
+        prepared_providers: BTreeSet::new(),
+    })
+}
+
+pub fn authorize_product_deploy(build_dir: &Path, yes: bool) -> Result<RequirementAuthorization> {
+    let opened = open_build(build_dir)?;
+    ensure_compatible_host(&opened.manifest)?;
+    let _environment_lock = EnvironmentLock::shared()?;
+    let mut manifest = opened.manifest.clone();
+    manifest.requirements.retain(|requirement| {
+        opened
+            .manifest
+            .ladder
+            .at_or_after(&requirement.when, crate::ladder::CoreRung::DeployBefore)
+    });
+    authorize_context(
+        RequirementContext::target_manifest(&manifest, &opened.product_dir),
+        yes,
+        "deploy",
+    )
+}
+
+pub fn prepare_product_deploy_until_authorized(
+    build_dir: &Path,
+    rung: crate::ladder::CoreRung,
+    authorization: &mut RequirementAuthorization,
+) -> Result<BootstrapOutcome> {
+    prepare_product_deploy_at_authorized(build_dir, &rung.into(), authorization)
+}
+
+pub(crate) fn prepare_product_deploy_at_authorized(
+    build_dir: &Path,
+    rung: &crate::ladder::RungId,
+    authorization: &mut RequirementAuthorization,
+) -> Result<BootstrapOutcome> {
+    let opened = open_build(build_dir)?;
+    ensure_compatible_host(&opened.manifest)?;
+    let _environment_lock = EnvironmentLock::exclusive()?;
+    let mut manifest = opened.manifest.clone();
+    manifest.requirements.retain(|requirement| {
+        opened
+            .manifest
+            .ladder
+            .at_or_after(&requirement.when, crate::ladder::CoreRung::DeployBefore)
+            && opened.manifest.ladder.position(&requirement.when)
+                <= opened.manifest.ladder.position(rung)
+    });
+    let context = RequirementContext::target_manifest(&manifest, &opened.product_dir);
+    let current = check_context(&context)?;
+    if current.operational_failure() {
+        return Err(WombatError::configuration(current.display()));
+    }
+    if let Some(item) = current
+        .items
+        .iter()
+        .filter(|item| item.status != CheckStatus::Satisfied)
+        .find(|item| !authorization.approved.contains(&item.requirement))
+    {
+        return Err(WombatError::configuration(format!(
+            "{} became pending after deploy preflight; start a new invocation to approve it",
+            item.requirement
+        )));
+    }
+    reconcile_context_authorized(&context, authorization, "deploy")
+}
+
+fn authorize_context(
+    context: RequirementContext<'_>,
+    yes: bool,
+    operation_name: &str,
+) -> Result<RequirementAuthorization> {
+    let initial = check_context(&context)?;
+    if initial.operational_failure() {
+        return Err(WombatError::configuration(initial.display()));
+    }
+    let pending = initial
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.status != CheckStatus::Satisfied)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(RequirementAuthorization {
+            approved: BTreeSet::new(),
+            prepared_providers: BTreeSet::new(),
+        });
+    }
+    let pending_providers = pending
+        .iter()
+        .map(|(_, item)| item.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    let preparations = context
+        .preparations
+        .iter()
+        .filter(|operation| pending_providers.contains(operation.provider.as_str()))
+        .collect::<Vec<_>>();
+    preflight(&context, &preparations, &pending)?;
+    eprintln!("{operation_name} will reconcile:");
+    for (_, item) in &pending {
+        eprintln!(
+            "  {} via {} ({})",
+            item.requirement,
+            item.provider,
+            item.status.as_str()
+        );
+    }
+    confirm(operation_name, yes)?;
+    if preparations.iter().any(|operation| operation.elevated)
+        || pending
+            .iter()
+            .any(|(index, _)| context.requirements[*index].binding.provider == "apt")
+    {
+        authorize_elevation(yes)?;
+    }
+    Ok(RequirementAuthorization {
+        approved: pending
+            .into_iter()
+            .map(|(_, item)| item.requirement.clone())
+            .collect(),
+        prepared_providers: BTreeSet::new(),
+    })
+}
+
+pub fn prepare_target_plan_until_authorized(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    rung: crate::ladder::CoreRung,
+    authorization: &mut RequirementAuthorization,
+) -> Result<BootstrapOutcome> {
+    prepare_target_plan_at_authorized(build_dir, plan, &rung.into(), authorization)
+}
+
+pub(crate) fn prepare_target_plan_at_authorized(
+    build_dir: &Path,
+    plan: &BuildPlan,
+    rung: &crate::ladder::RungId,
+    authorization: &mut RequirementAuthorization,
+) -> Result<BootstrapOutcome> {
+    ensure_compatible_platform(&plan.target.platform)?;
+    let _environment_lock = EnvironmentLock::exclusive()?;
+    let mut eligible = plan.clone();
+    eligible.requirements.retain(|requirement| {
+        plan.ladder.position(&requirement.when) <= plan.ladder.position(rung)
+    });
+    let context = RequirementContext::target_plan(&eligible, build_dir);
+    let current = check_context(&context)?;
+    if current.operational_failure() {
+        return Err(WombatError::configuration(current.display()));
+    }
+    let newly_pending = current
+        .items
+        .iter()
+        .filter(|item| item.status != CheckStatus::Satisfied)
+        .find(|item| !authorization.approved.contains(&item.requirement));
+    if let Some(item) = newly_pending {
+        return Err(WombatError::configuration(format!(
+            "{} became pending after materialise preflight; start a new invocation to approve it",
+            item.requirement
+        )));
+    }
+    reconcile_context_authorized(&context, authorization, "materialise")
 }
 
 pub fn bootstrap(build_dir: &Path, yes: bool) -> Result<BootstrapOutcome> {
@@ -198,6 +499,23 @@ fn reconcile_context(
     yes: bool,
     operation_name: &str,
 ) -> Result<BootstrapOutcome> {
+    reconcile_context_inner(context, yes, operation_name, None)
+}
+
+fn reconcile_context_authorized(
+    context: &RequirementContext<'_>,
+    authorization: &mut RequirementAuthorization,
+    operation_name: &str,
+) -> Result<BootstrapOutcome> {
+    reconcile_context_inner(context, true, operation_name, Some(authorization))
+}
+
+fn reconcile_context_inner(
+    context: &RequirementContext<'_>,
+    yes: bool,
+    operation_name: &str,
+    mut authorization: Option<&mut RequirementAuthorization>,
+) -> Result<BootstrapOutcome> {
     let initial = check_context(context)?;
     if initial.operational_failure() {
         return Err(WombatError::configuration(initial.display()));
@@ -227,6 +545,13 @@ fn reconcile_context(
         .preparations
         .iter()
         .filter(|operation| pending_providers.contains(operation.provider.as_str()))
+        .filter(|operation| {
+            authorization.as_ref().is_none_or(|authorization| {
+                !authorization
+                    .prepared_providers
+                    .contains(&operation.provider)
+            })
+        })
         .collect::<Vec<_>>();
     preflight(context, &preparations, &pending)?;
     eprintln!("{operation_name} will reconcile:");
@@ -254,22 +579,8 @@ fn reconcile_context(
             eprintln!("    {} ({})", item.requirement, item.status.as_str());
         }
     }
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            return Err(WombatError::configuration(format!(
-                "{operation_name} requires --yes when standard input is not a terminal"
-            )));
-        }
-        eprint!("continue? [y/N] ");
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|error| WombatError::io("standard input", error))?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-            return Err(WombatError::configuration(format!(
-                "{operation_name} cancelled"
-            )));
-        }
+    if authorization.is_none() {
+        confirm(operation_name, yes)?;
     }
 
     let requires_elevation = preparations.iter().any(|operation| operation.elevated)
@@ -302,6 +613,11 @@ fn reconcile_context(
             "prepare:{}:{}",
             operation.provider, operation.identity
         ));
+        if let Some(authorization) = authorization.as_deref_mut() {
+            authorization
+                .prepared_providers
+                .insert(operation.provider.clone());
+        }
     }
     for (pending_index, (index, item)) in pending.iter().enumerate() {
         let requirement = &context.requirements[*index];
@@ -346,6 +662,28 @@ fn reconcile_context(
             .map(|item| item.requirement.clone())
             .collect(),
     })
+}
+
+fn confirm(operation_name: &str, yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(WombatError::configuration(format!(
+            "{operation_name} requires --yes when standard input is not a terminal"
+        )));
+    }
+    eprint!("continue? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| WombatError::io("standard input", error))?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+        return Err(WombatError::configuration(format!(
+            "{operation_name} cancelled"
+        )));
+    }
+    Ok(())
 }
 
 fn check_context(context: &RequirementContext<'_>) -> Result<CheckOutcome> {
@@ -1072,7 +1410,7 @@ fn ensure_compatible_host(manifest: &Manifest) -> Result<()> {
 
 fn ensure_compatible_platform(platform: &crate::context::TargetPlatform) -> Result<()> {
     let host = HostContext::observe()?;
-    if host.platform.os.name != platform.os.name || host.platform.arch != platform.arch {
+    if !platform.locally_compatible_with(&host.platform) {
         return Err(WombatError::configuration(format!(
             "requirements target {}, but this execution environment is {}; check and bootstrap require an exact local OS and architecture",
             platform.compact(),

@@ -8,14 +8,14 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use globset::{Glob, GlobSetBuilder};
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value};
 use sha2::{Digest, Sha256};
 
-use crate::context::{
-    HostContext, OperatingSystemName, ResolvedTarget, TargetOrigin, TargetPlatform,
-};
+use crate::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
 use crate::frozen::FrozenValue;
 use crate::inputs::{self, InputSpec};
+use crate::ladder::{CoreRung, ExecutionLadder, LadderRung, RungId};
 use crate::manifest::{
     ArtifactKind, ArtifactNotice, ArtifactNoticeKind, ArtifactPolicy, ArtifactSelection,
     ArtifactSelectionKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact,
@@ -23,9 +23,10 @@ use crate::manifest::{
     MAX_SOURCE_TRACE_FRAMES, ManifestModule, ModuleSourceBase, Observation, ObservationSubject,
     ProcessEnvironmentChange, ProcessInvocation, ProcessObservation, Provider, ProviderBinding,
     ProviderOrigin, ProviderPreparation, Publications, Requirement, RequirementCandidate,
-    RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome, SourceFile,
-    SourceLocation, SourceOrigin, SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner,
-    TaskRunnerFamily, TaskTargetRoot,
+    RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome, Script,
+    ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
+    SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskRunnerFamily,
+    TaskTargetRoot,
 };
 use crate::path::{
     infer_target, infer_target_root, parse_explicit_target, parse_explicit_target_root,
@@ -131,11 +132,11 @@ struct RuntimeState {
     dependencies: BTreeSet<Dependency>,
     providers: Vec<Provider>,
     requirements: Vec<Requirement>,
-    build_providers: Vec<Provider>,
-    build_providers_declared: bool,
-    build_requirements: Vec<Requirement>,
     task_interpreters: BTreeMap<String, TaskRunner>,
     tasks: Vec<EvaluatedTask>,
+    scripts: Vec<Script>,
+    ladder: Option<ExecutionLadder>,
+    next_action_order: u64,
     artifacts: Vec<EvaluatedArtifact>,
     directories: Vec<EvaluatedDirectory>,
     artifact_policy: ArtifactPolicy,
@@ -251,11 +252,11 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         dependencies: BTreeSet::new(),
         providers: Vec::new(),
         requirements: Vec::new(),
-        build_providers: Vec::new(),
-        build_providers_declared: false,
-        build_requirements: Vec::new(),
         task_interpreters: options.task_interpreters,
         tasks: Vec::new(),
+        scripts: Vec::new(),
+        ladder: None,
+        next_action_order: 0,
         artifacts: Vec::new(),
         directories: Vec::new(),
         artifact_policy,
@@ -326,14 +327,12 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     evaluate_selected_modules(&lua, &state)?;
     validate_dependency_cycles(&state.borrow())?;
     validate_artifact_conflicts(&state.borrow().artifacts)?;
-    let preparations = plan_provider_preparations(&state, false)?;
-    let build_preparations = plan_provider_preparations(&state, true)?;
+    let preparations = plan_provider_preparations(&state)?;
 
     Ok(EvaluationOutcome::Manifest(Box::new(build_manifest(
         &state.borrow(),
-        build_preparations,
         preparations,
-    ))))
+    )?)))
 }
 
 fn configure_package_path(lua: &Lua, root: &Path, state: Rc<RefCell<RuntimeState>>) -> Result<()> {
@@ -489,18 +488,7 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
         "configure_providers",
         lua.create_function(move |lua, entries: Value| {
             let location = caller_location(lua, &providers_state);
-            configure_providers(&providers_state, entries, location, false)
-                .map_err(mlua::Error::external)
-        })?,
-    )?;
-
-    let build_providers_state = Rc::clone(&state);
-    native.set(
-        "configure_build_providers",
-        lua.create_function(move |lua, entries: Value| {
-            let location = caller_location(lua, &build_providers_state);
-            configure_providers(&build_providers_state, entries, location, true)
-                .map_err(mlua::Error::external)
+            configure_providers(&providers_state, entries, location).map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -519,30 +507,6 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
                         options,
                         preferred,
                         location,
-                        build_scope: false,
-                    },
-                )
-                .map_err(mlua::Error::external)
-            },
-        )?,
-    )?;
-
-    let build_requirement_state = Rc::clone(&state);
-    native.set(
-        "declare_build_requirement",
-        lua.create_function(
-            move |lua, (kind, name, options, preferred): (String, String, Value, bool)| {
-                let location = caller_location(lua, &build_requirement_state);
-                declare_requirement(
-                    lua,
-                    &build_requirement_state,
-                    RequirementDeclaration {
-                        kind: &kind,
-                        name: &name,
-                        options,
-                        preferred,
-                        location,
-                        build_scope: true,
                     },
                 )
                 .map_err(mlua::Error::external)
@@ -560,6 +524,27 @@ fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> Result<T
                     .map_err(mlua::Error::external)
             },
         )?,
+    )?;
+
+    let script_state = Rc::clone(&state);
+    native.set(
+        "declare_script",
+        lua.create_function(
+            move |lua, (entrypoint, params, options): (String, Value, Value)| {
+                let location = caller_location(lua, &script_state);
+                declare_script(lua, &script_state, &entrypoint, params, options, location)
+                    .map_err(mlua::Error::external)
+            },
+        )?,
+    )?;
+
+    let ladder_state = Rc::clone(&state);
+    native.set(
+        "declare_ladder",
+        lua.create_function(move |lua, (name, rungs): (String, Value)| {
+            let location = caller_location(lua, &ladder_state);
+            declare_ladder(&ladder_state, &name, rungs, location).map_err(mlua::Error::external)
+        })?,
     )?;
 
     let generated_state = Rc::clone(&state);
@@ -1549,7 +1534,6 @@ fn configure_providers(
     state: &Rc<RefCell<RuntimeState>>,
     entries: Value,
     location: Location,
-    build_scope: bool,
 ) -> Result<()> {
     let frozen = FrozenValue::from_lua(entries)?;
     let values = match frozen {
@@ -1567,50 +1551,30 @@ fn configure_providers(
         if state.active_module().is_some() {
             return Err(WombatError::configuration(format!(
                 "{} belongs to root policy at {}",
-                if build_scope {
-                    "w.build.providers()"
-                } else {
-                    "w.providers()"
-                },
+                "w.providers()",
                 location.display()
             )));
         }
-        let already_declared = if build_scope {
-            state.build_providers_declared
-        } else {
-            !state.providers.is_empty()
-        };
+        let already_declared = !state.providers.is_empty();
         if already_declared {
             return Err(WombatError::configuration(format!(
                 "{} may be declared only once; repeated at {}",
-                if build_scope {
-                    "w.build.providers()"
-                } else {
-                    "w.providers()"
-                },
+                "w.providers()",
                 location.display()
             )));
         }
         if !state.modules.is_empty()
             || !state.artifacts.is_empty()
             || !state.requirements.is_empty()
-            || !state.build_requirements.is_empty()
             || !state.tasks.is_empty()
         {
             return Err(WombatError::configuration(format!(
                 "{} must run before use(), using(), install(), need(), generate(), or build.task() at {}",
-                if build_scope {
-                    "w.build.providers()"
-                } else {
-                    "w.providers()"
-                },
+                "w.providers()",
                 location.display()
             )));
         }
         state.root_policy_started = true;
-        if build_scope {
-            state.build_providers_declared = true;
-        }
         state.root.clone()
     };
 
@@ -1695,11 +1659,7 @@ fn configure_providers(
         .filter(|provider| matches!(provider.origin, ProviderOrigin::Custom { .. }))
         .map(|provider| provider.name.clone())
         .collect::<Vec<_>>();
-    if build_scope {
-        state.borrow_mut().build_providers = configured;
-    } else {
-        state.borrow_mut().providers = configured;
-    }
+    state.borrow_mut().providers = configured;
     for name in custom_names {
         validate_custom_provider(state, &name)?;
         record_provider_sources(state, &name)?;
@@ -1713,7 +1673,6 @@ struct RequirementDeclaration<'a> {
     options: Value,
     preferred: bool,
     location: Location,
-    build_scope: bool,
 }
 
 fn declare_requirement(
@@ -1727,7 +1686,6 @@ fn declare_requirement(
         options,
         preferred,
         location,
-        build_scope,
     } = declaration;
     let options = if options.is_nil() {
         FrozenValue::empty_map()
@@ -1736,8 +1694,7 @@ fn declare_requirement(
     };
     let FrozenValue::Map(mut options) = options else {
         return Err(WombatError::configuration(format!(
-            "w.{}{}.{}() options must be a table",
-            if build_scope { "build." } else { "" },
+            "w.{}.{}() options must be a table",
             if preferred { "prefer" } else { "need" },
             kind
         )));
@@ -1757,6 +1714,15 @@ fn declare_requirement(
         &mut options,
         false,
     )?];
+    let when = match options.remove("when") {
+        None => CoreRung::MaterialiseBefore.into(),
+        Some(FrozenValue::String(value)) => RungId::new(value)?,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "requirement `when` must be a w.rungs handle or canonical rung string",
+            ));
+        }
+    };
     if let Some(accept) = options.remove("accept") {
         if !preferred {
             return Err(WombatError::configuration(
@@ -1810,23 +1776,12 @@ fn declare_requirement(
     }
     reject_unknown_options(&options, "requirement")?;
 
-    ensure_build_provider_defaults(state, &location, build_scope)?;
     let (owner, providers, target) = {
         let mut state = state.borrow_mut();
-        let providers = if build_scope {
-            state.build_providers.clone()
-        } else {
-            state.providers.clone()
-        };
+        let providers = state.providers.clone();
         if providers.is_empty() {
             return Err(WombatError::configuration(format!(
-                "{} requirements need provider policy; call {} before {} at {}",
-                if build_scope { "build" } else { "target" },
-                if build_scope {
-                    "w.build.providers()"
-                } else {
-                    "w.providers()"
-                },
+                "requirements need provider policy; call w.providers() before {} at {}",
                 if preferred { "w.prefer()" } else { "w.need()" },
                 location.display()
             )));
@@ -1837,11 +1792,7 @@ fn declare_requirement(
         (
             state.active_module().unwrap_or(ROOT_MODULE).to_string(),
             providers,
-            if build_scope {
-                state.host.platform.clone()
-            } else {
-                effective_target(&state)
-            },
+            effective_target(&state),
         )
     };
 
@@ -1923,66 +1874,11 @@ fn declare_requirement(
         selected: selected_index,
         choice,
         binding,
+        when,
     };
     let handle = resolved_requirement_handle(&requirement);
-    if build_scope {
-        state.borrow_mut().build_requirements.push(requirement);
-    } else {
-        state.borrow_mut().requirements.push(requirement);
-    }
+    state.borrow_mut().requirements.push(requirement);
     readonly_frozen(lua, handle).map_err(WombatError::from)
-}
-
-fn ensure_build_provider_defaults(
-    state: &Rc<RefCell<RuntimeState>>,
-    location: &Location,
-    build_scope: bool,
-) -> Result<()> {
-    if !build_scope {
-        return Ok(());
-    }
-    let mut state = state.borrow_mut();
-    if state.build_providers_declared || !state.build_providers.is_empty() {
-        return Ok(());
-    }
-    let (name, config) = match state.host.platform.os.name {
-        OperatingSystemName::Macos => ("brew", FrozenValue::empty_map()),
-        OperatingSystemName::Linux => {
-            let debian = state
-                .host
-                .platform
-                .os
-                .distribution
-                .as_ref()
-                .is_some_and(|distribution| {
-                    matches!(distribution.id.as_str(), "debian" | "ubuntu")
-                        || distribution.id_like.iter().any(|id| id == "debian")
-                });
-            if !debian {
-                return Err(WombatError::configuration(format!(
-                    "cannot infer a host build provider for Linux distribution at {}; call w.build.providers() explicitly",
-                    location.display()
-                )));
-            }
-            (
-                "apt",
-                FrozenValue::Map(BTreeMap::from([(
-                    "update".to_string(),
-                    FrozenValue::Boolean(true),
-                )])),
-            )
-        }
-    };
-    state.build_providers.push(Provider {
-        name: name.to_string(),
-        priority: 0,
-        config,
-        origin: ProviderOrigin::Builtin {
-            contract_version: 1,
-        },
-        declared_at: location.trace.clone(),
-    });
-    Ok(())
 }
 
 fn parse_requirement_candidate(
@@ -2218,26 +2114,13 @@ fn validate_custom_provider(state: &Rc<RefCell<RuntimeState>>, name: &str) -> Re
 
 fn plan_provider_preparations(
     state: &Rc<RefCell<RuntimeState>>,
-    build_scope: bool,
 ) -> Result<Vec<ProviderPreparation>> {
     let (providers, requirements, target) = {
         let state = state.borrow();
         (
-            if build_scope {
-                state.build_providers.clone()
-            } else {
-                state.providers.clone()
-            },
-            if build_scope {
-                state.build_requirements.clone()
-            } else {
-                state.requirements.clone()
-            },
-            if build_scope {
-                state.host.platform.clone()
-            } else {
-                effective_target(&state)
-            },
+            state.providers.clone(),
+            state.requirements.clone(),
+            effective_target(&state),
         )
     };
     let mut preparations = Vec::new();
@@ -2479,20 +2362,6 @@ fn record_provider_sources(state: &Rc<RefCell<RuntimeState>>, provider_name: &st
         } = &mut configured.origin
         {
             *configured_files = files.clone();
-        }
-    }
-    if let Some(configured) = state
-        .build_providers
-        .iter_mut()
-        .find(|provider| provider.name == provider_name)
-    {
-        found = true;
-        if let ProviderOrigin::Custom {
-            files: configured_files,
-            ..
-        } = &mut configured.origin
-        {
-            *configured_files = files;
         }
     }
     debug_assert!(found, "resolved provider is configured");
@@ -3036,6 +2905,15 @@ fn declare_task(
             ));
         }
     };
+    let at = match options.remove("at") {
+        None => CoreRung::MaterialiseTasks.into(),
+        Some(FrozenValue::String(value)) => RungId::new(value)?,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "task `at` must be a w.rungs handle or canonical rung string",
+            ));
+        }
+    };
 
     let root = state.borrow().root.clone();
     let absolute = root.join("tasks").join(entrypoint);
@@ -3059,17 +2937,19 @@ fn declare_task(
         && runner.family != TaskRunnerFamily::Direct
         && !command.contains('/')
         && !command.contains('\\')
+        && !state.borrow().providers.is_empty()
     {
+        let requirement_options = lua.create_table()?;
+        requirement_options.set("when", at.id())?;
         let _ = declare_requirement(
             lua,
             state,
             RequirementDeclaration {
                 kind: "command",
                 name: command,
-                options: Value::Nil,
+                options: Value::Table(requirement_options),
                 preferred: false,
                 location: location.clone(),
-                build_scope: true,
             },
         )?;
     }
@@ -3105,10 +2985,13 @@ fn declare_task(
         path: root.path,
         origin: root.origin,
     });
+    let declaration_order = state.next_action_order;
+    state.next_action_order += 1;
     state.root_policy_started = true;
     state.tasks.push(EvaluatedTask {
         task: Task {
             identity,
+            declaration_order,
             owner,
             entrypoint: format!("tasks/{entrypoint}"),
             entrypoint_digest,
@@ -3117,6 +3000,7 @@ fn declare_task(
             python_helper,
             logs,
             cache,
+            at,
             target_root,
             declared_at: location.trace,
             outputs: Vec::new(),
@@ -3124,6 +3008,369 @@ fn declare_task(
         fingerprint,
     });
     Ok(())
+}
+
+fn declare_ladder(
+    state: &Rc<RefCell<RuntimeState>>,
+    name: &str,
+    rungs: Value,
+    location: Location,
+) -> Result<()> {
+    let frozen = FrozenValue::from_lua(rungs)?;
+    let roots = parse_ladder_rungs(frozen, "ladder")?;
+    let ladder = ExecutionLadder::new(name.to_string(), roots)
+        .map_err(|error| error.with_note(format!("declared at {}", location.display())))?;
+    let mut state = state.borrow_mut();
+    if state.active_module().is_some() {
+        return Err(WombatError::configuration(format!(
+            "w.ladder() may only be called from root configuration at {}",
+            location.display()
+        )));
+    }
+    if state.ladder.is_some() {
+        return Err(WombatError::configuration(format!(
+            "root configuration selects more than one ladder at {}",
+            location.display()
+        )));
+    }
+    state.root_policy_started = true;
+    state.ladder = Some(ladder);
+    Ok(())
+}
+
+fn parse_ladder_rungs(value: FrozenValue, subject: &str) -> Result<Vec<LadderRung>> {
+    let values = match value {
+        FrozenValue::Array(values) => values,
+        FrozenValue::Map(values) if values.is_empty() => Vec::new(),
+        _ => {
+            return Err(WombatError::configuration(format!(
+                "{subject} rungs must be an array"
+            )));
+        }
+    };
+    values
+        .into_iter()
+        .map(|value| {
+            let FrozenValue::Map(mut node) = value else {
+                return Err(WombatError::configuration(format!(
+                    "{subject} entries must be rung values"
+                )));
+            };
+            let id = RungId::new(take_string(&mut node, "id", "ladder rung")?)?;
+            let children = parse_ladder_rungs(
+                node.remove("children")
+                    .unwrap_or_else(|| FrozenValue::Array(Vec::new())),
+                "nested ladder",
+            )?;
+            reject_unknown_options(&node, "ladder rung")?;
+            Ok(LadderRung { id, children })
+        })
+        .collect()
+}
+
+fn declare_script(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    entrypoint: &str,
+    params: Value,
+    options: Value,
+    location: Location,
+) -> Result<()> {
+    validate_relative_path(entrypoint, "script entrypoint")?;
+    let params = FrozenValue::from_lua(params)?;
+    if !matches!(params, FrozenValue::Map(_)) {
+        return Err(WombatError::configuration(
+            "w.script() params must be a string-keyed table",
+        ));
+    }
+    if serde_json::to_vec(&params)?.len() > 64 * 1024 {
+        return Err(WombatError::configuration(
+            "w.script() params exceed the 64 KiB argv limit; pass large or binary inputs through files",
+        ));
+    }
+    let FrozenValue::Map(mut options) = FrozenValue::from_lua(options)? else {
+        return Err(WombatError::configuration(
+            "w.script() options must be a table",
+        ));
+    };
+    let name = take_optional_string(&mut options, "name", "script")?;
+    if let Some(name) = &name
+        && (name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    {
+        return Err(WombatError::configuration(format!(
+            "script name `{name}` is invalid; expected ASCII letters, numbers, `-`, or `_`"
+        )));
+    }
+    let at = match options.remove("at") {
+        None => CoreRung::MaterialiseBefore.into(),
+        Some(FrozenValue::String(value)) => RungId::new(value)?,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `at` must be a rung handle or canonical rung string",
+            ));
+        }
+    };
+    let schedule = match options.remove("schedule") {
+        None => ScriptSchedule::Always,
+        Some(FrozenValue::String(value)) if value == "always" => ScriptSchedule::Always,
+        Some(FrozenValue::String(value)) if value == "once" => ScriptSchedule::Once,
+        Some(FrozenValue::String(value)) if value == "onchange" => ScriptSchedule::Onchange,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `schedule` must be `always`, `once`, or `onchange`",
+            ));
+        }
+    };
+    let scope = match options.remove("scope") {
+        None => ScriptScope::Target,
+        Some(FrozenValue::String(value)) if value == "target" => ScriptScope::Target,
+        Some(FrozenValue::String(value)) if value == "host" => ScriptScope::Host,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `scope` must be `target` or `host`",
+            ));
+        }
+    };
+    let python_helper = match options.remove("python_helper") {
+        None | Some(FrozenValue::Boolean(true)) => true,
+        Some(FrozenValue::Boolean(false)) => false,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `python_helper` must be boolean",
+            ));
+        }
+    };
+    let logs = match options.remove("logs") {
+        None => TaskLogPolicy::Failure,
+        Some(FrozenValue::String(value)) if value == "failure" => TaskLogPolicy::Failure,
+        Some(FrozenValue::String(value)) if value == "always" => TaskLogPolicy::Always,
+        Some(FrozenValue::String(value)) if value == "never" => TaskLogPolicy::Never,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `logs` must be `failure`, `always`, or `never`",
+            ));
+        }
+    };
+    let files = match options.remove("files") {
+        None => Vec::new(),
+        Some(FrozenValue::Array(values)) => values
+            .into_iter()
+            .map(|value| match value {
+                FrozenValue::String(value) => Ok(value),
+                _ => Err(WombatError::configuration(
+                    "script `files` entries must be strings",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `files` must be an array",
+            ));
+        }
+    };
+    let revision = take_optional_string(&mut options, "revision", "script")?;
+    let env = match options.remove("env") {
+        None => BTreeMap::new(),
+        Some(FrozenValue::Map(values)) => values
+            .into_iter()
+            .map(|(key, value)| match value {
+                FrozenValue::String(value) if !key.contains('=') && !key.contains('\0') => {
+                    Ok((key, value))
+                }
+                _ => Err(WombatError::configuration(
+                    "script `env` must map valid names to strings",
+                )),
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `env` must be a string map",
+            ));
+        }
+    };
+    let timeout_seconds = match options.remove("timeout") {
+        None => None,
+        Some(FrozenValue::Integer(value)) if value > 0 => Some(
+            u64::try_from(value)
+                .map_err(|_| WombatError::configuration("script timeout is too large"))?,
+        ),
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "script `timeout` must be a positive integer number of seconds",
+            ));
+        }
+    };
+
+    let root = state.borrow().root.clone();
+    let scripts_root = root.join("scripts");
+    let absolute = scripts_root.join(entrypoint);
+    validate_source_components(&root, &absolute)?;
+    fingerprint_regular_file(&absolute).map_err(|error| {
+        error.with_note(format!(
+            "script `{entrypoint}` must be a regular file beneath `scripts/`"
+        ))
+    })?;
+    let runner = parse_task_runner(
+        entrypoint,
+        options.remove("interpreter"),
+        &absolute,
+        &state.borrow().task_interpreters,
+    )?;
+    reject_unknown_options(&options, "script")?;
+    let payloads = collect_script_payloads(&root, entrypoint, &files)?;
+
+    if let Some(command) = runner.command.as_deref()
+        && runner.family != TaskRunnerFamily::Direct
+        && !command.contains('/')
+        && !command.contains('\\')
+        && !state.borrow().providers.is_empty()
+    {
+        let requirement_options = lua.create_table()?;
+        requirement_options.set("when", at.id())?;
+        let _ = declare_requirement(
+            lua,
+            state,
+            RequirementDeclaration {
+                kind: "command",
+                name: command,
+                options: Value::Table(requirement_options),
+                preferred: false,
+                location: location.clone(),
+            },
+        )?;
+    }
+
+    let mut state = state.borrow_mut();
+    let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
+    let identity = format!(
+        "{}:{}{}:{}:{}",
+        owner,
+        entrypoint,
+        name.as_ref()
+            .map(|value| format!("#{value}"))
+            .unwrap_or_default(),
+        match scope {
+            ScriptScope::Target => "target",
+            ScriptScope::Host => "host",
+        },
+        at.id(),
+    );
+    if state
+        .scripts
+        .iter()
+        .any(|script| script.identity == identity)
+    {
+        return Err(WombatError::configuration(format!(
+            "script `{identity}` is declared more than once; add a unique `name` option"
+        )));
+    }
+    let declaration_order = state.next_action_order;
+    state.next_action_order += 1;
+    state.root_policy_started = true;
+    state.scripts.push(Script {
+        identity,
+        declaration_order,
+        owner,
+        entrypoint: format!("scripts/{entrypoint}"),
+        params,
+        runner,
+        python_helper,
+        logs,
+        at,
+        schedule,
+        scope,
+        payloads,
+        revision,
+        env,
+        timeout_seconds,
+        declared_at: location.trace,
+    });
+    Ok(())
+}
+
+fn collect_script_payloads(
+    root: &Path,
+    entrypoint: &str,
+    patterns: &[String],
+) -> Result<Vec<ScriptPayload>> {
+    const MAX_SCRIPT_FILES: usize = 4_096;
+    const MAX_SCRIPT_FILE_SIZE: u64 = 16 * 1024 * 1024;
+    let scripts_root = root.join("scripts");
+    let mut selected = BTreeSet::from([entrypoint.to_string()]);
+    if !patterns.is_empty() {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            validate_relative_path(pattern, "script companion pattern")?;
+            builder.add(Glob::new(pattern).map_err(|error| {
+                WombatError::configuration(format!(
+                    "invalid script companion glob `{pattern}`: {error}"
+                ))
+            })?);
+        }
+        let matcher = builder.build().map_err(|error| {
+            WombatError::configuration(format!("invalid script companion globs: {error}"))
+        })?;
+        let mut pending = vec![scripts_root.clone()];
+        while let Some(directory) = pending.pop() {
+            let mut entries = fs::read_dir(&directory)
+                .map_err(|error| WombatError::io(&directory, error))?
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|error| WombatError::io(&directory, error))?;
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let metadata =
+                    fs::symlink_metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+                if metadata.file_type().is_symlink() {
+                    return Err(WombatError::configuration(format!(
+                        "script payload `{}` must not be a symbolic link",
+                        path.display()
+                    )));
+                }
+                if metadata.is_dir() {
+                    pending.push(path);
+                } else if metadata.is_file() {
+                    let relative = path
+                        .strip_prefix(&scripts_root)
+                        .expect("walk remains in scripts")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if matcher.is_match(&relative) {
+                        selected.insert(relative);
+                    }
+                }
+            }
+        }
+    }
+    if selected.len() > MAX_SCRIPT_FILES {
+        return Err(WombatError::configuration(
+            "script payload exceeds 4096 files",
+        ));
+    }
+    selected
+        .into_iter()
+        .map(|relative| {
+            let path = scripts_root.join(&relative);
+            validate_source_components(root, &path)?;
+            let metadata = fs::metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+            if !metadata.is_file() || metadata.len() > MAX_SCRIPT_FILE_SIZE {
+                return Err(WombatError::configuration(format!(
+                    "script payload `{relative}` must be a regular file no larger than 16 MiB"
+                )));
+            }
+            let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+            Ok(ScriptPayload {
+                source: format!("scripts/{relative}"),
+                relative,
+                digest: digest_bytes(&bytes),
+                size: metadata.len(),
+                executable: source_executable(&path)?,
+            })
+        })
+        .collect()
 }
 
 fn parse_task_runner(
@@ -3836,9 +4083,8 @@ fn visit_dependency<'a>(
 
 fn build_manifest(
     state: &RuntimeState,
-    build_preparations: Vec<ProviderPreparation>,
     preparations: Vec<ProviderPreparation>,
-) -> EvaluatedManifest {
+) -> Result<EvaluatedManifest> {
     let modules = state
         .modules
         .iter()
@@ -3871,8 +4117,21 @@ fn build_manifest(
             .then_with(|| left.declared_at.cmp(&right.declared_at))
     });
 
-    EvaluatedManifest {
+    let ladder = state.ladder.clone().unwrap_or_default();
+    validate_ladder_actions(&ladder, &state.requirements, &state.tasks, &state.scripts)?;
+    let requirements = normalize_requirements(state.requirements.clone(), &ladder)?;
+    let project_identity = digest_bytes(state.root.to_string_lossy().as_bytes());
+    Ok(EvaluatedManifest {
         plan_id: String::new(),
+        project_arguments: state
+            .project_arguments
+            .iter()
+            .map(|argument| {
+                argument.to_str().map(str::to_owned).ok_or_else(|| {
+                    WombatError::configuration("project arguments must be valid UTF-8")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
         sources: state
             .sources
             .values()
@@ -3884,19 +4143,127 @@ fn build_manifest(
         process_observations: state.process_observations.clone(),
         modules,
         dependencies,
-        build_providers: state.build_providers.clone(),
-        build_requirements: state.build_requirements.clone(),
-        build_preparations,
+        project_identity,
+        ladder,
         providers: state.providers.clone(),
-        requirements: state.requirements.clone(),
+        requirements,
         preparations,
         tasks: state.tasks.clone(),
+        scripts: state.scripts.clone(),
+        script_outcomes: Vec::new(),
         artifact_policy: state.artifact_policy,
         artifact_notices: state.artifact_notices.clone(),
         artifact_selections: state.artifact_selections.clone(),
         artifacts,
         directories,
+    })
+}
+
+fn normalize_requirements(
+    mut requirements: Vec<Requirement>,
+    ladder: &ExecutionLadder,
+) -> Result<Vec<Requirement>> {
+    requirements.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| {
+                left.candidates[left.selected as usize]
+                    .name()
+                    .cmp(right.candidates[right.selected as usize].name())
+            })
+            .then_with(|| left.binding.provider.cmp(&right.binding.provider))
+            .then_with(|| left.binding.identity.cmp(&right.binding.identity))
+            .then_with(|| left.declared_at.cmp(&right.declared_at))
+    });
+    let mut normalized: Vec<Requirement> = Vec::new();
+    for requirement in requirements {
+        let same = normalized.last().is_some_and(|previous| {
+            previous.kind == requirement.kind
+                && previous.candidates[previous.selected as usize].name()
+                    == requirement.candidates[requirement.selected as usize].name()
+                && previous.binding.provider == requirement.binding.provider
+                && previous.binding.identity == requirement.binding.identity
+        });
+        if same {
+            let previous = normalized.last_mut().expect("same requirement exists");
+            if previous.candidates != requirement.candidates
+                || previous.choice != requirement.choice
+            {
+                return Err(WombatError::configuration(format!(
+                    "conflicting requirement declarations for {} through `{}` at {} and {}",
+                    requirement.candidates[requirement.selected as usize].name(),
+                    requirement.binding.provider,
+                    previous.declared_at,
+                    requirement.declared_at,
+                )));
+            }
+            if ladder.position(&requirement.when) < ladder.position(&previous.when) {
+                previous.when = requirement.when;
+            }
+        } else {
+            normalized.push(requirement);
+        }
     }
+    Ok(normalized)
+}
+
+fn validate_ladder_actions(
+    ladder: &ExecutionLadder,
+    requirements: &[Requirement],
+    tasks: &[EvaluatedTask],
+    scripts: &[Script],
+) -> Result<()> {
+    let mut used = BTreeSet::new();
+    for (kind, id, location) in requirements
+        .iter()
+        .map(|value| ("requirement", &value.when, &value.declared_at))
+        .chain(
+            tasks
+                .iter()
+                .map(|value| ("task", &value.task.at, &value.task.declared_at)),
+        )
+        .chain(
+            scripts
+                .iter()
+                .map(|value| ("script", &value.at, &value.declared_at)),
+        )
+    {
+        if !ladder.contains(id) {
+            return Err(WombatError::configuration(format!(
+                "{kind} targets unknown rung `{id}` at {location}"
+            )));
+        }
+        if ladder.is_container(id) {
+            return Err(WombatError::configuration(format!(
+                "{kind} cannot target container rung `{id}` at {location}"
+            )));
+        }
+        used.insert(id.clone());
+    }
+    let first_task: RungId = CoreRung::MaterialiseBefore.into();
+    let last_task: RungId = CoreRung::MaterialiseArtifacts.into();
+    let first = ladder.position(&first_task).expect("fixed rung exists");
+    let last = ladder.position(&last_task).expect("fixed rung exists");
+    for task in tasks {
+        let position = ladder
+            .position(&task.task.at)
+            .expect("task rung was validated");
+        if position < first || position > last {
+            return Err(WombatError::configuration(format!(
+                "task `{}` rung `{}` must be between materialise.before and materialise.artifacts",
+                task.task.identity, task.task.at
+            )));
+        }
+    }
+    for rung in &ladder.flattened {
+        if rung.core.is_none() && !ladder.is_container(&rung.id) && !used.contains(&rung.id) {
+            return Err(WombatError::configuration(format!(
+                "custom leaf rung `{}` has no actions",
+                rung.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_module_name(name: &str) -> Result<()> {

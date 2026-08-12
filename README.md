@@ -10,7 +10,8 @@ exact plan without running Lua again. `build` composes those stages. `inspect`,
 `explain`, `compare`, `diff`, and `check` make exact completed products
 understandable without evaluating Lua. `add` is an explicit authoring command
 that copies one existing target file or regular-file directory tree into Wombat
-source state. Deployment and fresh-machine workflows return in Plan 0013.
+source state. `apply` composes construction, materialisation, local bring-up,
+and guarded deployment; `setup` adds safe repository acquisition.
 
 ## Repository shape
 
@@ -140,10 +141,10 @@ or configure it in `$XDG_CONFIG_HOME/wombat/config.toml` (falling back to
 `~/.config/wombat/config.toml`):
 
 ```toml
-format_version = 1
+format_version = 2
 repository = "~/dotfiles"
 
-[tasks.interpreters.python]
+[runners.python]
 command = "~/.venvs/wombat/bin/python"
 args = []
 ```
@@ -170,23 +171,22 @@ holds locking, staging, ownership, and recovery state. Rebuilding is staged and
 verified before publication; it reports whether the product was created,
 updated, unchanged, or repaired.
 
-## Construction plans and tasks
+## Construction plans, ladders, tasks, and scripts
 
 Lua evaluation freezes a versioned build plan before any external task runs:
 
 ```sh
-wombat inspect plan
-wombat inspect plan tasks
-wombat prepare
+wombat plan construct
+wombat plan inspect tasks
+wombat plan materialise
 wombat build
 ```
 
-`build` never installs host tools. Construction requirements use the existing
-product/provider vocabulary in a separate host scope:
+Requirements use the ordinary product/provider vocabulary and a rung deadline:
 
 ```lua
-w.build.need.command("python3", { minimum = "3.12" })
-w.build.providers({ "brew" }) -- optional; local defaults are inferred
+w.need.command("python3", { minimum = "3.12", when = w.rungs.materialise.tasks })
+w.providers({ "brew" })
 ```
 
 Programs beneath `tasks/` can generate artifact trees or act as outputless
@@ -199,12 +199,33 @@ w.build.task("validate.sh", {}, { cache = false })
 
 Python, POSIX shell, Bash, embedded Lua 5.5, and executable entrypoints are
 inferred. Tasks run in private build-local workspaces and receive fixed
-`--params`, `--output-dir`, `--work-dir`, and `--cache-dir` arguments. Python
-tasks can simply import `params`, `output`, `work`, and `cache` from `wombat`.
+`--params`, `--output-dir`, `--work-dir`, `--cache-dir`, `--source-dir`, and
+`--scope` arguments. Python tasks can import `params`, `output`, `work`,
+`cache`, `source`, and `scope` from `wombat`.
 Regular files in `output` publish by default; `work` is cleared per execution,
 while the task-private `cache` persists. Verified template and task result
 caches live only beneath the selected build directory and never enter the
 functional product.
+
+The core ladder can be extended with typed custom or nested rungs. Tasks may
+move within the pre-publication materialisation region; generic scripts may run
+at any leaf:
+
+```lua
+local configure = w.rung("configure")
+w.script("configure.py", { profile = "desktop" }, {
+    at = configure,
+    schedule = "onchange",
+    files = { "helpers/**" },
+})
+```
+
+Root configuration places `configure` in one `w.ladder()` alongside every
+mandatory `w.rungs.materialise.*` and `w.rungs.deploy.*` core event. Scripts
+are trusted stateful actions, not artifact factories. Their frozen payloads
+execute with private persistent cache/state and fresh work paths. Schedules are
+`always`, `once`, and `onchange`; `--rerun-scripts` forces them without deleting
+state.
 
 Create the minimal conventional repository at the selected source with:
 
@@ -283,7 +304,7 @@ end
 
 Only facts actually consulted during evaluation enter manifest provenance.
 Resolved inputs, the concrete target, consulted observations, and typed Lua
-source provenance are stored in manifest v11 and participate in build identity.
+source provenance are stored in manifest v14 and participate in build identity.
 Every Wombat-owned root, module, and repository `require()` load contributes its
 repository-relative path and digest. Consequently a comment or declaration
 line movement can produce a new exact build identity even when artifact bytes
@@ -303,6 +324,8 @@ wombat inspect modules
 wombat inspect dependencies
 wombat inspect providers
 wombat inspect requirements
+wombat inspect ladder
+wombat inspect scripts
 wombat inspect tasks
 wombat inspect artifacts
 wombat inspect sources
@@ -324,7 +347,7 @@ relocated products can be inspected and compared without their original
 repository. The manifest remains the machine-readable product contract; these
 commands intentionally provide human views rather than a second JSON schema.
 
-## Requirements, bootstrap, and fresh-machine setup
+## Requirements and fresh-machine setup
 
 Modules declare products rather than embedding package-manager commands:
 
@@ -337,21 +360,16 @@ w.prefer.command("rg", { accept = { "grep" } })
 
 Root policy selects ordered providers. Wombat currently includes Homebrew for
 macOS and Apt for Debian-family Linux; custom providers are ordinary tracked
-Lua. `check` is read-only, while `bootstrap` preflights, displays, confirms, and
-post-checks explicit provider work:
+Lua. `check` is read-only. `build`, `apply`, and `setup` preflight and reconcile
+provider work at declared ladder deadlines, with explicit confirmation:
 
 ```sh
 wombat check
-wombat bootstrap
+wombat build --yes
 ```
 
-Host tools needed to construct a product are declared under `w.build`, checked
-before any task workspace is created, and reconciled only by `wombat prepare`.
-Target requirements remain the concern of `check` and `bootstrap`.
-
 For a fresh machine, `setup` safely clones or reuses a matching Git repository,
-freezes one plan, presents host and target provider work together, prepares the
-host, builds that exact plan, bootstraps target requirements, then guardedly
+freezes one plan, presents provider work, executes its ladder, and guardedly
 deploys that exact build ID:
 
 ```sh
@@ -387,18 +405,12 @@ The ordinary local workflow is:
 wombat diff
 wombat apply
 
-# ergonomic build followed by apply of that exact build ID
-wombat deploy
+# construct, materialise, and deploy with repository inputs
+wombat apply -- --theme kanagawa
 ```
 
-`deploy` accepts the same repository inputs as `build`, after `--`, and applies
-the exact product it just built:
-
-```sh
-wombat deploy -B build/server -- --target linux/x86_64 --theme kanagawa
-```
-
-All three commands accept `-B/--build-dir` and `--target-root`. A relative build
+`apply` accepts the same repository inputs as `build`, after `--`. `diff` and
+`apply` accept `-B/--build-dir` and `--target-root`. A relative build
 directory remains relative to the configured Wombat source; an absolute build
 product can be diffed or applied without its source repository.
 

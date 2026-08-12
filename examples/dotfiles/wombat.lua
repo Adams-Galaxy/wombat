@@ -1,5 +1,8 @@
 local w = require("wombat")
 
+local prepare = w.rung("prepare")
+local verify = w.rung("verify")
+
 local example = w.data.toml("example.toml")
 local shell = w.exec({ "sh", "-c", 'printf %s "$WOMBAT_EXAMPLE_MODE"' }, {
     env = { WOMBAT_EXAMPLE_MODE = "canonical" },
@@ -12,6 +15,19 @@ local input = w.inputs({
     theme = w.input.choice({ values = { "dark", "light" }, default = "dark" }),
 })
 
+w.ladder("example", {
+    w.rungs.materialise.before,
+    prepare,
+    w.rungs.materialise.tasks,
+    w.rungs.materialise.artifacts,
+    w.rungs.materialise.publish,
+    w.rungs.materialise.after,
+    w.rungs.deploy.before,
+    w.rungs.deploy.apply,
+    verify,
+    w.rungs.deploy.after,
+})
+
 if w.target.os.name == "macos" then
     w.providers({ "brew" })
 else
@@ -21,6 +37,16 @@ end
 w.need.command("git")
 local search = w.prefer.command("rg", {
     accept = { { name = "grep" } },
+})
+
+w.script("prepare.py", { mode = shell.stdout }, {
+    at = prepare,
+    schedule = "onchange",
+    files = { "helpers/**" },
+})
+w.script("verify.sh", {}, {
+    at = verify,
+    schedule = "always",
 })
 
 w.install(".wombat-example")

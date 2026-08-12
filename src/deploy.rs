@@ -9,6 +9,7 @@ use tempfile::NamedTempFile;
 
 use crate::build::{OpenedBuild, open_build};
 use crate::context::HostContext;
+use crate::ladder::{CoreRung, ExecutionJournal, ExecutionStatus};
 use crate::manifest::{Artifact, Production};
 use crate::reconcile::{
     ActualArtifact, ReconciliationAction, ReconciliationPlan, inspect_actual, plan_reconciliation,
@@ -25,6 +26,12 @@ pub struct DeploymentOptions {
     pub target_root_explicit: bool,
     pub patch: bool,
     pub host: Option<HostContext>,
+    pub yes: bool,
+    pub reconcile_requirements: bool,
+    pub requirement_authorization: Option<crate::requirements::RequirementAuthorization>,
+    pub clean: bool,
+    pub rerun_scripts: bool,
+    pub allow_host_scripts: bool,
 }
 
 impl DeploymentOptions {
@@ -36,6 +43,12 @@ impl DeploymentOptions {
             target_root_explicit: true,
             patch: false,
             host: None,
+            yes: false,
+            reconcile_requirements: false,
+            requirement_authorization: None,
+            clean: false,
+            rerun_scripts: false,
+            allow_host_scripts: false,
         }
     }
 
@@ -56,6 +69,40 @@ impl DeploymentOptions {
 
     pub fn with_host(mut self, host: HostContext) -> Self {
         self.host = Some(host);
+        self
+    }
+
+    pub fn with_yes(mut self, yes: bool) -> Self {
+        self.yes = yes;
+        self
+    }
+
+    pub fn with_provider_reconciliation(mut self, reconcile: bool) -> Self {
+        self.reconcile_requirements = reconcile;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_requirement_authorization(
+        mut self,
+        authorization: Option<crate::requirements::RequirementAuthorization>,
+    ) -> Self {
+        self.requirement_authorization = authorization;
+        self
+    }
+
+    pub fn with_clean(mut self, clean: bool) -> Self {
+        self.clean = clean;
+        self
+    }
+
+    pub fn with_rerun_scripts(mut self, rerun: bool) -> Self {
+        self.rerun_scripts = rerun;
+        self
+    }
+
+    pub fn with_allow_host_scripts(mut self, allow: bool) -> Self {
+        self.allow_host_scripts = allow;
         self
     }
 }
@@ -116,6 +163,11 @@ pub struct PreparedApply {
     previous: TargetState,
     plan: ReconciliationPlan,
     warnings: Vec<String>,
+    requirement_authorization: Option<crate::requirements::RequirementAuthorization>,
+    state_root: PathBuf,
+    target_root: PathBuf,
+    rerun_scripts: bool,
+    allow_host_scripts: bool,
 }
 
 impl PreparedApply {
@@ -167,7 +219,15 @@ pub fn diff(options: &DeploymentOptions) -> Result<DiffOutcome> {
     let state_guard = TargetStateGuard::open(&state_root, &options.target_root, LockMode::Shared)?;
     let previous = state_guard.load()?;
     let plan = plan_reconciliation(&options.target_root, &opened.manifest, &previous)?;
-    let output = render_diff(&opened, &plan, options.patch)?;
+    let mut output = render_diff(&opened, &plan, options.patch)?;
+    if let Ok(pending) = crate::plan::read(&options.build_dir)
+        && pending.plan_id != opened.manifest.plan_id
+    {
+        output = format!(
+            "warning: diff uses product plan {}; newer pending plan {} is not materialised\n{output}",
+            opened.manifest.plan_id, pending.plan_id
+        );
+    }
     Ok(DiffOutcome { plan, output })
 }
 
@@ -177,7 +237,50 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     let host = options.host.clone().map_or_else(HostContext::observe, Ok)?;
     let warnings =
         validate_target_compatibility(&opened.manifest, &host, options.target_root_explicit)?;
+    let mut requirement_authorization = if options.requirement_authorization.is_some() {
+        options.requirement_authorization.clone()
+    } else if options.reconcile_requirements
+        && opened.manifest.execution_mode == crate::manifest::ExecutionMode::Normal
+        && opened.manifest.requirements.iter().any(|requirement| {
+            opened
+                .manifest
+                .ladder
+                .at_or_after(&requirement.when, CoreRung::DeployBefore)
+        })
+    {
+        Some(crate::requirements::authorize_product_deploy(
+            &options.build_dir,
+            options.yes,
+        )?)
+    } else {
+        None
+    };
+    if let Some(authorization) = &mut requirement_authorization {
+        let apply: crate::ladder::RungId = CoreRung::DeployApply.into();
+        let start: crate::ladder::RungId = CoreRung::DeployBefore.into();
+        let start = opened.manifest.ladder.position(&start).expect("core rung");
+        let end = opened.manifest.ladder.position(&apply).expect("core rung");
+        for rung in opened
+            .manifest
+            .ladder
+            .leaf_ids()
+            .skip(start)
+            .take(end - start + 1)
+        {
+            crate::requirements::prepare_product_deploy_at_authorized(
+                &options.build_dir,
+                rung,
+                authorization,
+            )?;
+        }
+    }
     let state_root = resolve_state_root(options.state_root.as_deref())?;
+    let initial_guard =
+        TargetStateGuard::open(&state_root, &options.target_root, LockMode::Exclusive)?;
+    if options.clean {
+        initial_guard.reset_execution_journal()?;
+    }
+    drop(initial_guard);
     let state_guard =
         TargetStateGuard::open(&state_root, &options.target_root, LockMode::Exclusive)?;
     let previous = state_guard.load()?;
@@ -188,6 +291,11 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
         previous,
         plan,
         warnings,
+        requirement_authorization,
+        state_root,
+        target_root: options.target_root.clone(),
+        rerun_scripts: options.rerun_scripts,
+        allow_host_scripts: options.allow_host_scripts,
     })
 }
 
@@ -244,13 +352,81 @@ fn execute(
     prepared: PreparedApply,
     resolutions: &BTreeMap<String, ConflictResolution>,
 ) -> Result<ApplyOutcome> {
+    let journal_path = prepared.state_guard.execution_journal_path();
+    let plan_id = prepared.opened.manifest.plan_id.clone();
+    let prepared_ladder = prepared.opened.manifest.ladder.clone();
+    let result = execute_inner(prepared, resolutions);
+    if let Err(error) = &result {
+        let mut journal = crate::ladder::read_at(&journal_path)
+            .map(|journal| {
+                journal.reopen_for_ladder(&plan_id, CoreRung::DeployAfter, &prepared_ladder)
+            })
+            .unwrap_or_else(|_| {
+                ExecutionJournal::new_for_ladder(plan_id, CoreRung::DeployAfter, &prepared_ladder)
+            });
+        let failed_rung = if journal.rungs.iter().any(|(rung, status)| {
+            rung == &crate::ladder::RungId::from(CoreRung::DeployApply)
+                && *status == ExecutionStatus::Succeeded
+        }) {
+            CoreRung::DeployAfter
+        } else {
+            CoreRung::DeployApply
+        };
+        journal.fail(failed_rung, error);
+        let _ = crate::ladder::write_at(&journal_path, &journal);
+    }
+    result
+}
+
+fn execute_inner(
+    prepared: PreparedApply,
+    resolutions: &BTreeMap<String, ConflictResolution>,
+) -> Result<ApplyOutcome> {
     let PreparedApply {
         opened,
         state_guard,
         previous,
         plan,
         warnings,
+        mut requirement_authorization,
+        state_root,
+        target_root,
+        rerun_scripts,
+        allow_host_scripts,
     } = prepared;
+    let journal_path = state_guard.execution_journal_path();
+    let mut journal = crate::ladder::read_at(&journal_path)
+        .map(|journal| {
+            journal.reopen_for_ladder(
+                &opened.manifest.plan_id,
+                CoreRung::DeployAfter,
+                &opened.manifest.ladder,
+            )
+        })
+        .unwrap_or_else(|_| {
+            ExecutionJournal::new_for_ladder(
+                opened.manifest.plan_id.clone(),
+                CoreRung::DeployAfter,
+                &opened.manifest.ladder,
+            )
+        });
+    journal.build_id = Some(opened.manifest.build_id.clone());
+    journal.configure(
+        opened.manifest.execution_mode,
+        opened.manifest.skipped_requirement_gates.clone(),
+    );
+    let deploy_before: crate::ladder::RungId = CoreRung::DeployBefore.into();
+    let deploy_apply: crate::ladder::RungId = CoreRung::DeployApply.into();
+    let start = opened
+        .manifest
+        .ladder
+        .position(&deploy_before)
+        .expect("core rung");
+    let apply_position = opened
+        .manifest
+        .ladder
+        .position(&deploy_apply)
+        .expect("core rung");
     let conflicts = plan
         .conflicts()
         .map(|item| item.target.clone())
@@ -260,6 +436,93 @@ fn execute(
         return Err(WombatError::configuration(
             "every conflict must have exactly one resolution before apply",
         ));
+    }
+
+    let script_state_root = state_guard.scripts_directory();
+    for rung in opened
+        .manifest
+        .ladder
+        .leaf_ids()
+        .skip(start)
+        .take(apply_position - start)
+    {
+        journal.set_id(rung, ExecutionStatus::Running);
+        crate::ladder::write_at(&journal_path, &journal)?;
+        crate::scripts::check_runners(
+            &opened
+                .manifest
+                .scripts
+                .iter()
+                .filter(|script| &script.at == rung)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?;
+        for outcome in crate::scripts::execute_at(
+            &opened.manifest.scripts,
+            rung,
+            &crate::scripts::ScriptExecutionOptions {
+                state_root: &script_state_root,
+                payload_root: &opened.product_dir,
+                payload_kind: crate::scripts::PayloadKind::Product,
+                project_identity: &opened.manifest.project_identity,
+                plan_id: &opened.manifest.plan_id,
+                build_id: Some(&opened.manifest.build_id),
+                execution_mode: opened.manifest.execution_mode,
+                allow_host_scripts,
+                rerun: rerun_scripts,
+                target_root: Some(&target_root),
+            },
+        )? {
+            journal.record_action(
+                outcome.identity,
+                &outcome.rung,
+                match outcome.status {
+                    crate::manifest::ScriptOutcomeStatus::Ran => ExecutionStatus::Succeeded,
+                    _ => ExecutionStatus::Skipped,
+                },
+                outcome.reason,
+            );
+        }
+        journal.set_id(rung, ExecutionStatus::Succeeded);
+        crate::ladder::write_at(&journal_path, &journal)?;
+    }
+    journal.set(CoreRung::DeployApply, ExecutionStatus::Running);
+    crate::ladder::write_at(&journal_path, &journal)?;
+
+    crate::scripts::check_runners(
+        &opened
+            .manifest
+            .scripts
+            .iter()
+            .filter(|script| script.at == deploy_apply)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    for outcome in crate::scripts::execute_at(
+        &opened.manifest.scripts,
+        &deploy_apply,
+        &crate::scripts::ScriptExecutionOptions {
+            state_root: &script_state_root,
+            payload_root: &opened.product_dir,
+            payload_kind: crate::scripts::PayloadKind::Product,
+            project_identity: &opened.manifest.project_identity,
+            plan_id: &opened.manifest.plan_id,
+            build_id: Some(&opened.manifest.build_id),
+            execution_mode: opened.manifest.execution_mode,
+            allow_host_scripts,
+            rerun: rerun_scripts,
+            target_root: Some(&target_root),
+        },
+    )? {
+        journal.record_action(
+            outcome.identity,
+            &outcome.rung,
+            match outcome.status {
+                crate::manifest::ScriptOutcomeStatus::Ran => ExecutionStatus::Succeeded,
+                _ => ExecutionStatus::Skipped,
+            },
+            outcome.reason,
+        );
     }
 
     for item in &plan.items {
@@ -372,6 +635,71 @@ fn execute(
         complete_build_id,
         artifacts,
     })?;
+    journal.set(CoreRung::DeployApply, ExecutionStatus::Succeeded);
+    crate::ladder::write_at(&journal_path, &journal)?;
+    drop(state_guard);
+    let deploy_after: crate::ladder::RungId = CoreRung::DeployAfter.into();
+    let end = opened
+        .manifest
+        .ladder
+        .position(&deploy_after)
+        .expect("core rung");
+    for rung in opened
+        .manifest
+        .ladder
+        .leaf_ids()
+        .skip(apply_position + 1)
+        .take(end - apply_position)
+    {
+        if let Some(authorization) = &mut requirement_authorization {
+            crate::requirements::prepare_product_deploy_at_authorized(
+                &opened.requested_build_dir,
+                rung,
+                authorization,
+            )?;
+        }
+        journal.set_id(rung, ExecutionStatus::Running);
+        crate::ladder::write_at(&journal_path, &journal)?;
+        crate::scripts::check_runners(
+            &opened
+                .manifest
+                .scripts
+                .iter()
+                .filter(|script| &script.at == rung)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?;
+        for outcome in crate::scripts::execute_at(
+            &opened.manifest.scripts,
+            rung,
+            &crate::scripts::ScriptExecutionOptions {
+                state_root: &script_state_root,
+                payload_root: &opened.product_dir,
+                payload_kind: crate::scripts::PayloadKind::Product,
+                project_identity: &opened.manifest.project_identity,
+                plan_id: &opened.manifest.plan_id,
+                build_id: Some(&opened.manifest.build_id),
+                execution_mode: opened.manifest.execution_mode,
+                allow_host_scripts,
+                rerun: rerun_scripts,
+                target_root: Some(&target_root),
+            },
+        )? {
+            journal.record_action(
+                outcome.identity,
+                &outcome.rung,
+                match outcome.status {
+                    crate::manifest::ScriptOutcomeStatus::Ran => ExecutionStatus::Succeeded,
+                    _ => ExecutionStatus::Skipped,
+                },
+                outcome.reason,
+            );
+        }
+        journal.set_id(rung, ExecutionStatus::Succeeded);
+        crate::ladder::write_at(&journal_path, &journal)?;
+    }
+    let state_guard = TargetStateGuard::open(&state_root, &target_root, LockMode::Exclusive)?;
+    crate::ladder::write_at(&state_guard.execution_journal_path(), &journal)?;
 
     let changed = created + updated + removed + state_advanced;
     let status = if !skipped.is_empty() {

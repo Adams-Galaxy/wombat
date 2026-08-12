@@ -175,7 +175,7 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
         .build("build/default", &[], mac_host("wombat-mac"))
         .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 11);
+    assert_eq!(outcome.manifest.format_version, 14);
     assert_eq!(outcome.manifest.target.origin, TargetOrigin::RootOverride);
     assert_eq!(
         outcome
@@ -238,10 +238,9 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
 #[test]
 fn cli_values_select_a_cross_target_variant_and_disable_an_artifact() {
     let repository = parameterised_repository();
-    let outcome = repository
-        .build(
-            "build/linux",
-            &[
+    let outcome = build(
+        BuildOptions::new(&repository.root, repository.root.join("build/linux"))
+            .with_project_arguments([
                 "--target",
                 "linux/x86_64",
                 "-t",
@@ -250,10 +249,11 @@ fn cli_values_select_a_cross_target_variant_and_disable_an_artifact() {
                 "--columns=80",
                 "--label",
                 "server",
-            ],
-            mac_host("wombat-mac"),
-        )
-        .unwrap();
+            ])
+            .with_host(mac_host("wombat-mac"))
+            .with_compile_only(true),
+    )
+    .unwrap();
 
     assert_eq!(
         outcome.manifest.target.platform.os.name,
@@ -463,7 +463,12 @@ w.use('app', { distro = target.os.distribution.id, arch = target.arch })
         "local w = require('wombat')\nlocal c = w.module.config()\nw.install('app.tmpl', { with = c })\n",
     );
     repository.write("dot_config/app.tmpl", "{{distro}}/{{arch}}\n");
-    let outcome = repository.build("build", &[], mac_host("host")).unwrap();
+    let outcome = build(
+        BuildOptions::new(&repository.root, repository.root.join("build"))
+            .with_host(mac_host("host"))
+            .with_compile_only(true),
+    )
+    .unwrap();
     assert_eq!(outcome.manifest.target.platform.arch, Architecture::X86_64);
     let distribution = outcome
         .manifest
@@ -840,7 +845,7 @@ fn cli_namespace_boundary_keeps_project_options_out_of_wombat_parsing() {
 }
 
 #[test]
-fn cli_deploy_forwards_project_arguments_to_the_exact_applied_build() {
+fn cli_apply_forwards_project_arguments_to_the_exact_applied_build() {
     let repository = parameterised_repository();
     let target = repository._temporary.path().join("target-root");
     let state = repository._temporary.path().join("state");
@@ -851,7 +856,7 @@ fn cli_deploy_forwards_project_arguments_to_the_exact_applied_build() {
             "never",
             "--source",
             repository.root.to_str().unwrap(),
-            "deploy",
+            "apply",
             "-B",
             "build/deploy",
             "--target-root",

@@ -47,6 +47,18 @@ enum Command {
         /// Repository-defined build inputs. Values must follow `--`.
         #[arg(last = true, allow_hyphen_values = true)]
         project_arguments: Vec<OsString>,
+
+        /// Construct artifacts without provider reconciliation for a non-local target.
+        #[arg(long)]
+        compile_only: bool,
+        #[arg(long)]
+        clean: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        rerun_scripts: bool,
+        #[arg(long)]
+        allow_host_scripts: bool,
     },
     /// Construct, materialise, or inspect an exact persisted executable plan.
     Plan {
@@ -106,11 +118,56 @@ enum Command {
         #[arg(long)]
         patch: bool,
     },
+    /// Construct, materialise, then guardedly deploy one exact product.
+    Apply {
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+        #[arg(long)]
+        target_root: Option<PathBuf>,
+        #[arg(long)]
+        conflict: Option<ConflictArg>,
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
+        #[arg(long)]
+        clean: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        rerun_scripts: bool,
+        #[arg(long)]
+        allow_host_scripts: bool,
+    },
+    /// Acquire a repository safely, then run the same guarded apply workflow.
+    Setup {
+        repository: String,
+        #[arg(long)]
+        ssh: bool,
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+        #[arg(long)]
+        target_root: Option<PathBuf>,
+        #[arg(long)]
+        conflict: Option<ConflictArg>,
+        #[arg(long)]
+        clean: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        rerun_scripts: bool,
+        #[arg(long)]
+        allow_host_scripts: bool,
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
+    },
     /// Check whether this local environment satisfies a completed build.
     Check {
         /// Build product, relative to the resolved source unless absolute.
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
+        #[arg(long)]
+        compile_only: bool,
+        #[arg(last = true, allow_hyphen_values = true)]
+        project_arguments: Vec<OsString>,
     },
 }
 
@@ -159,6 +216,8 @@ enum InspectArg {
     Dependencies,
     Providers,
     Requirements,
+    Ladder,
+    Scripts,
     Tasks,
     Artifacts,
     Sources,
@@ -178,6 +237,16 @@ enum PlanCommand {
     Materialise {
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
+        #[arg(long)]
+        compile_only: bool,
+        #[arg(long)]
+        clean: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        rerun_scripts: bool,
+        #[arg(long)]
+        allow_host_scripts: bool,
     },
     /// Inspect an exact stored plan without evaluating configuration Lua.
     Inspect {
@@ -185,6 +254,25 @@ enum PlanCommand {
         section: PlanInspectArg,
         #[arg(short = 'B', long = "build-dir", default_value = "build")]
         build_dir: PathBuf,
+    },
+    /// Guardedly deploy one exact completed product without reconstruction.
+    Deploy {
+        #[arg(short = 'B', long = "build-dir", default_value = "build")]
+        build_dir: PathBuf,
+        #[arg(long)]
+        target_root: Option<PathBuf>,
+        #[arg(long)]
+        conflict: Option<ConflictArg>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        allow_plan_mismatch: bool,
+        #[arg(long)]
+        allow_compile_only: bool,
+        #[arg(long)]
+        rerun_scripts: bool,
+        #[arg(long)]
+        allow_host_scripts: bool,
     },
 }
 
@@ -198,6 +286,8 @@ impl From<InspectArg> for wombat::InspectSection {
             InspectArg::Dependencies => Self::Dependencies,
             InspectArg::Providers => Self::Providers,
             InspectArg::Requirements => Self::Requirements,
+            InspectArg::Ladder => Self::Ladder,
+            InspectArg::Scripts => Self::Scripts,
             InspectArg::Tasks => Self::Tasks,
             InspectArg::Artifacts => Self::Artifacts,
             InspectArg::Sources => Self::Sources,
@@ -211,6 +301,8 @@ enum PlanInspectArg {
     Overview,
     Providers,
     Requirements,
+    Ladder,
+    Scripts,
     Tasks,
     Artifacts,
     Sources,
@@ -223,6 +315,8 @@ impl From<PlanInspectArg> for wombat::PlanInspectSection {
             PlanInspectArg::Overview => Self::Overview,
             PlanInspectArg::Providers => Self::Providers,
             PlanInspectArg::Requirements => Self::Requirements,
+            PlanInspectArg::Ladder => Self::Ladder,
+            PlanInspectArg::Scripts => Self::Scripts,
             PlanInspectArg::Tasks => Self::Tasks,
             PlanInspectArg::Artifacts => Self::Artifacts,
             PlanInspectArg::Sources => Self::Sources,
@@ -406,6 +500,11 @@ fn main() -> ExitCode {
         Command::Build {
             build_dir,
             project_arguments,
+            compile_only,
+            clean,
+            yes,
+            rerun_scripts,
+            allow_host_scripts,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
             if project_arguments == [OsString::from("--help")] {
                 let help = wombat::project_help_with_options(with_log_level(
@@ -424,7 +523,7 @@ fn main() -> ExitCode {
                     configured_build_options(source_root, build_dir, project_arguments)?,
                     requested_log_level,
                     log_adjustment,
-                ))
+                ).with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
                 .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
             }
         }),
@@ -458,16 +557,21 @@ fn main() -> ExitCode {
                     );
                 })
             }),
-            PlanCommand::Materialise { build_dir } => {
-                wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
-                    wombat::materialise(configured_build_options(
-                        source_root,
-                        build_dir,
-                        std::iter::empty::<OsString>(),
-                    )?)
-                    .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
-                })
-            }
+            PlanCommand::Materialise {
+                build_dir,
+                compile_only,
+                clean,
+                yes,
+                rerun_scripts,
+                allow_host_scripts,
+            } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
+                wombat::materialise(configured_build_options(
+                    source_root,
+                    build_dir,
+                    std::iter::empty::<OsString>(),
+                )?.with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
+                .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
+            }),
             PlanCommand::Inspect { section, build_dir } => {
                 wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
                     let build_dir = if build_dir.is_absolute() {
@@ -483,6 +587,54 @@ fn main() -> ExitCode {
                     })
                 })
             }
+            PlanCommand::Deploy {
+                build_dir,
+                target_root,
+                conflict,
+                yes,
+                allow_plan_mismatch,
+                allow_compile_only,
+                rerun_scripts,
+                allow_host_scripts,
+            } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_root)
+                .and_then(|options| {
+                    let opened = wombat::open_build(&options.build_dir)?;
+                    let materialisation = wombat::ladder::read(&options.build_dir)?;
+                    if materialisation.plan_id != opened.manifest.plan_id
+                        || !materialisation.rungs.iter().any(|(rung, status)| {
+                            rung.id()
+                                == wombat::ladder::CoreRung::MaterialiseAfter.id()
+                                && *status == wombat::ladder::ExecutionStatus::Succeeded
+                        })
+                    {
+                        return Err(wombat::WombatError::configuration(
+                            "refusing deployment because materialisation has not completed successfully",
+                        ));
+                    }
+                    if opened.manifest.execution_mode == wombat::manifest::ExecutionMode::CompileOnly
+                        && !allow_compile_only
+                    {
+                        return Err(wombat::WombatError::configuration(
+                            "refusing to deploy a compile-only product without --allow-compile-only",
+                        ));
+                    }
+                    if let Ok(pending) = wombat::plan::read(&options.build_dir)
+                        && pending.plan_id != opened.manifest.plan_id
+                        && !allow_plan_mismatch
+                    {
+                        confirm_plan_mismatch(&opened.manifest.plan_id, &pending.plan_id)?;
+                    }
+                    apply_options(
+                        &options
+                            .with_yes(yes)
+                            .with_provider_reconciliation(true)
+                            .with_rerun_scripts(rerun_scripts)
+                            .with_allow_host_scripts(allow_host_scripts),
+                        effective_policy(conflict),
+                        stdout,
+                        stderr,
+                    )
+                }),
         },
         Command::Init { path } => {
             let selected = match (cli.source.as_deref(), path.as_deref()) {
@@ -559,6 +711,88 @@ fn main() -> ExitCode {
             .map(|options| options.with_patch(patch))
             .and_then(|options| wombat::diff(&options))
             .map(|outcome| print!("{}", stdout.human_output(&outcome.output))),
+        Command::Apply {
+            build_dir,
+            target_root,
+            conflict,
+            project_arguments,
+            clean,
+            yes,
+            rerun_scripts,
+            allow_host_scripts,
+        } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
+            let target_root_explicit = target_root.is_some();
+            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
+            let mut outcome = wombat::build(with_log_level(
+                configured_build_options(source_root, build_dir, project_arguments)?,
+                requested_log_level,
+                log_adjustment,
+            ).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts)
+                .with_requirement_boundary(wombat::ladder::CoreRung::DeployAfter))?;
+            print_build_outcome(&outcome, stdout, stderr);
+            let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
+                .with_target_root_explicit(target_root_explicit)
+                .with_yes(yes)
+                .with_provider_reconciliation(true)
+                .with_clean(clean)
+                .with_rerun_scripts(rerun_scripts)
+                .with_allow_host_scripts(allow_host_scripts)
+                .with_requirement_authorization(outcome.requirement_authorization.take());
+            apply_options(&options, effective_policy(conflict), stdout, stderr)
+        }),
+        Command::Setup {
+            repository,
+            ssh,
+            build_dir,
+            target_root,
+            conflict,
+            clean,
+            yes,
+            rerun_scripts,
+            allow_host_scripts,
+            project_arguments,
+        } => (|| -> wombat::Result<()> {
+            let destination = wombat::config::resolve_source_candidate(cli.source.as_deref())?;
+            let locator = wombat::RepositoryLocator::parse(&repository, ssh)?;
+            let acquired = wombat::acquire_repository(locator, &destination)?;
+            println!(
+                "{} repository {} at {}",
+                stdout.paint(
+                    wombat::Role::Success,
+                    match acquired.status {
+                        wombat::AcquisitionStatus::Cloned => "cloned",
+                        wombat::AcquisitionStatus::Reused => "reused",
+                    }
+                ),
+                stdout.paint(wombat::Role::Identity, &repository),
+                stdout.paint(wombat::Role::Path, acquired.destination.to_string_lossy())
+            );
+            let target_root_explicit = target_root.is_some();
+            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
+            let mut outcome = wombat::build(
+                with_log_level(
+                    configured_build_options(&acquired.destination, build_dir, project_arguments)?,
+                    requested_log_level,
+                    log_adjustment,
+                )
+                .with_clean(clean)
+                .with_yes(yes)
+                .with_provider_reconciliation(true)
+                .with_rerun_scripts(rerun_scripts)
+                .with_allow_host_scripts(allow_host_scripts)
+                .with_requirement_boundary(wombat::ladder::CoreRung::DeployAfter),
+            )?;
+            print_build_outcome(&outcome, stdout, stderr);
+            let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
+                .with_target_root_explicit(target_root_explicit)
+                .with_yes(yes)
+                .with_provider_reconciliation(true)
+                .with_clean(clean)
+                .with_rerun_scripts(rerun_scripts)
+                .with_allow_host_scripts(allow_host_scripts)
+                .with_requirement_authorization(outcome.requirement_authorization.take());
+            apply_options(&options, effective_policy(conflict), stdout, stderr)
+        })(),
         #[cfg(any())]
         Command::Apply {
             build_dir,
@@ -603,18 +837,27 @@ fn main() -> ExitCode {
             }
             apply_prepared(prepared, effective_policy(conflict), stdout, stderr)
         }),
-        Command::Check { build_dir } => resolve_product_path(cli.source.as_deref(), build_dir)
-            .and_then(|(build_dir, _)| wombat::check(&build_dir))
-            .map(|outcome| {
+        Command::Check { build_dir, compile_only, project_arguments } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
+            let planned = wombat::plan_or_reuse(with_log_level(
+                configured_build_options(&source_root, build_dir, project_arguments)?,
+                requested_log_level,
+                log_adjustment,
+            ))?;
+            if compile_only {
+                wombat::build::check_compile_only_plan(
+                    &source_root,
+                    &planned.build_dir,
+                    &planned.plan,
+                )?;
+                println!("compile-only check: provider gates are disabled");
+                return Ok(());
+            }
+            wombat::build::check_plan_execution(&planned.build_dir, &planned.plan)?;
+            wombat::check_target_plan(&planned.build_dir, &planned.plan).map(|outcome| {
                 print!("{}", stdout.human_output(&outcome.display()));
-                requested_exit = if outcome.operational_failure() {
-                    2
-                } else if outcome.satisfied() {
-                    0
-                } else {
-                    1
-                };
-            }),
+                requested_exit = if outcome.operational_failure() { 2 } else if outcome.satisfied() { 0 } else { 1 };
+            })
+        }),
         #[cfg(any())]
         Command::Bootstrap { build_dir, yes } => {
             resolve_product_path(cli.source.as_deref(), build_dir)
@@ -724,7 +967,7 @@ fn configured_build_options(
 ) -> wombat::Result<wombat::BuildOptions> {
     Ok(wombat::BuildOptions::new(source_root, build_dir)
         .with_project_arguments(project_arguments)
-        .with_task_interpreters(wombat::config::resolve_task_interpreters()?))
+        .with_task_interpreters(wombat::config::resolve_runners()?))
 }
 
 fn with_log_level(
@@ -801,6 +1044,30 @@ fn confirm_setup() -> wombat::Result<()> {
         Ok(())
     } else {
         Err(wombat::WombatError::configuration("setup cancelled"))
+    }
+}
+
+fn confirm_plan_mismatch(product_plan: &str, pending_plan: &str) -> wombat::Result<()> {
+    if !io::stdin().is_terminal() {
+        return Err(wombat::WombatError::configuration(format!(
+            "product plan `{product_plan}` differs from pending plan `{pending_plan}`; non-interactive deployment requires --allow-plan-mismatch"
+        )));
+    }
+    eprintln!("warning: product plan `{product_plan}` differs from pending plan `{pending_plan}`");
+    eprint!("deploy the older materialised product anyway? [y/N] ");
+    io::stderr()
+        .flush()
+        .map_err(|error| wombat::WombatError::io("<stderr>", error))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| wombat::WombatError::io("<stdin>", error))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(wombat::WombatError::configuration(
+            "deployment cancelled because the pending plan differs from the materialised product",
+        ))
     }
 }
 

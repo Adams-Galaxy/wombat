@@ -167,6 +167,23 @@ impl TargetPlatform {
         format!("{}/{}", self.os.name.as_str(), self.arch.as_str())
     }
 
+    pub fn locally_compatible_with(&self, host: &Self) -> bool {
+        if self.os.name != host.os.name || self.arch != host.arch {
+            return false;
+        }
+        if let Some(version) = &self.os.version
+            && host.os.version.as_ref() != Some(version)
+        {
+            return false;
+        }
+        if let Some(distribution) = &self.os.distribution
+            && host.os.distribution.as_ref() != Some(distribution)
+        {
+            return false;
+        }
+        true
+    }
+
     pub fn to_frozen(&self) -> FrozenValue {
         FrozenValue::Map(
             [
@@ -684,6 +701,16 @@ mod tests {
         assert_eq!(target.os.name, OperatingSystemName::Macos);
         assert_eq!(target.arch, Architecture::Aarch64);
         assert_eq!(target.compact(), "macos/aarch64");
+    }
+
+    #[test]
+    fn local_compatibility_requires_declared_richer_facts() {
+        let target = TargetPlatform::parse_compact("linux/x86_64").unwrap();
+        let host = TargetPlatform::parse_compact("linux/x86_64").unwrap();
+        assert!(target.locally_compatible_with(&host));
+        let mut versioned = target.clone();
+        versioned.os.version = Some(LooseVersion::parse("24.04"));
+        assert!(!versioned.locally_compatible_with(&host));
     }
 
     #[test]

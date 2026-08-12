@@ -2,11 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ResolvedTarget;
 use crate::frozen::FrozenValue;
+use crate::ladder::{ExecutionLadder, RungId};
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 12;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 3;
+pub const MANIFEST_FORMAT_VERSION: u32 = 14;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 5;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -60,6 +61,8 @@ pub struct Manifest {
     pub wombat_version: String,
     pub build_id: String,
     pub plan_id: String,
+    pub execution_mode: ExecutionMode,
+    pub skipped_requirement_gates: Vec<String>,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
@@ -67,17 +70,25 @@ pub struct Manifest {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
-    pub build_providers: Vec<Provider>,
-    pub build_requirements: Vec<Requirement>,
-    pub build_preparations: Vec<ProviderPreparation>,
+    pub project_identity: String,
+    pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
+    pub scripts: Vec<Script>,
+    pub script_outcomes: Vec<ScriptOutcome>,
     pub artifact_policy: ArtifactPolicy,
     pub artifact_notices: Vec<ArtifactNotice>,
     pub artifact_selections: Vec<ArtifactSelection>,
     pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Normal,
+    CompileOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +97,7 @@ pub struct BuildPlan {
     pub format_version: u32,
     pub wombat_version: String,
     pub plan_id: String,
+    pub project_arguments: Vec<String>,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
@@ -93,13 +105,13 @@ pub struct BuildPlan {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
-    pub build_providers: Vec<Provider>,
-    pub build_requirements: Vec<Requirement>,
-    pub build_preparations: Vec<ProviderPreparation>,
+    pub project_identity: String,
+    pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
+    pub scripts: Vec<Script>,
     pub artifact_policy: ArtifactPolicy,
     pub artifact_notices: Vec<ArtifactNotice>,
     pub artifact_selections: Vec<ArtifactSelection>,
@@ -218,6 +230,7 @@ pub struct Requirement {
     pub selected: u32,
     pub choice: RequirementChoice,
     pub binding: ProviderBinding,
+    pub when: RungId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -506,6 +519,7 @@ pub enum PlannedProduction {
 #[serde(deny_unknown_fields)]
 pub struct Task {
     pub identity: String,
+    pub declaration_order: u64,
     pub owner: String,
     pub entrypoint: String,
     pub entrypoint_digest: String,
@@ -514,10 +528,77 @@ pub struct Task {
     pub python_helper: bool,
     pub logs: TaskLogPolicy,
     pub cache: TaskCachePolicy,
+    pub at: RungId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_root: Option<TaskTargetRoot>,
     pub declared_at: SourceTrace,
     pub outputs: Vec<TaskOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Script {
+    pub identity: String,
+    pub declaration_order: u64,
+    pub owner: String,
+    pub entrypoint: String,
+    pub params: FrozenValue,
+    pub runner: TaskRunner,
+    pub python_helper: bool,
+    pub logs: TaskLogPolicy,
+    pub at: RungId,
+    pub schedule: ScriptSchedule,
+    pub scope: ScriptScope,
+    pub payloads: Vec<ScriptPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptSchedule {
+    Always,
+    Once,
+    Onchange,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptScope {
+    Target,
+    Host,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptPayload {
+    pub source: String,
+    pub relative: String,
+    pub digest: String,
+    pub size: u64,
+    pub executable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptOutcome {
+    pub identity: String,
+    pub rung: RungId,
+    pub status: ScriptOutcomeStatus,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptOutcomeStatus {
+    Ran,
+    ScheduledSkip,
+    CompileOnlySkip,
+    Refused,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -590,6 +671,7 @@ pub struct FileContent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedManifest {
     pub plan_id: String,
+    pub project_arguments: Vec<String>,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
@@ -597,13 +679,14 @@ pub(crate) struct EvaluatedManifest {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
-    pub build_providers: Vec<Provider>,
-    pub build_requirements: Vec<Requirement>,
-    pub build_preparations: Vec<ProviderPreparation>,
+    pub project_identity: String,
+    pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<EvaluatedTask>,
+    pub scripts: Vec<Script>,
+    pub script_outcomes: Vec<ScriptOutcome>,
     pub artifact_policy: ArtifactPolicy,
     pub artifact_notices: Vec<ArtifactNotice>,
     pub artifact_selections: Vec<ArtifactSelection>,

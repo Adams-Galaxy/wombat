@@ -18,6 +18,8 @@ pub enum InspectSection {
     Dependencies,
     Providers,
     Requirements,
+    Ladder,
+    Scripts,
     Tasks,
     Artifacts,
     Sources,
@@ -29,6 +31,8 @@ pub enum PlanInspectSection {
     Overview,
     Providers,
     Requirements,
+    Ladder,
+    Scripts,
     Tasks,
     Artifacts,
     Sources,
@@ -43,7 +47,7 @@ pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
 pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
     match section {
         PlanInspectSection::Overview => format!(
-            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  build providers: {}\n  build requirements: {}\n  target providers: {}\n  target requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
+            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  providers: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
             plan.plan_id,
             plan.format_version,
             plan.wombat_version,
@@ -51,8 +55,6 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
             plan.target.platform.arch.as_str(),
             plan.sources.len(),
             plan.modules.len(),
-            plan.build_providers.len(),
-            plan.build_requirements.len(),
             plan.providers.len(),
             plan.requirements.len(),
             plan.tasks.len(),
@@ -60,35 +62,18 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
             plan.artifacts.len(),
         ),
         PlanInspectSection::Providers => {
-            let mut output = render_list(
-                "Build providers",
-                plan.build_providers.iter().map(render_provider),
-            );
+            let mut output = render_list("Providers", plan.providers.iter().map(render_provider));
             output.push_str(&render_list(
-                "Build preparations",
-                plan.build_preparations.iter().map(render_preparation),
-            ));
-            output.push_str(&render_list(
-                "Target providers",
-                plan.providers.iter().map(render_provider),
-            ));
-            output.push_str(&render_list(
-                "Target preparations",
+                "Preparations",
                 plan.preparations.iter().map(render_preparation),
             ));
             output
         }
         PlanInspectSection::Requirements => {
-            let mut output = render_list(
-                "Build requirements",
-                plan.build_requirements.iter().map(render_requirement),
-            );
-            output.push_str(&render_list(
-                "Target requirements",
-                plan.requirements.iter().map(render_requirement),
-            ));
-            output
+            render_list("Requirements", plan.requirements.iter().map(render_requirement))
         }
+        PlanInspectSection::Ladder => render_ladder(&plan.ladder),
+        PlanInspectSection::Scripts => render_scripts(&plan.scripts),
         PlanInspectSection::Tasks => render_list(
             "Tasks",
             plan.tasks.iter().map(|task| {
@@ -165,6 +150,44 @@ fn render_observations(
             observation.stdout_size, observation.stdout_digest, observation.stderr_size, observation.stderr_digest, observation.declared_at)
     })));
     output
+}
+
+fn render_ladder(ladder: &crate::ladder::ExecutionLadder) -> String {
+    render_list(
+        &format!("Ladder {}", ladder.name),
+        ladder.flattened.iter().map(|rung| {
+            format!(
+                "{}{}\n  kind: {}\n  parent: {}",
+                "  ".repeat(usize::from(rung.depth)),
+                rung.id,
+                rung.core
+                    .map_or_else(|| "custom".to_string(), |core| format!("core {:?}", core)),
+                rung.parent
+                    .as_ref()
+                    .map_or_else(|| "top-level".to_string(), ToString::to_string)
+            )
+        }),
+    )
+}
+
+fn render_scripts(scripts: &[crate::manifest::Script]) -> String {
+    render_list(
+        "Scripts",
+        scripts.iter().map(|script| {
+            format!(
+                "{}\n  owner: {}\n  entrypoint: {}\n  rung: {}\n  schedule: {:?}\n  scope: {:?}\n  runner: {:?}\n  payloads: {}\n  declared at: {}",
+                script.identity,
+                script.owner,
+                script.entrypoint,
+                script.at,
+                script.schedule,
+                script.scope,
+                script.runner.family,
+                script.payloads.len(),
+                script.declared_at
+            )
+        }),
+    )
 }
 
 fn render_provider(provider: &crate::manifest::Provider) -> String {
@@ -364,7 +387,7 @@ pub fn compare(left: &Path, right: &Path) -> Result<String> {
 fn render_section(manifest: &Manifest, section: InspectSection) -> String {
     match section {
         InspectSection::Overview => format!(
-            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  build providers: {}\n  build requirements: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
+            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
             manifest.build_id,
             manifest.format_version,
             manifest.plan_id,
@@ -375,8 +398,6 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
             manifest.inputs.len(),
             manifest.modules.len(),
             manifest.dependencies.len(),
-            manifest.build_providers.len(),
-            manifest.build_requirements.len(),
             manifest.providers.len(),
             manifest.preparations.len(),
             manifest.requirements.len(),
@@ -441,15 +462,7 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
         ),
         InspectSection::Providers => {
             let mut output = render_list(
-                "Build providers",
-                manifest.build_providers.iter().map(render_provider),
-            );
-            output.push_str(&render_list(
-                "Build preparations",
-                manifest.build_preparations.iter().map(render_preparation),
-            ));
-            output.push_str(&render_list(
-                "Target providers",
+                "Providers",
                 manifest.providers.iter().map(|provider| {
                     format!(
                         "{} (priority {})\n  origin: {}\n  config: {}\n  declared at: {}",
@@ -467,9 +480,9 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                         provider.declared_at
                     )
                 }),
-            ));
+            );
             output.push_str(&render_list(
-                "Target preparations",
+                "Preparations",
                 manifest.preparations.iter().map(|operation| {
                     format!(
                         "{}:{}\n  description: {}\n  elevated: {}\n  data: {}",
@@ -483,14 +496,23 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
             ));
             output
         }
-        InspectSection::Requirements => {
-            render_list(
-                "Build requirements",
-                manifest.build_requirements.iter().map(render_requirement),
-            ) + &render_list(
-                "Target requirements",
-                manifest.requirements.iter().map(render_requirement),
-            )
+        InspectSection::Requirements => render_list(
+            "Requirements",
+            manifest.requirements.iter().map(render_requirement),
+        ),
+        InspectSection::Ladder => render_ladder(&manifest.ladder),
+        InspectSection::Scripts => {
+            let mut output = render_scripts(&manifest.scripts);
+            output.push_str(&render_list(
+                "Materialisation outcomes",
+                manifest.script_outcomes.iter().map(|outcome| {
+                    format!(
+                        "{}\n  rung: {}\n  status: {:?}\n  reason: {}",
+                        outcome.identity, outcome.rung, outcome.status, outcome.reason
+                    )
+                }),
+            ));
+            output
         }
         InspectSection::Tasks => render_list(
             "Tasks",
@@ -539,7 +561,7 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
 fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
     let selected = &requirement.candidates[requirement.selected as usize];
     format!(
-        "{}:{}\n  owner: {}\n  choice: {:?}\n  provider: {}\n  binding: {}\n  candidates: {}\n  declared at: {}",
+        "{}:{}\n  owner: {}\n  choice: {:?}\n  when: {}\n  provider: {}\n  binding: {}\n  candidates: {}\n  declared at: {}",
         match requirement.kind {
             crate::manifest::RequirementKind::Command => "command",
             crate::manifest::RequirementKind::Package => "package",
@@ -547,6 +569,7 @@ fn render_requirement(requirement: &crate::manifest::Requirement) -> String {
         selected.name(),
         requirement.owner,
         requirement.choice,
+        requirement.when.id(),
         requirement.binding.provider,
         requirement.binding.identity,
         requirement.candidates.len(),

@@ -36,6 +36,14 @@ pub struct BuildOptions {
     pub host: Option<HostContext>,
     pub log_level: Option<crate::presentation::LogLevel>,
     pub log_adjustment: i8,
+    pub compile_only: bool,
+    pub yes: bool,
+    pub clean: bool,
+    pub reconcile_requirements: bool,
+    pub requirement_boundary: crate::ladder::CoreRung,
+    pub rerun_scripts: bool,
+    pub allow_host_scripts: bool,
+    pub script_state_root: Option<PathBuf>,
     #[doc(hidden)]
     pub task_interpreters: BTreeMap<String, crate::manifest::TaskRunner>,
 }
@@ -49,6 +57,14 @@ impl BuildOptions {
             host: None,
             log_level: None,
             log_adjustment: 0,
+            compile_only: false,
+            yes: false,
+            clean: false,
+            reconcile_requirements: false,
+            requirement_boundary: crate::ladder::CoreRung::MaterialiseAfter,
+            rerun_scripts: false,
+            allow_host_scripts: false,
+            script_state_root: None,
             task_interpreters: BTreeMap::new(),
         }
     }
@@ -76,6 +92,50 @@ impl BuildOptions {
         self
     }
 
+    pub fn with_compile_only(mut self, compile_only: bool) -> Self {
+        self.compile_only = compile_only;
+        self
+    }
+
+    pub fn with_yes(mut self, yes: bool) -> Self {
+        self.yes = yes;
+        self
+    }
+
+    pub fn with_clean(mut self, clean: bool) -> Self {
+        self.clean = clean;
+        self
+    }
+
+    /// Root workflows opt into provider reconciliation. Library callers can
+    /// construct exact products for inspection without mutating the host.
+    pub fn with_provider_reconciliation(mut self, reconcile: bool) -> Self {
+        self.reconcile_requirements = reconcile;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_requirement_boundary(mut self, boundary: crate::ladder::CoreRung) -> Self {
+        self.requirement_boundary = boundary;
+        self
+    }
+
+    pub fn with_rerun_scripts(mut self, rerun: bool) -> Self {
+        self.rerun_scripts = rerun;
+        self
+    }
+
+    pub fn with_allow_host_scripts(mut self, allow: bool) -> Self {
+        self.allow_host_scripts = allow;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_script_state_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.script_state_root = Some(root.into());
+        self
+    }
+
     #[doc(hidden)]
     pub fn with_task_interpreters(
         mut self,
@@ -91,6 +151,7 @@ pub enum BuildStatus {
     Created,
     Updated,
     Unchanged,
+    Reused,
     Repaired,
 }
 
@@ -100,6 +161,7 @@ impl fmt::Display for BuildStatus {
             Self::Created => "created",
             Self::Updated => "updated",
             Self::Unchanged => "unchanged",
+            Self::Reused => "reused",
             Self::Repaired => "repaired",
         })
     }
@@ -112,6 +174,8 @@ pub struct BuildOutcome {
     pub build_id: String,
     pub artifact_count: usize,
     pub manifest: Manifest,
+    #[doc(hidden)]
+    pub requirement_authorization: Option<crate::requirements::RequirementAuthorization>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,13 +249,13 @@ struct IdentityPayload<'a> {
     process_observations: &'a [crate::manifest::ProcessObservation],
     modules: &'a [crate::manifest::ManifestModule],
     dependencies: &'a [crate::manifest::Dependency],
-    build_providers: &'a [crate::manifest::Provider],
-    build_requirements: &'a [crate::manifest::Requirement],
-    build_preparations: &'a [crate::manifest::ProviderPreparation],
+    project_identity: &'a str,
+    ladder: &'a crate::ladder::ExecutionLadder,
     providers: &'a [crate::manifest::Provider],
     requirements: &'a [crate::manifest::Requirement],
     preparations: &'a [crate::manifest::ProviderPreparation],
     tasks: &'a [crate::manifest::Task],
+    scripts: &'a [crate::manifest::Script],
     artifact_policy: &'a crate::manifest::ArtifactPolicy,
     artifact_notices: &'a [crate::manifest::ArtifactNotice],
     artifact_selections: &'a [crate::manifest::ArtifactSelection],
@@ -205,8 +269,199 @@ enum CurrentProduct {
 }
 
 pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
-    let planned = plan(options.clone())?;
+    if let Some(reused) = try_reuse_product(&options)? {
+        return Ok(reused);
+    }
+    let planned = plan_or_reuse(options.clone())?;
     materialise_at(options, planned.build_dir)
+}
+
+fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
+    if !options.reconcile_requirements
+        || options.clean
+        || !crate::project::workflow_policy(&options.source_root)?.reuse
+    {
+        return Ok(None);
+    }
+    let Some((_, build_dir, plan, _)) = reusable_stored_plan(options)? else {
+        return Ok(None);
+    };
+    if plan.tasks.iter().any(|task| !task.cache.enabled) {
+        return Ok(None);
+    }
+    let opened = match open_build(&build_dir) {
+        Ok(opened) => opened,
+        Err(_) => return Ok(None),
+    };
+    if opened.manifest.plan_id != plan.plan_id {
+        return Ok(None);
+    }
+    if opened.manifest.execution_mode
+        != if options.compile_only {
+            crate::manifest::ExecutionMode::CompileOnly
+        } else {
+            crate::manifest::ExecutionMode::Normal
+        }
+    {
+        return Ok(None);
+    }
+    let mut authorization = None;
+    if options.reconcile_requirements && !options.compile_only && !plan.requirements.is_empty() {
+        authorization = Some(crate::requirements::authorize_target_plan_until(
+            &build_dir,
+            &plan,
+            options.requirement_boundary,
+            options.yes,
+        )?);
+    }
+    let state_root = options
+        .script_state_root
+        .clone()
+        .map_or_else(crate::scripts::materialise_state_root, Ok)?;
+    let execution_mode = opened.manifest.execution_mode;
+    let mut script_outcomes = Vec::new();
+    let mut journal = crate::ladder::ExecutionJournal::new_for_ladder(
+        plan.plan_id.clone(),
+        crate::ladder::CoreRung::MaterialiseAfter,
+        &plan.ladder,
+    );
+    journal.configure(execution_mode, Vec::new());
+    journal.build_id = Some(opened.manifest.build_id.clone());
+    journal.record_reuse("product");
+    let after: crate::ladder::RungId = crate::ladder::CoreRung::MaterialiseAfter.into();
+    let end = plan.ladder.position(&after).expect("core rung");
+    for rung in plan.ladder.leaf_ids().take(end + 1) {
+        journal.set_id(rung, crate::ladder::ExecutionStatus::Running);
+        if let Some(approved) = &mut authorization {
+            crate::requirements::prepare_target_plan_at_authorized(
+                &build_dir, &plan, rung, approved,
+            )?;
+        }
+        let scripts = plan
+            .scripts
+            .iter()
+            .filter(|script| &script.at == rung)
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::scripts::check_runners(&scripts)?;
+        let outcomes = crate::scripts::execute_at(
+            &plan.scripts,
+            rung,
+            &crate::scripts::ScriptExecutionOptions {
+                state_root: &state_root,
+                payload_root: &opened.product_dir,
+                payload_kind: crate::scripts::PayloadKind::Product,
+                project_identity: &plan.project_identity,
+                plan_id: &plan.plan_id,
+                build_id: Some(&opened.manifest.build_id),
+                execution_mode,
+                allow_host_scripts: options.allow_host_scripts,
+                rerun: options.rerun_scripts,
+                target_root: None,
+            },
+        )?;
+        for outcome in &outcomes {
+            journal.record_action(
+                &outcome.identity,
+                rung,
+                match outcome.status {
+                    crate::manifest::ScriptOutcomeStatus::Ran => {
+                        crate::ladder::ExecutionStatus::Succeeded
+                    }
+                    _ => crate::ladder::ExecutionStatus::Skipped,
+                },
+                &outcome.reason,
+            );
+        }
+        script_outcomes.extend(outcomes);
+        journal.set_id(
+            rung,
+            if rung.core() == Some(crate::ladder::CoreRung::MaterialisePublish) {
+                crate::ladder::ExecutionStatus::Reused
+            } else {
+                crate::ladder::ExecutionStatus::Succeeded
+            },
+        );
+    }
+    let mut manifest = opened.manifest.clone();
+    manifest.script_outcomes = script_outcomes;
+    drop(opened);
+    write_json_atomic(&build_dir.join("manifest.json"), &manifest)?;
+    crate::ladder::write(&build_dir, &journal)?;
+    let mut reused = outcome(BuildStatus::Reused, build_dir, manifest);
+    if options.requirement_boundary > crate::ladder::CoreRung::MaterialiseAfter {
+        reused.requirement_authorization = authorization;
+    }
+    Ok(Some(reused))
+}
+
+fn reusable_stored_plan(
+    options: &BuildOptions,
+) -> Result<
+    Option<(
+        PathBuf,
+        PathBuf,
+        crate::manifest::BuildPlan,
+        crate::manifest::EvaluatedManifest,
+    )>,
+> {
+    if options.clean || !crate::project::workflow_policy(&options.source_root)?.reuse {
+        return Ok(None);
+    }
+    let source_root = match fs::canonicalize(&options.source_root) {
+        Ok(root) => root,
+        Err(_) => return Ok(None),
+    };
+    let requested = if options.build_dir.is_absolute() {
+        options.build_dir.clone()
+    } else {
+        source_root.join(&options.build_dir)
+    };
+    let build_dir = match resolve_maybe_missing(&requested) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let plan = match crate::plan::read(&build_dir) {
+        Ok(plan) => plan,
+        Err(_) => return Ok(None),
+    };
+    let desired = match crate::plan::read_execution(&build_dir, &plan) {
+        Ok(desired) => desired,
+        Err(_) => return Ok(None),
+    };
+    let arguments = options
+        .project_arguments
+        .iter()
+        .map(|argument| argument.to_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>();
+    if arguments.as_deref() != Some(plan.project_arguments.as_slice()) {
+        return Ok(None);
+    }
+    let plan_path = build_dir.join(".wombat/plan/plan.json");
+    let age = match fs::metadata(&plan_path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified.elapsed().unwrap_or(std::time::Duration::MAX),
+        Err(_) => return Ok(None),
+    };
+    if age > crate::project::workflow_policy(&source_root)?.freshness {
+        return Ok(None);
+    }
+    if validate_stored_plan_closure(&source_root, &plan, &desired).is_err() {
+        return Ok(None);
+    }
+    let host = options.host.clone().map_or_else(HostContext::observe, Ok)?;
+    if !observed_host_facts_match(&plan.observations, &host) {
+        return Ok(None);
+    }
+    Ok(Some((source_root, build_dir, plan, desired)))
+}
+
+/// Reuse a fresh stored plan when its complete observed closure still matches;
+/// otherwise construct and persist a new plan.
+pub fn plan_or_reuse(options: BuildOptions) -> Result<PlanOutcome> {
+    if let Some((_, build_dir, plan, _)) = reusable_stored_plan(&options)? {
+        return Ok(PlanOutcome { build_dir, plan });
+    }
+    plan(options)
 }
 
 /// Materialise the exact plan previously written beneath `build_dir`.
@@ -242,50 +497,318 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
     let result = (|| {
         ensure_workspace_marker(&build_dir, &source_root)?;
         recover_publication(&build_dir)?;
+        if options.clean {
+            clean_transient_workspace(&build_dir)?;
+        }
 
         let plan = crate::plan::read(&build_dir)?;
-        let mut desired = crate::plan::read_execution(&build_dir, &plan)?;
+        let mut journal = crate::ladder::read(&build_dir)
+            .map(|journal| {
+                journal.reopen_for_ladder(
+                    &plan.plan_id,
+                    crate::ladder::CoreRung::MaterialiseAfter,
+                    &plan.ladder,
+                )
+            })
+            .unwrap_or_else(|_| {
+                crate::ladder::ExecutionJournal::new_for_ladder(
+                    plan.plan_id.clone(),
+                    crate::ladder::CoreRung::MaterialiseAfter,
+                    &plan.ladder,
+                )
+            });
+        let desired = crate::plan::read_execution(&build_dir, &plan)?;
         validate_stored_plan_closure(&source_root, &plan, &desired)?;
-        let construction = crate::requirements::check_plan(&build_dir, &plan)?;
-        if !construction.satisfied() {
+        let host = options.host.clone().map_or_else(HostContext::observe, Ok)?;
+        if !options.compile_only && !plan.target.platform.locally_compatible_with(&host.platform) {
             return Err(WombatError::configuration(format!(
-                "materialisation requirements are not satisfied:\n{}install the required tools manually before materialising",
-                construction.display(),
+                "target {} is not compatible with this host {}; use --compile-only to materialise without local bring-up",
+                plan.target.platform.compact(),
+                host.platform.compact()
             )));
         }
-        crate::tasks::check_runners(&plan.tasks)?;
-        crate::tasks::execute_tasks(&source_root, &build_dir, &mut desired)?;
-        let staging_root = internal.join("staging");
-        ensure_plain_directory(&staging_root)?;
-        clear_directory_contents(&staging_root)?;
-        let staging = Builder::new()
-            .prefix("build-")
-            .tempdir_in(&staging_root)
-            .map_err(|error| WombatError::io(&staging_root, error))?;
-        let cache = crate::cache::BuildCache::open(&build_dir)?;
-        let manifest = materialise_product(&source_root, staging.path(), desired, &cache)?;
-        let staged = verify_product(staging.path())?;
-        debug_assert_eq!(staged, manifest);
-
-        let current = inspect_product(&build_dir);
-        if let CurrentProduct::Valid(existing) = &current
-            && existing.build_id == manifest.build_id
-        {
-            return Ok(outcome(
-                BuildStatus::Unchanged,
-                build_dir.clone(),
-                existing.as_ref().clone(),
-            ));
-        }
-        let status = match current {
-            CurrentProduct::Missing => BuildStatus::Created,
-            CurrentProduct::Valid(_) => BuildStatus::Updated,
-            CurrentProduct::Invalid => BuildStatus::Repaired,
+        let skipped_requirement_gates = if options.compile_only {
+            plan.requirements
+                .iter()
+                .filter(|requirement| {
+                    plan.ladder
+                        .before_or_at(&requirement.when, crate::ladder::CoreRung::MaterialiseAfter)
+                })
+                .map(|requirement| requirement.when.id().to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
         };
+        journal.configure(
+            if options.compile_only {
+                crate::manifest::ExecutionMode::CompileOnly
+            } else {
+                crate::manifest::ExecutionMode::Normal
+            },
+            skipped_requirement_gates.clone(),
+        );
+        crate::ladder::write(&build_dir, &journal)?;
+        let mut authorization = if !options.compile_only
+            && options.reconcile_requirements
+            && !plan.requirements.is_empty()
+        {
+            Some(crate::requirements::authorize_target_plan_until(
+                &build_dir,
+                &plan,
+                options.requirement_boundary,
+                options.yes,
+            )?)
+        } else {
+            None
+        };
+        let execution_mode = if options.compile_only {
+            crate::manifest::ExecutionMode::CompileOnly
+        } else {
+            crate::manifest::ExecutionMode::Normal
+        };
+        let script_state_root = options
+            .script_state_root
+            .clone()
+            .map_or_else(crate::scripts::materialise_state_root, Ok)?;
+        let mut desired = Some(desired);
+        let mut staging = None;
+        let mut materialised_manifest = None;
+        let mut published_manifest = None;
+        let mut script_outcomes = Vec::new();
+        let mut status = None;
+        let materialise_after: crate::ladder::RungId =
+            crate::ladder::CoreRung::MaterialiseAfter.into();
+        let boundary = plan
+            .ladder
+            .position(&materialise_after)
+            .expect("fixed materialise.after rung exists");
 
-        publish(&build_dir, staging.path())?;
-        let published = verify_product(&build_dir)?;
-        Ok(outcome(status, build_dir.clone(), published))
+        for rung in plan
+            .ladder
+            .leaf_ids()
+            .take(boundary + 1)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(authorization) = &mut authorization {
+                let gate = format!("requirements:{}", rung.id());
+                journal.record_action(
+                    &gate,
+                    &rung,
+                    crate::ladder::ExecutionStatus::Running,
+                    "observing deadline gate",
+                );
+                crate::ladder::write(&build_dir, &journal)?;
+                if let Err(error) = crate::requirements::prepare_target_plan_at_authorized(
+                    &build_dir,
+                    &plan,
+                    &rung,
+                    authorization,
+                ) {
+                    journal.record_action(
+                        &gate,
+                        &rung,
+                        crate::ladder::ExecutionStatus::Failed,
+                        error.to_string(),
+                    );
+                    journal.fail_id(&rung, &error);
+                    let _ = crate::ladder::write(&build_dir, &journal);
+                    return Err(error);
+                }
+                journal.record_action(
+                    gate,
+                    &rung,
+                    crate::ladder::ExecutionStatus::Succeeded,
+                    "requirements observed",
+                );
+            }
+            journal.set_id(&rung, crate::ladder::ExecutionStatus::Running);
+            crate::ladder::write(&build_dir, &journal)?;
+
+            let mut actions = plan
+                .tasks
+                .iter()
+                .filter(|task| task.at == rung)
+                .map(|task| (task.declaration_order, false, task.identity.clone()))
+                .chain(
+                    plan.scripts
+                        .iter()
+                        .filter(|script| script.at == rung)
+                        .map(|script| (script.declaration_order, true, script.identity.clone())),
+                )
+                .collect::<Vec<_>>();
+            actions.sort_by_key(|(order, _, _)| *order);
+            for (_, script_action, identity) in actions {
+                journal.record_action(
+                    &identity,
+                    &rung,
+                    crate::ladder::ExecutionStatus::Running,
+                    "executing",
+                );
+                crate::ladder::write(&build_dir, &journal)?;
+                let action_result = if script_action {
+                    let script = plan
+                        .scripts
+                        .iter()
+                        .find(|script| script.identity == identity)
+                        .expect("planned script exists");
+                    crate::scripts::check_runners(std::slice::from_ref(script))?;
+                    crate::scripts::execute_at(
+                        std::slice::from_ref(script),
+                        &rung,
+                        &crate::scripts::ScriptExecutionOptions {
+                            state_root: &script_state_root,
+                            payload_root: &build_dir.join(".wombat/plan"),
+                            payload_kind: crate::scripts::PayloadKind::Plan,
+                            project_identity: &plan.project_identity,
+                            plan_id: &plan.plan_id,
+                            build_id: materialised_manifest
+                                .as_ref()
+                                .map(|manifest: &Manifest| manifest.build_id.as_str()),
+                            execution_mode,
+                            allow_host_scripts: options.allow_host_scripts,
+                            rerun: options.rerun_scripts,
+                            target_root: None,
+                        },
+                    )
+                    .map(|outcomes| {
+                        let status = outcomes.first().map_or(
+                            crate::ladder::ExecutionStatus::Succeeded,
+                            |outcome| match outcome.status {
+                                crate::manifest::ScriptOutcomeStatus::Ran => {
+                                    crate::ladder::ExecutionStatus::Succeeded
+                                }
+                                crate::manifest::ScriptOutcomeStatus::ScheduledSkip
+                                | crate::manifest::ScriptOutcomeStatus::CompileOnlySkip
+                                | crate::manifest::ScriptOutcomeStatus::Refused => {
+                                    crate::ladder::ExecutionStatus::Skipped
+                                }
+                            },
+                        );
+                        let reason = outcomes.first().map_or_else(
+                            || "completed".to_string(),
+                            |outcome| outcome.reason.clone(),
+                        );
+                        script_outcomes.extend(outcomes);
+                        (status, reason)
+                    })
+                } else {
+                    let task = plan
+                        .tasks
+                        .iter()
+                        .find(|task| task.identity == identity)
+                        .expect("planned task exists");
+                    crate::tasks::check_runners(std::slice::from_ref(task))?;
+                    crate::tasks::execute_task(
+                        &source_root,
+                        &build_dir,
+                        desired.as_mut().ok_or_else(|| {
+                            WombatError::configuration(
+                                "task was ordered after artifact materialisation",
+                            )
+                        })?,
+                        &rung,
+                        &identity,
+                    )
+                    .map(|()| {
+                        (
+                            crate::ladder::ExecutionStatus::Succeeded,
+                            "completed".to_string(),
+                        )
+                    })
+                };
+                match action_result {
+                    Ok((action_status, reason)) => {
+                        journal.record_action(&identity, &rung, action_status, reason);
+                        crate::ladder::write(&build_dir, &journal)?;
+                    }
+                    Err(error) => {
+                        journal.record_action(
+                            &identity,
+                            &rung,
+                            crate::ladder::ExecutionStatus::Failed,
+                            error.to_string(),
+                        );
+                        journal.fail_id(&rung, &error);
+                        let _ = crate::ladder::write(&build_dir, &journal);
+                        return Err(error);
+                    }
+                }
+            }
+
+            match rung.core() {
+                Some(crate::ladder::CoreRung::MaterialiseArtifacts) => {
+                    let staging_root = internal.join("staging");
+                    ensure_plain_directory(&staging_root)?;
+                    clear_directory_contents(&staging_root)?;
+                    let next_staging = Builder::new()
+                        .prefix("build-")
+                        .tempdir_in(&staging_root)
+                        .map_err(|error| WombatError::io(&staging_root, error))?;
+                    let cache = crate::cache::BuildCache::open(&build_dir)?;
+                    let manifest = materialise_product(
+                        &source_root,
+                        next_staging.path(),
+                        desired.take().expect("artifacts materialise once"),
+                        &cache,
+                        execution_mode,
+                        skipped_requirement_gates.clone(),
+                    )?;
+                    staging = Some(next_staging);
+                    materialised_manifest = Some(manifest);
+                }
+                Some(crate::ladder::CoreRung::MaterialisePublish) => {
+                    let staging = staging.as_ref().expect("artifacts precede publication");
+                    let manifest = materialised_manifest.as_ref().expect("manifest exists");
+                    let staged = verify_product(staging.path())?;
+                    debug_assert_eq!(&staged, manifest);
+                    let current = inspect_product(&build_dir);
+                    if let CurrentProduct::Valid(existing) = &current
+                        && existing.build_id == manifest.build_id
+                    {
+                        status = Some(BuildStatus::Unchanged);
+                        journal.set_id(&rung, crate::ladder::ExecutionStatus::Reused);
+                        journal.build_id = Some(existing.build_id.clone());
+                        journal.record_reuse("product");
+                        published_manifest = Some(existing.as_ref().clone());
+                    } else {
+                        status = Some(match current {
+                            CurrentProduct::Missing => BuildStatus::Created,
+                            CurrentProduct::Valid(_) => BuildStatus::Updated,
+                            CurrentProduct::Invalid => BuildStatus::Repaired,
+                        });
+                        publish(&build_dir, staging.path())?;
+                        let published = verify_product(&build_dir)?;
+                        journal.build_id = Some(published.build_id.clone());
+                        published_manifest = Some(published);
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(
+                journal.rungs.iter().find(|(id, _)| id == &rung),
+                Some((_, crate::ladder::ExecutionStatus::Reused))
+            ) {
+                journal.set_id(&rung, crate::ladder::ExecutionStatus::Succeeded);
+            }
+            crate::ladder::write(&build_dir, &journal)?;
+        }
+
+        let mut published = published_manifest.expect("publication rung produced a manifest");
+        published.script_outcomes = script_outcomes;
+        write_json_atomic(&build_dir.join("manifest.json"), &published)?;
+        published = verify_product(&build_dir)?;
+        let mut outcome = outcome(
+            status.expect("publication determines status"),
+            build_dir.clone(),
+            published,
+        );
+        if options.requirement_boundary > crate::ladder::CoreRung::MaterialiseAfter {
+            outcome.requirement_authorization = authorization;
+        }
+        Ok(outcome)
     })();
 
     let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
@@ -299,6 +822,21 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
             Ok(outcome)
         }
     }
+}
+
+fn clean_transient_workspace(build_dir: &Path) -> Result<()> {
+    let internal = build_dir.join(".wombat");
+    for name in ["cache", "tasks", "logs", "staging"] {
+        let path = internal.join(name);
+        if path.exists() {
+            clear_directory_contents(&path)?;
+        }
+    }
+    let journal = internal.join("execution-journal.json");
+    if journal.exists() {
+        fs::remove_file(&journal).map_err(|error| WombatError::io(&journal, error))?;
+    }
+    Ok(())
 }
 
 fn validate_stored_plan_closure(
@@ -371,7 +909,71 @@ fn validate_stored_plan_closure(
             }
         }
     }
+    for script in &plan.scripts {
+        for payload in &script.payloads {
+            let path = source_root.join(&payload.source);
+            let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+            let metadata = fs::metadata(&path).map_err(|error| WombatError::io(&path, error))?;
+            if digest_string(Sha256::digest(&bytes)) != payload.digest
+                || u64::try_from(bytes.len()).ok() != Some(payload.size)
+                || executable_intent(&metadata) != payload.executable
+            {
+                return Err(WombatError::configuration(format!(
+                    "stored plan is stale because script payload `{}` changed; run `wombat plan construct`",
+                    payload.source
+                )));
+            }
+        }
+    }
+    revalidate_sources(source_root, &desired.artifacts, &desired.directories)?;
     Ok(())
+}
+
+#[doc(hidden)]
+pub fn check_compile_only_plan(
+    source_root: &Path,
+    build_dir: &Path,
+    plan: &crate::manifest::BuildPlan,
+) -> Result<()> {
+    let desired = crate::plan::read_execution(build_dir, plan)?;
+    validate_stored_plan_closure(source_root, plan, &desired)?;
+    crate::tasks::check_runners(&plan.tasks)?;
+    crate::scripts::check_runners(&plan.scripts)
+}
+
+#[doc(hidden)]
+pub fn check_plan_execution(build_dir: &Path, plan: &crate::manifest::BuildPlan) -> Result<()> {
+    crate::scripts::verify_payloads(
+        &build_dir.join(".wombat/plan"),
+        &plan.scripts,
+        crate::scripts::PayloadKind::Plan,
+    )?;
+    crate::tasks::check_runners(&plan.tasks)?;
+    crate::scripts::check_runners(&plan.scripts)
+}
+
+fn observed_host_facts_match(
+    observations: &[crate::manifest::Observation],
+    host: &HostContext,
+) -> bool {
+    let frozen = host.to_frozen();
+    observations
+        .iter()
+        .filter(|observation| observation.subject == crate::manifest::ObservationSubject::Host)
+        .all(|observation| {
+            frozen_value_at_path(&frozen, &observation.path) == Some(&observation.value)
+        })
+}
+
+fn frozen_value_at_path<'a>(
+    root: &'a crate::frozen::FrozenValue,
+    path: &str,
+) -> Option<&'a crate::frozen::FrozenValue> {
+    path.split('.')
+        .try_fold(root, |value, component| match value {
+            crate::frozen::FrozenValue::Map(map) => map.get(component),
+            _ => None,
+        })
 }
 
 pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
@@ -589,6 +1191,13 @@ fn copy_functional_product(source: &Path, destination: &Path) -> Result<()> {
     {
         copy_product_directory(&providers, &destination.join("providers"))?;
     }
+    let scripts = source.join("scripts");
+    if scripts
+        .try_exists()
+        .map_err(|error| WombatError::io(&scripts, error))?
+    {
+        copy_product_directory(&scripts, &destination.join("scripts"))?;
+    }
     Ok(())
 }
 
@@ -635,6 +1244,7 @@ fn outcome(status: BuildStatus, build_dir: PathBuf, manifest: Manifest) -> Build
         build_id: manifest.build_id.clone(),
         artifact_count: manifest.artifacts.len(),
         manifest,
+        requirement_authorization: None,
     }
 }
 
@@ -853,8 +1463,18 @@ fn materialise_product(
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
     cache: &crate::cache::BuildCache,
+    execution_mode: crate::manifest::ExecutionMode,
+    skipped_requirement_gates: Vec<String>,
 ) -> Result<Manifest> {
-    materialise_inner(source_root, product_root, desired, Some(cache), |_| {})
+    materialise_inner(
+        source_root,
+        product_root,
+        desired,
+        Some(cache),
+        execution_mode,
+        skipped_requirement_gates,
+        |_| {},
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -870,7 +1490,15 @@ fn materialise_with_hook(
     desired: crate::manifest::EvaluatedManifest,
     hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
-    materialise_inner(source_root, product_root, desired, None, hook)
+    materialise_inner(
+        source_root,
+        product_root,
+        desired,
+        None,
+        crate::manifest::ExecutionMode::Normal,
+        Vec::new(),
+        hook,
+    )
 }
 
 fn materialise_inner(
@@ -878,6 +1506,8 @@ fn materialise_inner(
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
     cache: Option<&crate::cache::BuildCache>,
+    execution_mode: crate::manifest::ExecutionMode,
+    skipped_requirement_gates: Vec<String>,
     mut hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
     let tree = product_root.join("tree");
@@ -889,6 +1519,12 @@ fn materialise_inner(
         hook(MaterialisationPoint::AfterArtifact(index));
     }
     materialise_provider_payloads(source_root, product_root, &desired.providers)?;
+    crate::scripts::publish_payloads(
+        source_root,
+        product_root,
+        &desired.scripts,
+        crate::scripts::PayloadKind::Product,
+    )?;
     hook(MaterialisationPoint::BeforeFinalValidation);
     revalidate_sources(source_root, &desired.artifacts, &desired.directories)?;
     revalidate_lua_sources(source_root, &desired.sources)?;
@@ -897,6 +1533,8 @@ fn materialise_inner(
         wombat_version: WOMBAT_VERSION.to_string(),
         build_id: String::new(),
         plan_id: desired.plan_id,
+        execution_mode,
+        skipped_requirement_gates,
         sources: desired.sources,
         inputs: desired.inputs,
         target: desired.target,
@@ -904,13 +1542,14 @@ fn materialise_inner(
         process_observations: desired.process_observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
-        build_providers: desired.build_providers,
-        build_requirements: desired.build_requirements,
-        build_preparations: desired.build_preparations,
+        project_identity: desired.project_identity,
+        ladder: desired.ladder,
         providers: desired.providers,
         requirements: desired.requirements,
         preparations: desired.preparations,
         tasks: desired.tasks.into_iter().map(|task| task.task).collect(),
+        scripts: desired.scripts,
+        script_outcomes: desired.script_outcomes,
         artifact_policy: desired.artifact_policy,
         artifact_notices: desired.artifact_notices,
         artifact_selections: desired.artifact_selections,
@@ -1605,13 +2244,13 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
         process_observations: &manifest.process_observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
-        build_providers: &manifest.build_providers,
-        build_requirements: &manifest.build_requirements,
-        build_preparations: &manifest.build_preparations,
+        project_identity: &manifest.project_identity,
+        ladder: &manifest.ladder,
         providers: &manifest.providers,
         requirements: &manifest.requirements,
         preparations: &manifest.preparations,
         tasks: &manifest.tasks,
+        scripts: &manifest.scripts,
         artifact_policy: &manifest.artifact_policy,
         artifact_notices: &manifest.artifact_notices,
         artifact_selections: &manifest.artifact_selections,
@@ -1665,6 +2304,11 @@ fn verify_product(root: &Path) -> Result<Manifest> {
         .map_err(|error| WombatError::io(&manifest_path, error))?;
     let manifest: Manifest = serde_json::from_str(&contents)?;
     validate_manifest(&manifest)?;
+    crate::scripts::verify_payloads(
+        root,
+        &manifest.scripts,
+        crate::scripts::PayloadKind::Product,
+    )?;
     let expected_id = compute_build_id(&manifest)?;
     if manifest.build_id != expected_id {
         return Err(WombatError::configuration(format!(
@@ -1691,6 +2335,9 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             manifest.wombat_version
         )));
     }
+    manifest.ladder.validate()?;
+    validate_sha256(&manifest.project_identity, "manifest project identity")?;
+    crate::plan::validate_actions(&manifest.ladder, &manifest.tasks, &manifest.scripts)?;
     validate_sha256(&manifest.plan_id, "manifest build plan identity")?;
     if !manifest
         .sources
@@ -1876,20 +2523,54 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         )?;
     }
     validate_provider_scope(
-        &manifest.build_providers,
-        &manifest.build_requirements,
-        &manifest.build_preparations,
-        &source_paths,
-        "build",
-    )?;
-    validate_provider_scope(
         &manifest.providers,
         &manifest.requirements,
         &manifest.preparations,
         &source_paths,
         "target",
     )?;
+    for requirement in &manifest.requirements {
+        if !manifest.ladder.contains(&requirement.when)
+            || manifest.ladder.is_container(&requirement.when)
+        {
+            return Err(WombatError::configuration(format!(
+                "manifest requirement targets invalid rung `{}`",
+                requirement.when
+            )));
+        }
+    }
     validate_tasks(manifest, &source_paths)?;
+    let script_identities = manifest
+        .scripts
+        .iter()
+        .map(|script| script.identity.as_str())
+        .collect::<BTreeSet<_>>();
+    for script in &manifest.scripts {
+        validate_source_trace(
+            &script.declared_at,
+            &source_paths,
+            "manifest script declaration",
+        )?;
+        if !script
+            .payloads
+            .windows(2)
+            .all(|pair| pair[0].relative < pair[1].relative)
+        {
+            return Err(WombatError::configuration(format!(
+                "manifest script `{}` payloads are not uniquely sorted",
+                script.identity
+            )));
+        }
+    }
+    for outcome in &manifest.script_outcomes {
+        if !script_identities.contains(outcome.identity.as_str())
+            || !manifest.ladder.contains(&outcome.rung)
+        {
+            return Err(WombatError::configuration(
+                "manifest contains an outcome for an unknown script or rung",
+            ));
+        }
+    }
     validate_artifact_metadata(
         manifest.artifact_policy,
         &manifest.artifact_notices,
@@ -3001,7 +3682,7 @@ fn publish_with_hook(
     let mut product_was_mutated = false;
     let result = (|| {
         after_step(PublicationStep::BeforeBackup)?;
-        for name in ["tree", "providers", "manifest.json"] {
+        for name in ["tree", "providers", "scripts", "manifest.json"] {
             let current = build_dir.join(name);
             if current
                 .try_exists()
@@ -3022,6 +3703,14 @@ fn publish_with_hook(
         {
             fs::rename(&staged_providers, build_dir.join("providers"))
                 .map_err(|error| WombatError::io(build_dir.join("providers"), error))?;
+        }
+        let staged_scripts = staged.join("scripts");
+        if staged_scripts
+            .try_exists()
+            .map_err(|error| WombatError::io(&staged_scripts, error))?
+        {
+            fs::rename(&staged_scripts, build_dir.join("scripts"))
+                .map_err(|error| WombatError::io(build_dir.join("scripts"), error))?;
         }
         product_was_mutated = true;
         after_step(PublicationStep::TreePublished)?;
@@ -3047,7 +3736,7 @@ fn publish_with_hook(
 }
 
 fn restore_rollback(build_dir: &Path, rollback: &Path) -> Result<()> {
-    for name in ["tree", "providers", "manifest.json"] {
+    for name in ["tree", "providers", "scripts", "manifest.json"] {
         let source = rollback.join(name);
         if source
             .try_exists()

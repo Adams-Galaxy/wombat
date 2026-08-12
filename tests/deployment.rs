@@ -605,11 +605,11 @@ fn state_write_failure_keeps_old_state_and_retry_advances_it_safely() {
     );
     assert_eq!(
         fs::read_to_string(repository.target()).unwrap(),
-        "version = 2\n"
+        "version = 1\n"
     );
 
     let plan = diff(&repository.options()).unwrap().plan;
-    assert_eq!(plan.items[0].action, ReconciliationAction::AdvanceState);
+    assert_eq!(plan.items[0].action, ReconciliationAction::Update);
     apply(&repository.options(), ConflictPolicy::Fail).unwrap();
 }
 
@@ -641,7 +641,8 @@ fn target_compatibility_precedes_state_or_target_mutation_and_explicit_roots_all
     build(
         BuildOptions::new(&repository.root, &repository.build_dir)
             .with_project_arguments(["--target", "linux/x86_64"])
-            .with_host(host(OperatingSystemName::Macos, Architecture::Aarch64)),
+            .with_host(host(OperatingSystemName::Macos, Architecture::Aarch64))
+            .with_compile_only(true),
     )
     .unwrap();
     let implicit_state = repository._temporary.path().join("implicit-state");
@@ -800,7 +801,7 @@ fn cli_deploy_builds_and_applies_once_and_noninteractive_conflicts_fail() {
         &[
             "--source",
             repository.root.to_str().unwrap(),
-            "deploy",
+            "apply",
             "--target-root",
             repository.home.to_str().unwrap(),
         ],
@@ -824,7 +825,7 @@ fn cli_deploy_builds_and_applies_once_and_noninteractive_conflicts_fail() {
         &[
             "--source",
             repository.root.to_str().unwrap(),
-            "deploy",
+            "apply",
             "--target-root",
             repository.home.to_str().unwrap(),
         ],
@@ -851,7 +852,7 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Create .config/app.toml"));
     let output = run_wombat(
-        &["apply", "-B", build, "--target-root", home],
+        &["plan", "deploy", "-B", build, "--target-root", home],
         repository._temporary.path(),
         &repository.home,
         &repository.state,
@@ -871,7 +872,8 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
     repository.build();
     let skipped = run_wombat_with_input(
         &[
-            "apply",
+            "plan",
+            "deploy",
             "-B",
             build,
             "--target-root",
@@ -898,7 +900,8 @@ fn cli_absolute_diff_and_apply_need_no_source_and_explicit_ask_gathers_decisions
 
     let overwritten = run_wombat_with_input(
         &[
-            "apply",
+            "plan",
+            "deploy",
             "-B",
             build,
             "--target-root",
@@ -925,7 +928,8 @@ fn target_config_is_literal_dot_config_even_when_xdg_config_home_differs() {
     let other_config = repository._temporary.path().join("other-config");
     let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
         .args([
-            "apply",
+            "plan",
+            "deploy",
             "-B",
             repository.build_dir.to_str().unwrap(),
             "--conflict",
@@ -952,7 +956,8 @@ fn cli_state_falls_back_beneath_invoking_home_when_xdg_state_home_is_absent() {
     repository.build();
     let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
         .args([
-            "apply",
+            "plan",
+            "deploy",
             "-B",
             repository.build_dir.to_str().unwrap(),
             "--conflict",
@@ -969,6 +974,102 @@ fn cli_state_falls_back_beneath_invoking_home_when_xdg_state_home_is_absent() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(repository.home.join(".local/state/wombat/targets").is_dir());
+}
+
+#[test]
+fn noninteractive_plan_mismatch_requires_its_dedicated_override() {
+    let repository = Repository::new("first = true\n");
+    repository.build();
+    fs::write(
+        repository.root.join("src/dot_config/app.toml"),
+        "second = true\n",
+    )
+    .unwrap();
+    let constructed = run_wombat(
+        &[
+            "--source",
+            repository.root.to_str().unwrap(),
+            "plan",
+            "construct",
+            "-B",
+            repository.build_dir.to_str().unwrap(),
+        ],
+        repository._temporary.path(),
+        &repository.home,
+        &repository.state,
+    );
+    assert!(constructed.status.success());
+    let refused = run_wombat(
+        &[
+            "--source",
+            repository.root.to_str().unwrap(),
+            "plan",
+            "deploy",
+            "-B",
+            repository.build_dir.to_str().unwrap(),
+            "--target-root",
+            repository.home.to_str().unwrap(),
+            "--conflict",
+            "fail",
+        ],
+        repository._temporary.path(),
+        &repository.home,
+        &repository.state,
+    );
+    assert!(!refused.status.success());
+    let diagnostic = String::from_utf8_lossy(&refused.stderr);
+    assert!(diagnostic.contains("--allow-plan-mismatch"), "{diagnostic}");
+    let inspection = diff(&repository.options()).unwrap();
+    assert!(inspection.output.contains("newer pending plan"));
+    assert!(inspection.output.contains("diff uses product plan"));
+    let allowed = run_wombat(
+        &[
+            "--source",
+            repository.root.to_str().unwrap(),
+            "plan",
+            "deploy",
+            "-B",
+            repository.build_dir.to_str().unwrap(),
+            "--target-root",
+            repository.home.to_str().unwrap(),
+            "--conflict",
+            "fail",
+            "--allow-plan-mismatch",
+        ],
+        repository._temporary.path(),
+        &repository.home,
+        &repository.state,
+    );
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repository.target()).unwrap(),
+        "first = true\n"
+    );
+}
+
+#[test]
+fn clean_apply_resets_only_the_selected_target_execution_journal() {
+    let repository = Repository::new("clean = true\n");
+    repository.build();
+    apply(&repository.options(), ConflictPolicy::Fail).unwrap();
+    let target_state = repository.state_dir();
+    let journal = target_state.join("execution-journal.json");
+    assert!(journal.is_file());
+    let applied_state = fs::read(target_state.join("state.json")).unwrap();
+    let target_contents = fs::read(repository.target()).unwrap();
+    let prepared = prepare_apply(&repository.options().with_clean(true)).unwrap();
+    assert!(!journal.exists());
+    assert_eq!(
+        fs::read(target_state.join("state.json")).unwrap(),
+        applied_state
+    );
+    assert_eq!(fs::read(repository.target()).unwrap(), target_contents);
+    prepared.apply(&std::collections::BTreeMap::new()).unwrap();
+    assert!(journal.is_file());
 }
 
 #[test]

@@ -90,7 +90,6 @@ fn setup_clones_builds_checks_deploys_and_converges_without_pulling() {
             .arg(&source)
             .arg("setup")
             .arg(&locator)
-            .arg("--no-bootstrap")
             .arg("--yes")
             .arg("--target-root")
             .arg(&home)
@@ -198,8 +197,8 @@ fn setup_refuses_an_unrelated_nonempty_destination() {
         .arg(&source)
         .arg("setup")
         .arg(locator)
-        .arg("--no-bootstrap")
-        .arg("--no-deploy")
+        .arg("--target-root")
+        .arg(temporary.path().join("target"))
         .output()
         .unwrap();
     assert!(!output.status.success());

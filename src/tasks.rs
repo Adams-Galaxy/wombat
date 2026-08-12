@@ -29,7 +29,7 @@ import json
 import sys
 from pathlib import Path
 
-_PREFIXES = ("--params=", "--output-dir=", "--work-dir=", "--cache-dir=")
+_PREFIXES = ("--params=", "--output-dir=", "--work-dir=", "--cache-dir=", "--source-dir=", "--scope=", "--target-root=")
 _values = {}
 _remaining = [sys.argv[0]]
 for _argument in sys.argv[1:]:
@@ -47,6 +47,9 @@ params = json.loads(_values.get("params", "{}"))
 output = Path(_values.get("output-dir", "output"))
 work = Path(_values.get("work-dir", "work"))
 cache = Path(_values.get("cache-dir", "cache"))
+source = Path(_values.get("source-dir", "."))
+scope = _values.get("scope", "target")
+target_root = Path(_values["target-root"]) if "target-root" in _values else None
 "#;
 
 #[derive(Serialize)]
@@ -60,12 +63,52 @@ struct TaskKey<'a> {
     target_root: &'a Option<crate::manifest::TaskTargetRoot>,
     revision: &'a Option<String>,
     interpreter_identity: &'a str,
+    at: &'a crate::ladder::RungId,
 }
 
+#[allow(dead_code)]
 pub(crate) fn execute_tasks(
     source_root: &Path,
     build_dir: &Path,
     desired: &mut EvaluatedManifest,
+) -> Result<()> {
+    let rungs = desired
+        .tasks
+        .iter()
+        .map(|task| task.task.at.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for rung in rungs {
+        execute_tasks_at(source_root, build_dir, desired, &rung)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn execute_tasks_at(
+    source_root: &Path,
+    build_dir: &Path,
+    desired: &mut EvaluatedManifest,
+    rung: &crate::ladder::RungId,
+) -> Result<()> {
+    execute_tasks_selected(source_root, build_dir, desired, rung, None)
+}
+
+pub(crate) fn execute_task(
+    source_root: &Path,
+    build_dir: &Path,
+    desired: &mut EvaluatedManifest,
+    rung: &crate::ladder::RungId,
+    identity: &str,
+) -> Result<()> {
+    execute_tasks_selected(source_root, build_dir, desired, rung, Some(identity))
+}
+
+fn execute_tasks_selected(
+    source_root: &Path,
+    build_dir: &Path,
+    desired: &mut EvaluatedManifest,
+    rung: &crate::ladder::RungId,
+    identity: Option<&str>,
 ) -> Result<()> {
     if desired.tasks.is_empty() {
         return Ok(());
@@ -78,6 +121,9 @@ pub(crate) fn execute_tasks(
     for index in 0..desired.tasks.len() {
         let evaluated = desired.tasks[index].clone();
         let task = &evaluated.task;
+        if &task.at != rung || identity.is_some_and(|identity| task.identity != identity) {
+            continue;
+        }
         let workspace = tasks_root.join(workspace_name(&task.identity));
         ensure_private_directory(&workspace)?;
         let output = workspace.join("output");
@@ -114,6 +160,7 @@ pub(crate) fn execute_tasks(
                 target_root: &task.target_root,
                 revision: &task.cache.revision,
                 interpreter_identity: &interpreter_identity,
+                at: &task.at,
             },
         )?;
 
@@ -251,7 +298,9 @@ pub(crate) fn check_runners(tasks: &[crate::manifest::Task]) -> Result<()> {
         if resolve_command(command).is_none() {
             return Err(task_error(
                 task,
-                &format!("interpreter `{command}` is unavailable; run `wombat prepare`"),
+                &format!(
+                    "interpreter `{command}` is unavailable; configure a runner or satisfy its requirement before materialisation"
+                ),
             ));
         }
     }
@@ -285,6 +334,14 @@ fn run_task(
         format!("--output-dir={}", output.display()),
         format!("--work-dir={}", work.display()),
         format!("--cache-dir={}", cache.display()),
+        format!(
+            "--source-dir={}",
+            entrypoint
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .display()
+        ),
+        "--scope=target".to_string(),
     ];
     if task.runner.family == TaskRunnerFamily::EmbeddedLua {
         return run_lua(task, entrypoint, workspace, &protocol);
@@ -304,7 +361,7 @@ fn run_task(
         let executable = resolve_command(configured).ok_or_else(|| {
             task_error(
                 task,
-                &format!("interpreter `{configured}` is unavailable; run `wombat prepare`"),
+                &format!("interpreter `{configured}` is unavailable; configure a runner or satisfy its requirement before materialisation"),
             )
         })?;
         let mut command = Command::new(executable);
@@ -652,7 +709,7 @@ fn interpreter_identity(task: &crate::manifest::Task, _entrypoint: &Path) -> Res
     let resolved = resolve_command(configured).ok_or_else(|| {
         task_error(
             task,
-            &format!("interpreter `{configured}` is unavailable; run `wombat prepare`"),
+            &format!("interpreter `{configured}` is unavailable; configure a runner or satisfy its requirement before materialisation"),
         )
     })?;
     let version = Command::new(&resolved)

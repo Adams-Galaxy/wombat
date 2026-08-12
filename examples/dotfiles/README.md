@@ -4,7 +4,9 @@ This is a small but complete Wombat source repository. It selects Homebrew on
 macOS and Apt on Debian-family Linux, declares portable command products, and
 builds a harmless shell, Git, prompt, editor, and local-tool configuration. It
 also demonstrates binary-safe Lua generation, a cached Python generator with a
-companion module, and an uncached outputless validation task.
+companion module, an uncached outputless validation task, a custom execution
+ladder, a scheduled Python preparation script, and a post-deployment shell
+verification script.
 
 Module files are deliberately flat and organized as code; their physical
 location has no relationship to deployed paths. Each module establishes any
@@ -19,6 +21,7 @@ wombat -S examples/dotfiles build -- \
   --name "Example User" --email example@example.invalid
 ```
 
-Use `wombat plan inspect`, `wombat inspect`, and `wombat check` against the
-resulting build to explore the stored plan and exact product. Deployment returns
-with Plan 0013.
+Use `wombat plan inspect ladder`, `wombat plan inspect scripts`, `wombat
+inspect ladder`, `wombat inspect scripts`, and `wombat check` against the
+resulting build to explore the stored plan and exact product. `wombat apply`
+constructs, materialises, and deploys the complete example workflow.

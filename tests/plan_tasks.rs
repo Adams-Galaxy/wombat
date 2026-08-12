@@ -52,16 +52,16 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     let (_temporary, source) = repository();
     let options = BuildOptions::new(&source, "build");
     let planned = plan(options.clone()).unwrap();
-    assert_eq!(planned.plan.format_version, 3);
+    assert_eq!(planned.plan.format_version, 5);
     assert_eq!(planned.plan.tasks.len(), 1);
-    assert_eq!(planned.plan.build_requirements.len(), 1);
+    assert!(planned.plan.requirements.is_empty());
     assert!(!planned.build_dir.join(".wombat/tasks").exists());
     let inspected = inspect_plan(&planned.plan, PlanInspectSection::Tasks);
     assert!(inspected.contains("tasks/generate.py"));
     assert!(inspected.contains("cache: true"));
 
     let built = build(options.clone()).unwrap();
-    assert_eq!(built.manifest.format_version, 12);
+    assert_eq!(built.manifest.format_version, 14);
     assert_eq!(built.manifest.plan_id, planned.plan.plan_id);
     assert_eq!(built.manifest.tasks[0].outputs.len(), 1);
     assert_eq!(
@@ -125,9 +125,26 @@ w.build.task("generate.py", {}, { interpreter = "wombat-plan-0010-missing" })
     .unwrap();
     let error = build(BuildOptions::new(&source, "build")).unwrap_err();
     let rendered = error.to_string();
-    assert!(rendered.contains("materialisation requirements are not satisfied"));
-    assert!(rendered.contains("install the required tools manually"));
+    assert!(rendered.contains("interpreter"), "{rendered}");
     assert!(!source.join("build/.wombat/tasks").exists());
+}
+
+#[test]
+fn compile_only_check_still_requires_direct_task_runners() {
+    let (_temporary, source) = repository();
+    fs::write(
+        source.join("modules/dot_config/generated.lua"),
+        r#"local w = require('wombat')
+w.module.from(".config")
+w.build.task("generate.py", {}, { interpreter = "wombat-compile-only-missing" })
+"#,
+    )
+    .unwrap();
+    let planned = plan(BuildOptions::new(&source, "compile-check")).unwrap();
+    let error = wombat::build::check_compile_only_plan(&source, &planned.build_dir, &planned.plan)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("wombat-compile-only-missing"), "{error}");
 }
 
 #[test]
@@ -320,13 +337,13 @@ fn task_failure_preserves_the_previous_completed_product() {
 }
 
 #[test]
-fn plan_keeps_host_construction_policy_separate_from_cross_target_policy() {
+fn plan_normalizes_requirement_deadlines_for_cross_target_policy() {
     let temporary = tempdir().unwrap();
     let source = temporary.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(
         source.join("wombat.lua"),
-        "local w = require('wombat')\nw.target({ os = { name = 'linux', distribution = { id = 'ubuntu', id_like = { 'debian' } } }, arch = 'x86_64' })\nw.providers({ { name = 'apt', with = { update = true } } })\nw.need.command('git')\nw.build.need.command('sh')\n",
+        "local w = require('wombat')\nw.target({ os = { name = 'linux', distribution = { id = 'ubuntu', id_like = { 'debian' } } }, arch = 'x86_64' })\nw.providers({ { name = 'apt', with = { update = true } } })\nw.need.command('git', { when = w.rungs.materialise.tasks })\n",
     )
     .unwrap();
     let host = wombat::HostContext::fixture(wombat::TargetPlatform::minimal(
@@ -334,13 +351,12 @@ fn plan_keeps_host_construction_policy_separate_from_cross_target_policy() {
         wombat::Architecture::Aarch64,
     ));
     let outcome = plan(BuildOptions::new(&source, "build").with_host(host)).unwrap();
-    assert_eq!(outcome.plan.build_providers[0].name, "brew");
     assert_eq!(outcome.plan.providers[0].name, "apt");
-    assert_eq!(
-        outcome.plan.build_requirements[0].candidates[0].name(),
-        "sh"
-    );
     assert_eq!(outcome.plan.requirements[0].candidates[0].name(), "git");
+    assert_eq!(
+        outcome.plan.requirements[0].when,
+        wombat::ladder::CoreRung::MaterialiseTasks
+    );
 }
 
 #[test]
@@ -413,7 +429,7 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("unsupported build plan format version 1") && error.contains("expected 3"),
+        error.contains("unsupported build plan format version 1") && error.contains("expected 5"),
         "{error}"
     );
 }

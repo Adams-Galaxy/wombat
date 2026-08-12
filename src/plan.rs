@@ -77,6 +77,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         format_version: BUILD_PLAN_FORMAT_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
         plan_id: String::new(),
+        project_arguments: desired.project_arguments.clone(),
         sources: desired.sources.clone(),
         inputs: desired.inputs.clone(),
         target: desired.target.clone(),
@@ -84,13 +85,13 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         process_observations: desired.process_observations.clone(),
         modules: desired.modules.clone(),
         dependencies: desired.dependencies.clone(),
-        build_providers: desired.build_providers.clone(),
-        build_requirements: desired.build_requirements.clone(),
-        build_preparations: desired.build_preparations.clone(),
+        project_identity: desired.project_identity.clone(),
+        ladder: desired.ladder.clone(),
         providers: desired.providers.clone(),
         requirements: desired.requirements.clone(),
         preparations: desired.preparations.clone(),
         tasks: desired.tasks.iter().map(|task| task.task.clone()).collect(),
+        scripts: desired.scripts.clone(),
         artifact_policy: desired.artifact_policy,
         artifact_notices: desired.artifact_notices.clone(),
         artifact_selections: desired.artifact_selections.clone(),
@@ -114,8 +115,13 @@ pub(crate) fn publish(
     let plan_path = staging.path().join("plan.json");
     write_json(&plan_path, plan)?;
     write_json(&staging.path().join("execution.json"), execution)?;
-    materialise_provider_payloads(source_root, staging.path(), "build", &plan.build_providers)?;
-    materialise_provider_payloads(source_root, staging.path(), "target", &plan.providers)?;
+    materialise_provider_payloads(source_root, staging.path(), "providers", &plan.providers)?;
+    crate::scripts::publish_payloads(
+        source_root,
+        staging.path(),
+        &plan.scripts,
+        crate::scripts::PayloadKind::Plan,
+    )?;
     sync_directory(staging.path())?;
 
     let destination = internal.join("plan");
@@ -159,6 +165,11 @@ pub fn read(build_dir: &Path) -> Result<BuildPlan> {
     let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
     let plan: BuildPlan = serde_json::from_slice(&bytes)?;
     validate(&plan)?;
+    crate::scripts::verify_payloads(
+        &build_dir.join(".wombat/plan"),
+        &plan.scripts,
+        crate::scripts::PayloadKind::Plan,
+    )?;
     Ok(plan)
 }
 
@@ -200,6 +211,17 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
             "build plan tasks must not contain executed outputs",
         ));
     }
+    plan.ladder.validate()?;
+    validate_sha_identity(&plan.project_identity, "plan project identity")?;
+    validate_actions(&plan.ladder, &plan.tasks, &plan.scripts)?;
+    for requirement in &plan.requirements {
+        if !plan.ladder.contains(&requirement.when) || plan.ladder.is_container(&requirement.when) {
+            return Err(WombatError::configuration(format!(
+                "plan requirement targets invalid rung `{}`",
+                requirement.when
+            )));
+        }
+    }
     let source_paths = plan
         .sources
         .iter()
@@ -211,6 +233,53 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
         &plan.artifact_selections,
         &source_paths,
     )?;
+    Ok(())
+}
+
+fn validate_sha_identity(value: &str, label: &str) -> Result<()> {
+    if value.len() != 71
+        || !value.starts_with("sha256:")
+        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(WombatError::configuration(format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_actions(
+    ladder: &crate::ladder::ExecutionLadder,
+    tasks: &[crate::manifest::Task],
+    scripts: &[crate::manifest::Script],
+) -> Result<()> {
+    let mut identities = std::collections::BTreeSet::new();
+    for task in tasks {
+        if !identities.insert(("task", task.identity.as_str()))
+            || !ladder.contains(&task.at)
+            || ladder.is_container(&task.at)
+        {
+            return Err(WombatError::configuration(format!(
+                "plan task `{}` has invalid identity or rung",
+                task.identity
+            )));
+        }
+    }
+    for script in scripts {
+        if !identities.insert(("script", script.identity.as_str()))
+            || !ladder.contains(&script.at)
+            || ladder.is_container(&script.at)
+            || script.payloads.is_empty()
+        {
+            return Err(WombatError::configuration(format!(
+                "plan script `{}` has invalid identity, rung, or payload",
+                script.identity
+            )));
+        }
+        for payload in &script.payloads {
+            crate::path::validate_relative_path(&payload.source, "script payload source")?;
+            crate::path::validate_relative_path(&payload.relative, "script payload relative path")?;
+            validate_sha_identity(&payload.digest, "script payload digest")?;
+        }
+    }
     Ok(())
 }
 
@@ -226,13 +295,13 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         process_observations: &'a [crate::manifest::ProcessObservation],
         modules: &'a [crate::manifest::ManifestModule],
         dependencies: &'a [crate::manifest::Dependency],
-        build_providers: &'a [Provider],
-        build_requirements: &'a [crate::manifest::Requirement],
-        build_preparations: &'a [crate::manifest::ProviderPreparation],
+        project_identity: &'a str,
+        ladder: &'a crate::ladder::ExecutionLadder,
         providers: &'a [Provider],
         requirements: &'a [crate::manifest::Requirement],
         preparations: &'a [crate::manifest::ProviderPreparation],
         tasks: &'a [crate::manifest::Task],
+        scripts: &'a [crate::manifest::Script],
         artifact_policy: &'a crate::manifest::ArtifactPolicy,
         artifact_notices: &'a [crate::manifest::ArtifactNotice],
         artifact_selections: &'a [crate::manifest::ArtifactSelection],
@@ -248,13 +317,13 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         process_observations: &plan.process_observations,
         modules: &plan.modules,
         dependencies: &plan.dependencies,
-        build_providers: &plan.build_providers,
-        build_requirements: &plan.build_requirements,
-        build_preparations: &plan.build_preparations,
+        project_identity: &plan.project_identity,
+        ladder: &plan.ladder,
         providers: &plan.providers,
         requirements: &plan.requirements,
         preparations: &plan.preparations,
         tasks: &plan.tasks,
+        scripts: &plan.scripts,
         artifact_policy: &plan.artifact_policy,
         artifact_notices: &plan.artifact_notices,
         artifact_selections: &plan.artifact_selections,

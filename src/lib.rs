@@ -10,6 +10,7 @@ pub mod frozen;
 pub mod initialize;
 mod inputs;
 pub mod inspection;
+pub mod ladder;
 pub mod manifest;
 mod path;
 pub mod plan;
@@ -19,6 +20,7 @@ pub mod reconcile;
 pub mod repository;
 pub mod requirements;
 pub mod runtime;
+mod scripts;
 mod selection;
 mod source;
 mod state;
@@ -27,8 +29,8 @@ mod tasks;
 pub use add::{AddMethod, AddOutcome, AddStatus, add};
 pub use build::{
     BuildOptions, BuildOutcome, BuildStatus, MaterialiseOutcome, OpenedBuild, PlanOutcome,
-    PrepareOutcome, VerifiedBuild, build, materialise, open_build, plan, prepare, project_help,
-    project_help_with_options, verify_build,
+    PrepareOutcome, VerifiedBuild, build, materialise, open_build, plan, plan_or_reuse, prepare,
+    project_help, project_help_with_options, verify_build,
 };
 pub use context::{
     Architecture, Distribution, HostContext, Kernel, LooseVersion, OperatingSystem,
@@ -49,6 +51,7 @@ pub use repository::{
     acquire_repository,
 };
 pub use requirements::{
-    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, bootstrap, bootstrap_exact, check,
-    check_plan, check_target_plan, prepare_plan,
+    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, authorize_target_plan, bootstrap,
+    bootstrap_exact, check, check_plan, check_target_plan, prepare_plan, prepare_target_plan,
+    prepare_target_plan_until, prepare_target_plan_until_authorized,
 };

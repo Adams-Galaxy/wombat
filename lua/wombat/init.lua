@@ -86,6 +86,23 @@ function wombat.providers(entries)
     return native.configure_providers(entries)
 end
 
+local rung_ids = setmetatable({}, { __mode = "k" })
+local rung_nodes = setmetatable({}, { __mode = "k" })
+local function normalize_rung_options(options)
+    if options ~= nil and rung_ids[options.at] ~= nil then
+        local normalized = {}
+        for key, value in pairs(options) do normalized[key] = value end
+        normalized.at = rung_ids[options.at]
+        options = normalized
+    end
+    if options ~= nil and rung_ids[options.when] ~= nil then
+        local normalized = {}
+        for key, value in pairs(options) do normalized[key] = value end
+        normalized.when = rung_ids[options.when]
+        options = normalized
+    end
+    return options
+end
 local function requirement(namespace, kind, name, options, preferred)
     if type(name) ~= "string" then
         error("w." .. namespace .. "." .. kind .. "() requires a string name", 3)
@@ -93,12 +110,88 @@ local function requirement(namespace, kind, name, options, preferred)
     if options ~= nil and type(options) ~= "table" then
         error("w." .. namespace .. "." .. kind .. "() options must be a table", 3)
     end
+    options = normalize_rung_options(options)
     return native.declare_requirement(kind, name, options, preferred)
 end
 
 wombat.need = {}
 wombat.prefer = {}
-wombat.build = { need = {}, prefer = {} }
+wombat.build = {}
+local function rung_handle(id, children, core)
+    local handle = setmetatable({}, {
+        __newindex = function() error("w.rungs handles are immutable", 2) end,
+        __tostring = function() return id end,
+        __metatable = false,
+    })
+    rung_ids[handle] = id
+    rung_nodes[handle] = { id = id, children = children or {}, core = core or false }
+    return handle
+end
+local function readonly(entries)
+    return setmetatable({}, {
+        __index = entries,
+        __newindex = function() error("w.rungs handles are immutable", 2) end,
+        __metatable = false,
+    })
+end
+
+wombat.rungs = readonly({
+    materialise = readonly({
+        before = rung_handle("materialise.before", nil, true),
+        tasks = rung_handle("materialise.tasks", nil, true),
+        artifacts = rung_handle("materialise.artifacts", nil, true),
+        publish = rung_handle("materialise.publish", nil, true),
+        after = rung_handle("materialise.after", nil, true),
+    }),
+    deploy = readonly({
+        before = rung_handle("deploy.before", nil, true),
+        apply = rung_handle("deploy.apply", nil, true),
+        after = rung_handle("deploy.after", nil, true),
+    }),
+})
+
+local function valid_rung_name(name)
+    return type(name) == "string" and name:match("^[%w_-]+$") ~= nil
+end
+
+function wombat.rung(name, children)
+    if not valid_rung_name(name) then
+        error("w.rung() name must contain only ASCII letters, numbers, `-`, or `_`", 2)
+    end
+    if children == nil then children = {} end
+    if type(children) ~= "table" then error("w.rung() children must be an array", 2) end
+    local adopted = {}
+    for index, child in ipairs(children) do
+        local node = rung_nodes[child]
+        if node == nil or node.core then error("w.rung() children must be custom rung handles", 2) end
+        local function prefix(value, prefix)
+            rung_ids[value] = prefix .. "." .. rung_nodes[value].id:match("[^.]+$")
+            rung_nodes[value].id = rung_ids[value]
+            for _, nested in ipairs(rung_nodes[value].children) do prefix(nested, rung_ids[value]) end
+        end
+        prefix(child, name)
+        adopted[index] = child
+    end
+    return rung_handle(name, adopted, false)
+end
+
+local function serialize_rung(handle, seen)
+    local node = rung_nodes[handle]
+    if node == nil then error("w.ladder() entries must be rung handles", 3) end
+    if seen[handle] then error("w.ladder() cannot reuse a rung handle", 3) end
+    seen[handle] = true
+    local children = {}
+    for index, child in ipairs(node.children) do children[index] = serialize_rung(child, seen) end
+    return { id = node.id, children = children }
+end
+
+function wombat.ladder(name, rungs)
+    if not valid_rung_name(name) then error("w.ladder() requires a valid name", 2) end
+    if type(rungs) ~= "table" then error("w.ladder() requires a rung array", 2) end
+    local serialized, seen = {}, {}
+    for index, rung in ipairs(rungs) do serialized[index] = serialize_rung(rung, seen) end
+    return native.declare_ladder(name, serialized)
+end
 
 function wombat.need.command(name, options)
     return requirement("need", "command", name, options, false)
@@ -116,39 +209,6 @@ function wombat.prefer.package(name, options)
     return requirement("prefer", "package", name, options, true)
 end
 
-local function build_requirement(namespace, kind, name, options, preferred)
-    if type(name) ~= "string" then
-        error("w.build." .. namespace .. "." .. kind .. "() requires a string name", 3)
-    end
-    if options ~= nil and type(options) ~= "table" then
-        error("w.build." .. namespace .. "." .. kind .. "() options must be a table", 3)
-    end
-    return native.declare_build_requirement(kind, name, options, preferred)
-end
-
-function wombat.build.providers(entries)
-    if type(entries) ~= "table" then
-        error("w.build.providers() requires an array", 2)
-    end
-    return native.configure_build_providers(entries)
-end
-
-function wombat.build.need.command(name, options)
-    return build_requirement("need", "command", name, options, false)
-end
-
-function wombat.build.need.package(name, options)
-    return build_requirement("need", "package", name, options, false)
-end
-
-function wombat.build.prefer.command(name, options)
-    return build_requirement("prefer", "command", name, options, true)
-end
-
-function wombat.build.prefer.package(name, options)
-    return build_requirement("prefer", "package", name, options, true)
-end
-
 function wombat.build.task(entrypoint, params, options)
     if type(entrypoint) ~= "string" then
         error("w.build.task() requires a string entrypoint", 2)
@@ -159,7 +219,14 @@ function wombat.build.task(entrypoint, params, options)
     if options ~= nil and type(options) ~= "table" then
         error("w.build.task() options must be a table", 2)
     end
-    return native.declare_task(entrypoint, params or {}, options or {})
+    return native.declare_task(entrypoint, params or {}, normalize_rung_options(options or {}))
+end
+
+function wombat.script(entrypoint, params, options)
+    if type(entrypoint) ~= "string" then error("w.script() requires a string entrypoint", 2) end
+    if params ~= nil and type(params) ~= "table" then error("w.script() params must be a table", 2) end
+    if options ~= nil and type(options) ~= "table" then error("w.script() options must be a table", 2) end
+    return native.declare_script(entrypoint, params or {}, normalize_rung_options(options or {}))
 end
 
 function wombat.generate(name, options)

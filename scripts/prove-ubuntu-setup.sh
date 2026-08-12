@@ -12,7 +12,7 @@ if ! command -v rsync >/dev/null 2>&1; then
 fi
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-machine=${WOMBAT_PROVING_MACHINE:-wombat-plan0011}
+machine=${WOMBAT_PROVING_MACHINE:-wombat-plan0014}
 case "$machine" in
     *[!a-zA-Z0-9_-]*|'')
         printf '%s\n' "WOMBAT_PROVING_MACHINE must contain only letters, numbers, _ or -." >&2
@@ -24,14 +24,14 @@ if orb list | awk '{print $1}' | grep -Fx "$machine" >/dev/null 2>&1; then
     exit 1
 fi
 
-proof_root=$(mktemp -d "$repository_root/target/plan0011-proof.XXXXXX")
+proof_root=$(mktemp -d "$repository_root/target/plan0014-proof.XXXXXX")
 snapshot="$proof_root/wombat-source"
 rsync -a --exclude .git --exclude target "$repository_root/" "$snapshot/"
 git -C "$snapshot" init -b main >/dev/null
 git -C "$snapshot" config user.name "Wombat Proving Run"
 git -C "$snapshot" config user.email wombat@example.invalid
 git -C "$snapshot" add .
-git -C "$snapshot" commit -m "Plan 0011 proving snapshot" >/dev/null
+git -C "$snapshot" commit -m "Plan 0014 proving snapshot" >/dev/null
 git clone --bare "$snapshot" "$proof_root/wombat.git" >/dev/null
 
 example="$proof_root/example-source"
@@ -64,9 +64,27 @@ if ! orb -m "$machine" /home/wombat/.local/bin/wombat \
     exit 1
 fi
 cat "$proof_root/second-setup.log"
+if ! orb -m "$machine" /home/wombat/.local/bin/wombat \
+    setup "file://$linux_proof_root/example.git" --yes --rerun-scripts \
+    >"$proof_root/rerun-setup.log" 2>&1; then
+    cat "$proof_root/rerun-setup.log" >&2
+    exit 1
+fi
+cat "$proof_root/rerun-setup.log"
+if ! orb -m "$machine" /home/wombat/.local/bin/wombat \
+    setup "file://$linux_proof_root/example.git" --yes --clean \
+    >"$proof_root/clean-setup.log" 2>&1; then
+    cat "$proof_root/clean-setup.log" >&2
+    exit 1
+fi
+cat "$proof_root/clean-setup.log"
 grep -F "task tools:generate.py#example: running" "$proof_root/first-setup.log" >/dev/null
 grep -F "task tools:generate.py#example: cache hit" "$proof_root/second-setup.log" >/dev/null
 grep -F "task tools:validate.sh#validation: running" "$proof_root/second-setup.log" >/dev/null
+grep -F "canonical example prepared in canonical mode" "$proof_root/first-setup.log" >/dev/null
+grep -F "canonical example deployment verified" "$proof_root/first-setup.log" >/dev/null
+grep -F "canonical example prepared in canonical mode" "$proof_root/rerun-setup.log" >/dev/null
+grep -F "canonical example deployment verified" "$proof_root/clean-setup.log" >/dev/null
 orb -m "$machine" sh -c '
     set -eu
     test -f "$HOME/.gitconfig"
@@ -85,6 +103,6 @@ orb -m "$machine" sh -c '
     "$HOME/.local/wombat-tools/bin/wombat-info"
 '
 
-printf '%s\n' "Plan 0011 proving run completed in OrbStack machine $machine."
+printf '%s\n' "Plan 0014 proving run completed in OrbStack machine $machine."
 printf '%s\n' "Inspect it with: orb -m $machine"
 printf '%s\n' "Remove it when finished with: orb delete $machine"

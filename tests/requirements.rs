@@ -63,7 +63,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 11);
+    assert_eq!(outcome.manifest.format_version, 14);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -94,7 +94,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 11);
+    assert_eq!(outcome.manifest.format_version, 14);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -250,7 +250,7 @@ fn copy_dir(source: &Path, destination: &Path) {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn cli_check_and_bootstrap_obey_exit_confirmation_and_postcheck_contracts() {
+fn cli_check_reports_without_provider_mutation() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temporary = tempfile::tempdir().unwrap();
@@ -296,7 +296,13 @@ exit 9
             .unwrap()
     };
 
-    let missing = run(&["check", "-B", build_dir.to_str().unwrap()]);
+    let missing = run(&[
+        "--source",
+        source.to_str().unwrap(),
+        "check",
+        "-B",
+        build_dir.to_str().unwrap(),
+    ]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&missing.stdout).contains("missing"));
     assert!(!missing.stdout.contains(&0x1b));
@@ -305,6 +311,8 @@ exit 9
     let colored = run(&[
         "--color",
         "always",
+        "--source",
+        source.to_str().unwrap(),
         "check",
         "-B",
         build_dir.to_str().unwrap(),
@@ -312,22 +320,109 @@ exit 9
     assert_eq!(colored.status.code(), Some(1));
     assert!(colored.stdout.contains(&0x1b));
 
-    let refused = run(&["bootstrap", "-B", build_dir.to_str().unwrap()]);
-    assert_eq!(refused.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("requires --yes"));
-    assert!(!state.exists());
+    fs::write(&state, "installed\n").unwrap();
 
-    let bootstrapped = run(&["bootstrap", "-B", build_dir.to_str().unwrap(), "--yes"]);
-    assert!(
-        bootstrapped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&bootstrapped.stderr)
-    );
-    assert!(state.exists());
-
-    let satisfied = run(&["check", "-B", build_dir.to_str().unwrap()]);
+    let satisfied = run(&[
+        "--source",
+        source.to_str().unwrap(),
+        "check",
+        "-B",
+        build_dir.to_str().unwrap(),
+    ]);
     assert!(satisfied.status.success());
     assert!(String::from_utf8_lossy(&satisfied.stdout).contains("satisfied"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn deploy_deadline_requirement_runs_only_during_the_deploy_segment() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let bin = temporary.path().join("bin");
+    let home = temporary.path().join("home");
+    let state = temporary.path().join("brew-state");
+    fs::create_dir_all(source.join("src")).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&home).unwrap();
+    fs::write(source.join("src/dot_marker"), "deployed\n").unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'brew'})\nw.need.package('hello', { provider='brew', publishes={commands={'hello'}}, when=w.rungs.deploy.before })\nw.install('.marker')\n",
+    )
+    .unwrap();
+    let brew = bin.join("brew");
+    fs::write(
+        &brew,
+        r#"#!/bin/sh
+if [ "$1" = "info" ]; then
+  if [ -f "$FAKE_BREW_STATE" ]; then installed='[{"version":"1.0.0"}]'; else installed='[]'; fi
+  printf '{"formulae":[{"installed":%s}],"casks":[]}' "$installed"
+  exit 0
+fi
+if [ "$2" = "--dry-run" ]; then exit 0; fi
+if [ "$1" = "install" ] || [ "$1" = "upgrade" ]; then : > "$FAKE_BREW_STATE"; exit 0; fi
+exit 9
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+    let hello = bin.join("hello");
+    fs::write(&hello, "#!/bin/sh\nprintf 'hello\\n'\n").unwrap();
+    fs::set_permissions(&hello, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let build_dir = source.join("build");
+    let run = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wombat"))
+            .args(arguments)
+            .env("PATH", &path)
+            .env("FAKE_BREW_STATE", &state)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", temporary.path().join("state"))
+            .output()
+            .unwrap()
+    };
+    let built = run(&[
+        "--source",
+        source.to_str().unwrap(),
+        "build",
+        "-B",
+        build_dir.to_str().unwrap(),
+        "--yes",
+    ]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        !state.exists(),
+        "deploy deadline ran during materialisation"
+    );
+    let deployed = run(&[
+        "--source",
+        source.to_str().unwrap(),
+        "plan",
+        "deploy",
+        "-B",
+        build_dir.to_str().unwrap(),
+        "--target-root",
+        home.to_str().unwrap(),
+        "--conflict",
+        "fail",
+        "--yes",
+    ]);
+    assert!(
+        deployed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deployed.stderr)
+    );
+    assert!(state.is_file());
+    assert_eq!(
+        fs::read_to_string(home.join(".marker")).unwrap(),
+        "deployed\n"
+    );
 }
 
 #[test]

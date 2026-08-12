@@ -7,8 +7,7 @@ use crate::{Result, WombatError};
 const ROOT_SOURCE: &str = "local w = require(\"wombat\")\n\nw.use(\"auto\")\n";
 const AUTO_SOURCE: &str =
     "local w = require(\"wombat\")\n\n-- wombat:add begin\n-- wombat:add end\n";
-const PROJECT_CONFIG: &str =
-    "format_version = 2\n\n[artifacts]\nunallocated = \"warn\"\n\n[log]\nlevel = \"warn\"\n";
+const PROJECT_CONFIG: &str = "format_version = 3\n\n[artifacts]\nunallocated = \"warn\"\n\n[log]\nlevel = \"warn\"\n\n[workflow]\nreuse = true\nfreshness = \"5m\"\n";
 const GITIGNORE: &str = "/build/\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{Result, WombatError};
 
-const CONFIG_FORMAT_VERSION: u32 = 1;
+const CONFIG_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,14 +15,7 @@ struct UserConfig {
     format_version: u32,
     repository: String,
     #[serde(default)]
-    tasks: TaskConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TaskConfig {
-    #[serde(default)]
-    interpreters: BTreeMap<String, InterpreterConfig>,
+    runners: BTreeMap<String, InterpreterConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +51,7 @@ pub fn resolve_home() -> Result<PathBuf> {
 }
 
 #[doc(hidden)]
-pub fn resolve_task_interpreters() -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
+pub fn resolve_runners() -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
     let home = env::var_os("HOME").map(PathBuf::from);
     let config_root = match env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
         Some(path) if path.is_absolute() => path,
@@ -97,7 +90,7 @@ fn configured_task_interpreters(
     home: Option<&Path>,
 ) -> Result<BTreeMap<String, crate::manifest::TaskRunner>> {
     let mut interpreters = BTreeMap::new();
-    for (name, configured) in config.tasks.interpreters {
+    for (name, configured) in config.runners {
         let family = match name.as_str() {
             "python" => crate::manifest::TaskRunnerFamily::Python,
             "shell" => crate::manifest::TaskRunnerFamily::PosixShell,
@@ -272,7 +265,7 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(
             xdg.join("wombat/config.toml"),
-            "format_version = 1\nrepository = \"~/dotfiles\"\n",
+            "format_version = 2\nrepository = \"~/dotfiles\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -302,7 +295,7 @@ mod tests {
         fs::create_dir_all(&config).unwrap();
         fs::write(
             config.join("config.toml"),
-            "format_version = 1\nrepository = \"relative\"\n",
+            "format_version = 2\nrepository = \"relative\"\n",
         )
         .unwrap();
         assert!(
@@ -320,10 +313,10 @@ mod tests {
         let path = temporary.path().join("config.toml");
         let interpreters = task_interpreters_from_config(
             &path,
-            r#"format_version = 1
+            r#"format_version = 2
 repository = "~/dotfiles"
 
-[tasks.interpreters.python]
+[runners.python]
 command = "~/.venvs/wombat/bin/python"
 args = ["-I"]
 "#,
@@ -349,7 +342,7 @@ args = ["-I"]
         let path = temporary.path().join("config.toml");
         let unknown = task_interpreters_from_config(
             &path,
-            "format_version = 1\nrepository = \"~/dotfiles\"\n[tasks.interpreters.ruby]\ncommand = \"ruby\"\n",
+            "format_version = 2\nrepository = \"~/dotfiles\"\n[runners.ruby]\ncommand = \"ruby\"\n",
             &home,
         )
         .unwrap_err();
@@ -361,7 +354,7 @@ args = ["-I"]
 
         let relative = task_interpreters_from_config(
             &path,
-            "format_version = 1\nrepository = \"~/dotfiles\"\n[tasks.interpreters.python]\ncommand = \"venv/bin/python\"\n",
+            "format_version = 2\nrepository = \"~/dotfiles\"\n[runners.python]\ncommand = \"venv/bin/python\"\n",
             &home,
         )
         .unwrap_err();

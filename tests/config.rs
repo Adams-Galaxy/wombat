@@ -72,7 +72,7 @@ fn assert_success(output: &Output) {
 
 fn repository_config(path: &Path) -> String {
     format!(
-        "format_version = 1\nrepository = {:?}\n",
+        "format_version = 2\nrepository = {:?}\n",
         path.to_str().unwrap()
     )
 }
@@ -96,7 +96,7 @@ fn fallback_config_expands_a_home_relative_repository() {
     fs::create_dir_all(&config).unwrap();
     fs::write(
         config.join("config.toml"),
-        "format_version = 1\nrepository = \"~/dotfiles\"\n",
+        "format_version = 2\nrepository = \"~/dotfiles\"\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
@@ -171,7 +171,7 @@ fn explicit_source_uses_configured_task_interpreter() {
     permissions.set_mode(0o755);
     fs::set_permissions(&wrapper, permissions).unwrap();
     fixture.write_config(&format!(
-        "format_version = 1\nrepository = {:?}\n[tasks.interpreters.python]\ncommand = {:?}\n",
+        "format_version = 2\nrepository = {:?}\n[runners.python]\ncommand = {:?}\n",
         fixture.repository.to_str().unwrap(),
         wrapper.to_str().unwrap(),
     ));
@@ -211,15 +211,15 @@ fn configuration_failures_are_precise() {
     let fixture = CliFixture::new();
     let cases = [
         (
-            "format_version = 1\nrepository = \"relative\"\n",
+            "format_version = 2\nrepository = \"relative\"\n",
             "must be absolute",
         ),
         (
-            "format_version = 2\nrepository = \"/tmp/repo\"\n",
+            "format_version = 1\nrepository = \"/tmp/repo\"\n",
             "unsupported Wombat config",
         ),
         (
-            "format_version = 1\nrepository = \"/tmp/repo\"\nunknown = true\n",
+            "format_version = 2\nrepository = \"/tmp/repo\"\nunknown = true\n",
             "unknown field",
         ),
         ("not valid TOML [[", "failed to parse Wombat config"),

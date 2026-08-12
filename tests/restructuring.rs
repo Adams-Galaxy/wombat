@@ -50,7 +50,7 @@ fn generic_projection_globs_templates_and_unallocated_policy_share_one_tree() {
     write(
         &root,
         "wombat.toml",
-        "format_version = 2\n[artifacts]\nunallocated = \"warn\"\n",
+        "format_version = 3\n[artifacts]\nunallocated = \"warn\"\n",
     );
     write(
         &root,
@@ -308,7 +308,7 @@ fn repository_artifact_policy_is_strict_tracked_and_identity_bearing() {
     write(
         repository.path(),
         "wombat.toml",
-        "format_version = 2\n[artifacts]\nunallocated = \"warn\"\n",
+        "format_version = 3\n[artifacts]\nunallocated = \"warn\"\n",
     );
     let configured = build(BuildOptions::new(
         repository.path(),
@@ -326,8 +326,8 @@ fn repository_artifact_policy_is_strict_tracked_and_identity_bearing() {
 
     for contents in [
         "format_version = 1\n",
-        "format_version = 2\nunknown = true\n",
-        "format_version = 2\n[artifacts]\nunallocated = \"sometimes\"\n",
+        "format_version = 3\nunknown = true\n",
+        "format_version = 3\n[artifacts]\nunallocated = \"sometimes\"\n",
     ] {
         write(repository.path(), "wombat.toml", contents);
         let error = build(BuildOptions::new(

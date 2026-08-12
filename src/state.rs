@@ -220,6 +220,23 @@ impl TargetStateGuard {
         Ok(state)
     }
 
+    pub fn execution_journal_path(&self) -> PathBuf {
+        self.directory.join("execution-journal.json")
+    }
+
+    pub fn scripts_directory(&self) -> PathBuf {
+        self.directory.join("scripts")
+    }
+
+    pub fn reset_execution_journal(&self) -> Result<()> {
+        let path = self.execution_journal_path();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(WombatError::io(path, error)),
+        }
+    }
+
     pub fn write(&self, state: &TargetState) -> Result<()> {
         if state.target_root != self.target_root {
             return Err(WombatError::configuration(
@@ -340,6 +357,8 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         wombat_version: env!("CARGO_PKG_VERSION").to_string(),
         build_id: String::new(),
         plan_id: format!("sha256:{}", "0".repeat(64)),
+        execution_mode: crate::manifest::ExecutionMode::Normal,
+        skipped_requirement_gates: Vec::new(),
         sources: artifacts
             .iter()
             .map(|artifact| artifact.declared_at.primary.source.clone())
@@ -363,13 +382,14 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         process_observations: Vec::new(),
         modules: Vec::new(),
         dependencies: Vec::new(),
-        build_providers: Vec::new(),
-        build_requirements: Vec::new(),
-        build_preparations: Vec::new(),
+        project_identity: format!("sha256:{}", "0".repeat(64)),
+        ladder: crate::ladder::ExecutionLadder::default(),
         providers: Vec::new(),
         requirements: Vec::new(),
         preparations: Vec::new(),
         tasks,
+        scripts: Vec::new(),
+        script_outcomes: Vec::new(),
         artifact_policy: crate::manifest::ArtifactPolicy::default(),
         artifact_notices: Vec::new(),
         artifact_selections: Vec::new(),
@@ -389,6 +409,7 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
         };
         let task = tasks.entry(identity.clone()).or_insert_with(|| Task {
             identity: identity.clone(),
+            declaration_order: 0,
             owner: artifact.owner.clone(),
             entrypoint: "tasks/target-state-placeholder".to_string(),
             entrypoint_digest: format!("sha256:{}", "0".repeat(64)),
@@ -405,6 +426,7 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
                 enabled: false,
                 revision: None,
             },
+            at: crate::ladder::CoreRung::MaterialiseTasks.into(),
             target_root: Some(TaskTargetRoot {
                 path: String::new(),
                 origin: EvaluatedTargetOrigin::Explicit {
