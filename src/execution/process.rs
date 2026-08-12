@@ -15,13 +15,6 @@ pub(crate) struct Captured {
     pub(crate) truncated: bool,
 }
 
-/// Whether subprocess output is only retained as evidence, or also forwarded
-/// line by line to the human event sink while the child is still running.
-///
-/// Tasks and scripts are user-authored and may run for a long time, so their
-/// output is attributed and shown live. Observations and provider queries are
-/// interrogations whose result is reported by their caller, so they stay
-/// retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Forwarding {
     Retained,
@@ -207,10 +200,6 @@ fn read_bounded(
     Ok(Captured { bytes, truncated })
 }
 
-/// Forward one output line as a progress event attributed to its producer.
-///
-/// Output is user-authored and may not be valid UTF-8, so it is rendered
-/// lossily rather than failing an otherwise successful execution.
 fn emit_attributed(identity: &str, line: &[u8]) {
     let text = String::from_utf8_lossy(line);
     crate::presentation::emit(crate::presentation::Event::Progress(format!(

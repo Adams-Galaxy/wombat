@@ -508,9 +508,6 @@ w.script('three.custom', {}, { interpreter={ command='/bin/sh' } })
     );
 }
 
-/// Script and task output is the primary evidence a user has that their own
-/// code ran, so the CLI must forward it live and attributed to its producer.
-/// Only the CLI installs the human event sink, so this exercises the binary.
 #[test]
 fn cli_forwards_script_output_attributed_to_its_producer() {
     let lua = r#"
