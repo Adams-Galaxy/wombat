@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::cache::{BuildCache, CachedOutput};
 use crate::manifest::{
     ArtifactKind, EvaluatedArtifact, EvaluatedManifest, EvaluatedProduction, EvaluatedTargetRoot,
-    SourceOrigin, TaskLogPolicy, TaskOutput, TaskRunnerFamily,
+    SourceOrigin, TaskLogPolicy, TaskOutput,
 };
 use crate::path::{expand_target_root, validate_relative_path};
 use crate::source::{fingerprint_regular_file, validate_source_components};
@@ -64,33 +64,6 @@ struct TaskKey<'a> {
     revision: &'a Option<String>,
     interpreter_identity: &'a str,
     at: &'a crate::ladder::RungId,
-}
-
-#[allow(dead_code)]
-pub(crate) fn execute_tasks(
-    source_root: &Path,
-    build_dir: &Path,
-    desired: &mut EvaluatedManifest,
-) -> Result<()> {
-    let rungs = desired
-        .tasks
-        .iter()
-        .map(|task| task.task.at.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    for rung in rungs {
-        execute_tasks_at(source_root, build_dir, desired, &rung)?;
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn execute_tasks_at(
-    source_root: &Path,
-    build_dir: &Path,
-    desired: &mut EvaluatedManifest,
-    rung: &crate::ladder::RungId,
-) -> Result<()> {
-    execute_tasks_selected(source_root, build_dir, desired, rung, None)
 }
 
 pub(crate) fn execute_task(
@@ -152,7 +125,7 @@ fn execute_tasks_selected(
             "task-v1",
             &TaskKey {
                 identity: &task.identity,
-                runner_contract: task.runner.contract_version,
+                runner_contract: task.runner.contract_version(),
                 entrypoint_digest: &task.entrypoint_digest,
                 params: &task.params,
                 runner: &task.runner,
@@ -284,17 +257,15 @@ fn execute_tasks_selected(
 
 pub(crate) fn check_runners(tasks: &[crate::manifest::Task]) -> Result<()> {
     for task in tasks {
-        if matches!(
-            task.runner.family,
-            TaskRunnerFamily::EmbeddedLua | TaskRunnerFamily::Direct
-        ) {
+        if task.runner.is_embedded_lua() || task.runner.is_direct() {
             continue;
         }
-        let command = task
-            .runner
-            .command
-            .as_deref()
-            .expect("external task runner command");
+        let Some(command) = task.runner.command() else {
+            return Err(task_error(
+                task,
+                "external runner has no interpreter command",
+            ));
+        };
         if resolve_command(command).is_none() {
             return Err(task_error(
                 task,
@@ -343,21 +314,22 @@ fn run_task(
         ),
         "--scope=target".to_string(),
     ];
-    if task.runner.family == TaskRunnerFamily::EmbeddedLua {
+    if task.runner.is_embedded_lua() {
         return run_lua(task, entrypoint, workspace, &protocol);
     }
 
-    if task.runner.family == TaskRunnerFamily::Python && task.python_helper {
+    if task.runner.is_python() && task.python_helper {
         reject_python_helper_conflict(entrypoint)?;
     }
-    let mut command = if task.runner.family == TaskRunnerFamily::Direct {
+    let mut command = if task.runner.is_direct() {
         Command::new(entrypoint)
     } else {
-        let configured = task
-            .runner
-            .command
-            .as_deref()
-            .expect("external interpreter runners have a command");
+        let Some(configured) = task.runner.command() else {
+            return Err(task_error(
+                task,
+                "external runner has no interpreter command",
+            ));
+        };
         let executable = resolve_command(configured).ok_or_else(|| {
             task_error(
                 task,
@@ -365,11 +337,11 @@ fn run_task(
             )
         })?;
         let mut command = Command::new(executable);
-        command.args(&task.runner.args).arg(entrypoint);
+        command.args(task.runner.args()).arg(entrypoint);
         command
     };
     command.args(&protocol).current_dir(workspace);
-    if task.runner.family == TaskRunnerFamily::Python && task.python_helper {
+    if task.runner.is_python() && task.python_helper {
         let mut paths = vec![helper_root.to_path_buf()];
         if let Some(existing) = env::var_os("PYTHONPATH") {
             paths.extend(env::split_paths(&existing));
@@ -696,16 +668,21 @@ fn reject_python_helper_conflict(entrypoint: &Path) -> Result<()> {
 }
 
 fn interpreter_identity(task: &crate::manifest::Task, _entrypoint: &Path) -> Result<String> {
-    if task.runner.family == TaskRunnerFamily::EmbeddedLua {
+    if task.runner.is_embedded_lua() {
         return Ok(format!(
             "embedded-lua-{}",
             mlua::Lua::new().load("return _VERSION").eval::<String>()?
         ));
     }
-    if task.runner.family == TaskRunnerFamily::Direct {
+    if task.runner.is_direct() {
         return Ok(format!("direct:{}", task.entrypoint_digest));
     }
-    let configured = task.runner.command.as_deref().expect("runner command");
+    let Some(configured) = task.runner.command() else {
+        return Err(task_error(
+            task,
+            "external runner has no interpreter command",
+        ));
+    };
     let resolved = resolve_command(configured).ok_or_else(|| {
         task_error(
             task,

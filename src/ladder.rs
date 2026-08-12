@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 use crate::manifest::ExecutionMode;
 use crate::{Result, WombatError};
 
-pub const EXECUTION_JOURNAL_FORMAT_VERSION: u32 = 2;
+pub const EXECUTION_JOURNAL_FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -364,139 +364,6 @@ fn main() -> ExitCode {
 
     let mut requested_exit = 0u8;
     let result = match cli.command {
-        #[cfg(any())]
-        Command::Setup {
-            repository,
-            ssh,
-            build_dir,
-            target_root,
-            conflict,
-            yes,
-            no_bootstrap,
-            no_prepare,
-            no_deploy,
-            project_arguments,
-        } => (|| -> wombat::Result<()> {
-            let destination = wombat::config::resolve_source_candidate(cli.source.as_deref())?;
-            let locator = wombat::RepositoryLocator::parse(&repository, ssh)?;
-            let acquired = wombat::acquire_repository(locator, &destination)?;
-            println!(
-                "{} repository {} at {}",
-                stdout.paint(
-                    wombat::Role::Success,
-                    match acquired.status {
-                        wombat::AcquisitionStatus::Cloned => "cloned",
-                        wombat::AcquisitionStatus::Reused => "reused",
-                    }
-                ),
-                stdout.paint(wombat::Role::Identity, &repository),
-                stdout.paint(wombat::Role::Path, acquired.destination.to_string_lossy())
-            );
-            let source_root = wombat::config::resolve_source(Some(&acquired.destination))?;
-            let target_root_explicit = target_root.is_some();
-            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
-            let build_options =
-                configured_build_options(&source_root, build_dir, project_arguments)?;
-            let planned = wombat::plan(build_options.clone())?;
-            let host_requirements = wombat::check_plan(&planned.build_dir, &planned.plan)?;
-            let target_requirements = wombat::check_target_plan(&planned.build_dir, &planned.plan)?;
-            println!(
-                "{}",
-                stdout.paint(
-                    wombat::Role::Heading,
-                    format!("setup plan {}", planned.plan.plan_id)
-                )
-            );
-            println!(
-                "{}",
-                stdout.paint(wombat::Role::Heading, "host construction requirements")
-            );
-            print!("{}", stdout.human_output(&host_requirements.display()));
-            println!(
-                "{}",
-                stdout.paint(wombat::Role::Heading, "target environment requirements")
-            );
-            print!("{}", stdout.human_output(&target_requirements.display()));
-            println!(
-                "  deployment: {} ({})",
-                stdout.paint(wombat::Role::Path, target_root.to_string_lossy()),
-                if no_deploy { "disabled" } else { "guarded" }
-            );
-            if host_requirements.operational_failure() || target_requirements.operational_failure()
-            {
-                return Err(wombat::WombatError::configuration(
-                    "setup cannot continue because requirement checking failed operationally",
-                ));
-            }
-            if no_prepare && !host_requirements.satisfied() {
-                return Err(wombat::WombatError::configuration(
-                    "setup --no-prepare requires every host build requirement to be satisfied",
-                ));
-            }
-            if no_bootstrap && !target_requirements.satisfied() {
-                return Err(wombat::WombatError::configuration(
-                    "setup --no-bootstrap requires every target requirement to be satisfied",
-                ));
-            }
-            let will_mutate = (!no_prepare && !host_requirements.satisfied())
-                || (!no_bootstrap && !target_requirements.satisfied());
-            if will_mutate && !yes {
-                confirm_setup()?;
-            }
-            if !no_prepare && !host_requirements.satisfied() {
-                let prepared = wombat::prepare_plan(&planned.build_dir, &planned.plan, true)?;
-                print!(
-                    "{}",
-                    stdout.human_output(&format!(
-                        "prepare complete for {} ({} changed, {} already satisfied)\n",
-                        prepared.build_id,
-                        prepared.completed.len(),
-                        prepared.already_satisfied.len()
-                    ))
-                );
-                let current = wombat::plan(build_options.clone())?;
-                if current.plan.plan_id != planned.plan.plan_id {
-                    return Err(wombat::WombatError::configuration(format!(
-                        "setup plan changed during host preparation: `{}` became `{}`; no rollback was attempted",
-                        planned.plan.plan_id, current.plan.plan_id
-                    )));
-                }
-            }
-            let outcome = wombat::build(build_options)?;
-            if outcome.manifest.plan_id != planned.plan.plan_id {
-                return Err(wombat::WombatError::configuration(format!(
-                    "setup planned `{}` but built `{}`; refusing further mutation",
-                    planned.plan.plan_id, outcome.manifest.plan_id
-                )));
-            }
-            print_build_outcome(&outcome, stdout, stderr);
-            let initial = wombat::check(&outcome.build_dir)?;
-            print!("{}", stdout.human_output(&initial.display()));
-            if initial.operational_failure() {
-                return Err(wombat::WombatError::configuration(
-                    "setup cannot continue because requirement checking failed operationally",
-                ));
-            }
-            if !no_bootstrap && !initial.satisfied() {
-                let bootstrapped =
-                    wombat::bootstrap_exact(&outcome.build_dir, true, &outcome.build_id)?;
-                print!("{}", stdout.human_output(&bootstrapped.display()));
-            }
-            if no_deploy {
-                Ok(())
-            } else {
-                let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
-                    .with_target_root_explicit(target_root_explicit);
-                let prepared = wombat::prepare_apply(&options)?;
-                if prepared.build_id() != outcome.build_id {
-                    Err(wombat::WombatError::configuration(
-                        "setup built and prepared different products; refusing deployment",
-                    ))
-                } else {
-                    apply_prepared(prepared, effective_policy(conflict), stdout, stderr)
-                }
-            }
-        })(),
         Command::Build {
             build_dir,
             project_arguments,
@@ -526,18 +393,6 @@ fn main() -> ExitCode {
                 ).with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
                 .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
             }
-        }),
-        #[cfg(any())]
-        Command::Prepare {
-            build_dir,
-            yes,
-            project_arguments,
-        } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
-            wombat::prepare(
-                configured_build_options(source_root, build_dir, project_arguments)?,
-                yes,
-            )
-            .map(|outcome| print!("{}", stdout.human_output(&outcome.display())))
         }),
         Command::Plan { command } => match command {
             PlanCommand::Construct {
@@ -793,50 +648,6 @@ fn main() -> ExitCode {
                 .with_requirement_authorization(outcome.requirement_authorization.take());
             apply_options(&options, effective_policy(conflict), stdout, stderr)
         })(),
-        #[cfg(any())]
-        Command::Apply {
-            build_dir,
-            target_root,
-            conflict,
-        } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_root).and_then(
-            |options| apply_options(&options, effective_policy(conflict), stdout, stderr),
-        ),
-        #[cfg(any())]
-        Command::Deploy {
-            build_dir,
-            target_root,
-            conflict,
-            project_arguments,
-        } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
-            if project_arguments == [OsString::from("--help")] {
-                let help = wombat::project_help_with_options(configured_build_options(
-                    &source_root,
-                    build_dir,
-                    std::iter::empty::<OsString>(),
-                )?)?;
-                print!("{}", stdout.human_output(&help));
-                return Ok(());
-            }
-            let target_root_explicit = target_root.is_some();
-            let target_root = target_root.map_or_else(wombat::config::resolve_home, Ok)?;
-            let outcome = wombat::build(configured_build_options(
-                &source_root,
-                build_dir,
-                project_arguments,
-            )?)?;
-            print_build_outcome(&outcome, stdout, stderr);
-            let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
-                .with_target_root_explicit(target_root_explicit);
-            let prepared = wombat::prepare_apply(&options)?;
-            if prepared.build_id() != outcome.build_id {
-                return Err(wombat::WombatError::configuration(format!(
-                    "deploy built `{}` but opened `{}`; refusing to apply a different product",
-                    outcome.build_id,
-                    prepared.build_id()
-                )));
-            }
-            apply_prepared(prepared, effective_policy(conflict), stdout, stderr)
-        }),
         Command::Check { build_dir, compile_only, project_arguments } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
             let planned = wombat::plan_or_reuse(with_log_level(
                 configured_build_options(&source_root, build_dir, project_arguments)?,
@@ -858,12 +669,6 @@ fn main() -> ExitCode {
                 requested_exit = if outcome.operational_failure() { 2 } else if outcome.satisfied() { 0 } else { 1 };
             })
         }),
-        #[cfg(any())]
-        Command::Bootstrap { build_dir, yes } => {
-            resolve_product_path(cli.source.as_deref(), build_dir)
-                .and_then(|(build_dir, _)| wombat::bootstrap(&build_dir, yes))
-                .map(|outcome| print!("{}", stdout.human_output(&outcome.display())))
-        }
     };
 
     match result {
@@ -1011,7 +816,6 @@ fn resolve_product_path(
     Ok((source_root.join(build_dir), Some(source_root)))
 }
 
-#[allow(dead_code)]
 fn effective_policy(explicit: Option<ConflictArg>) -> wombat::ConflictPolicy {
     explicit.map_or_else(
         || {
@@ -1023,28 +827,6 @@ fn effective_policy(explicit: Option<ConflictArg>) -> wombat::ConflictPolicy {
         },
         Into::into,
     )
-}
-
-#[allow(dead_code)]
-fn confirm_setup() -> wombat::Result<()> {
-    if !io::stdin().is_terminal() {
-        return Err(wombat::WombatError::configuration(
-            "setup requires --yes for pending host or target requirement changes when standard input is not a terminal",
-        ));
-    }
-    eprint!("continue with this setup plan? [y/N] ");
-    io::stderr()
-        .flush()
-        .map_err(|error| wombat::WombatError::io("<stderr>", error))?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| wombat::WombatError::io("<stdin>", error))?;
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(())
-    } else {
-        Err(wombat::WombatError::configuration("setup cancelled"))
-    }
 }
 
 fn confirm_plan_mismatch(product_plan: &str, pending_plan: &str) -> wombat::Result<()> {
@@ -1071,7 +853,6 @@ fn confirm_plan_mismatch(product_plan: &str, pending_plan: &str) -> wombat::Resu
     }
 }
 
-#[allow(dead_code)]
 fn apply_options(
     options: &wombat::DeploymentOptions,
     policy: wombat::ConflictPolicy,
@@ -1086,7 +867,6 @@ fn apply_options(
     }
 }
 
-#[allow(dead_code)]
 fn apply_prepared(
     prepared: wombat::PreparedApply,
     policy: wombat::ConflictPolicy,
@@ -1185,7 +965,6 @@ fn apply_prepared(
         .map(|outcome| print_apply_outcome(outcome, stdout, stderr))
 }
 
-#[allow(dead_code)]
 fn print_apply_outcome(
     outcome: wombat::ApplyOutcome,
     stdout: wombat::Presenter,

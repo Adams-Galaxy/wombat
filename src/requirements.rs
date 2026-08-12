@@ -169,46 +169,6 @@ pub fn check_target_plan(build_dir: &Path, plan: &BuildPlan) -> Result<CheckOutc
     check_context(&RequirementContext::target_plan(plan, build_dir))
 }
 
-pub fn prepare_plan(build_dir: &Path, plan: &BuildPlan, yes: bool) -> Result<BootstrapOutcome> {
-    let _environment_lock = EnvironmentLock::exclusive()?;
-    reconcile_context(&RequirementContext::build(plan, build_dir), yes, "prepare")
-}
-
-/// Reconcile the unified requirement set immediately before its materialise
-/// deadline.  This is deliberately separate from product bootstrap: a plan is
-/// still the authority until a product has been published.
-pub fn prepare_target_plan(
-    build_dir: &Path,
-    plan: &BuildPlan,
-    yes: bool,
-) -> Result<BootstrapOutcome> {
-    prepare_target_plan_until(
-        build_dir,
-        plan,
-        crate::ladder::CoreRung::MaterialiseAfter,
-        yes,
-    )
-}
-
-pub fn prepare_target_plan_until(
-    build_dir: &Path,
-    plan: &BuildPlan,
-    rung: crate::ladder::CoreRung,
-    yes: bool,
-) -> Result<BootstrapOutcome> {
-    ensure_compatible_platform(&plan.target.platform)?;
-    let _environment_lock = EnvironmentLock::exclusive()?;
-    let mut eligible = plan.clone();
-    eligible
-        .requirements
-        .retain(|requirement| plan.ladder.before_or_at(&requirement.when, rung));
-    reconcile_context(
-        &RequirementContext::target_plan(&eligible, build_dir),
-        yes,
-        "materialise",
-    )
-}
-
 pub fn authorize_target_plan(
     build_dir: &Path,
     plan: &BuildPlan,
@@ -460,46 +420,6 @@ pub(crate) fn prepare_target_plan_at_authorized(
         )));
     }
     reconcile_context_authorized(&context, authorization, "materialise")
-}
-
-pub fn bootstrap(build_dir: &Path, yes: bool) -> Result<BootstrapOutcome> {
-    bootstrap_opened(build_dir, yes, None)
-}
-
-pub fn bootstrap_exact(
-    build_dir: &Path,
-    yes: bool,
-    expected_build_id: &str,
-) -> Result<BootstrapOutcome> {
-    bootstrap_opened(build_dir, yes, Some(expected_build_id))
-}
-
-fn bootstrap_opened(
-    build_dir: &Path,
-    yes: bool,
-    expected_build_id: Option<&str>,
-) -> Result<BootstrapOutcome> {
-    let opened = open_build(build_dir)?;
-    if let Some(expected_build_id) = expected_build_id
-        && opened.manifest.build_id != expected_build_id
-    {
-        return Err(WombatError::configuration(format!(
-            "bootstrap expected build `{expected_build_id}` but opened `{}`; refusing to mutate the host for a different product",
-            opened.manifest.build_id
-        )));
-    }
-    let _environment_lock = EnvironmentLock::exclusive()?;
-    ensure_compatible_host(&opened.manifest)?;
-    let context = RequirementContext::target(&opened);
-    reconcile_context(&context, yes, "bootstrap")
-}
-
-fn reconcile_context(
-    context: &RequirementContext<'_>,
-    yes: bool,
-    operation_name: &str,
-) -> Result<BootstrapOutcome> {
-    reconcile_context_inner(context, yes, operation_name, None)
 }
 
 fn reconcile_context_authorized(

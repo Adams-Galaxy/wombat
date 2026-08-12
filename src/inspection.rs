@@ -41,7 +41,11 @@ pub enum PlanInspectSection {
 
 pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
     let product = open_build(build_dir)?;
-    Ok(render_section(&product.manifest, section))
+    let journal = crate::ladder::read(build_dir).ok().filter(|journal| {
+        journal.plan_id == product.manifest.plan_id
+            && journal.build_id.as_deref() == Some(product.manifest.build_id.as_str())
+    });
+    Ok(render_section(&product.manifest, journal.as_ref(), section))
 }
 
 pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
@@ -83,7 +87,7 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
                     task.owner,
                     task.entrypoint,
                     task.entrypoint_digest,
-                    task.runner.family,
+                    task.runner.family_name(),
                     task.cache.enabled,
                     task.cache
                         .revision
@@ -182,7 +186,7 @@ fn render_scripts(scripts: &[crate::manifest::Script]) -> String {
                 script.at,
                 script.schedule,
                 script.scope,
-                script.runner.family,
+                script.runner.family_name(),
                 script.payloads.len(),
                 script.declared_at
             )
@@ -384,7 +388,11 @@ pub fn compare(left: &Path, right: &Path) -> Result<String> {
     Ok(render_comparison(&left.manifest, &right.manifest))
 }
 
-fn render_section(manifest: &Manifest, section: InspectSection) -> String {
+fn render_section(
+    manifest: &Manifest,
+    journal: Option<&crate::ladder::ExecutionJournal>,
+    section: InspectSection,
+) -> String {
     match section {
         InspectSection::Overview => format!(
             "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
@@ -503,15 +511,29 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
         InspectSection::Ladder => render_ladder(&manifest.ladder),
         InspectSection::Scripts => {
             let mut output = render_scripts(&manifest.scripts);
-            output.push_str(&render_list(
-                "Materialisation outcomes",
-                manifest.script_outcomes.iter().map(|outcome| {
-                    format!(
-                        "{}\n  rung: {}\n  status: {:?}\n  reason: {}",
-                        outcome.identity, outcome.rung, outcome.status, outcome.reason
-                    )
-                }),
-            ));
+            let identities = manifest
+                .scripts
+                .iter()
+                .map(|script| script.identity.as_str())
+                .collect::<BTreeSet<_>>();
+            match journal {
+                Some(journal) => output.push_str(&render_list(
+                    "Materialisation outcomes",
+                    journal
+                        .actions
+                        .iter()
+                        .filter(|action| identities.contains(action.identity.as_str()))
+                        .map(|action| {
+                            format!(
+                                "{}\n  rung: {}\n  status: {:?}\n  reason: {}",
+                                action.identity, action.rung, action.status, action.reason
+                            )
+                        }),
+                )),
+                None => output.push_str(
+                    "Materialisation outcomes\n  unavailable (no matching execution journal)\n",
+                ),
+            }
             output
         }
         InspectSection::Tasks => render_list(
@@ -521,7 +543,7 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                     "{}\n  entrypoint: {}\n  runner: {:?}\n  outputs: {}\n  declared at: {}",
                     task.identity,
                     task.entrypoint,
-                    task.runner.family,
+                    task.runner.family_name(),
                     task.outputs.len(),
                     task.declared_at
                 )

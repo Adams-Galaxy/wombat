@@ -17,7 +17,7 @@ use tempfile::NamedTempFile;
 use crate::ladder::RungId;
 use crate::manifest::{
     ExecutionMode, Script, ScriptOutcome, ScriptOutcomeStatus, ScriptSchedule, ScriptScope,
-    TaskLogPolicy, TaskRunnerFamily,
+    TaskLogPolicy,
 };
 use crate::{Result, WombatError};
 
@@ -143,13 +143,15 @@ pub(crate) fn verify_payloads(root: &Path, scripts: &[Script], kind: PayloadKind
 
 pub(crate) fn check_runners(scripts: &[Script]) -> Result<()> {
     for script in scripts {
-        if matches!(
-            script.runner.family,
-            TaskRunnerFamily::EmbeddedLua | TaskRunnerFamily::Direct
-        ) {
+        if script.runner.is_embedded_lua() || script.runner.is_direct() {
             continue;
         }
-        let command = script.runner.command.as_deref().expect("runner command");
+        let Some(command) = script.runner.command() else {
+            return Err(script_error(
+                script,
+                "external runner has no interpreter command",
+            ));
+        };
         if resolve_command(command).is_none() {
             return Err(script_error(
                 script,
@@ -281,7 +283,7 @@ fn execute(script: &Script, options: &ScriptExecutionOptions<'_>) -> Result<Scri
     if let Some(target_root) = options.target_root {
         protocol.push(format!("--target-root={}", target_root.display()));
     }
-    let result = if script.runner.family == TaskRunnerFamily::EmbeddedLua {
+    let result = if script.runner.is_embedded_lua() {
         run_lua(script, &entrypoint, &work, &source_dir, &protocol)?
     } else {
         run_process(script, &entrypoint, &work, &source_dir, &root, &protocol)?
@@ -366,10 +368,15 @@ fn run_process(
     state_root: &Path,
     protocol: &[String],
 ) -> Result<RunResult> {
-    let mut command = if script.runner.family == TaskRunnerFamily::Direct {
+    let mut command = if script.runner.is_direct() {
         Command::new(entrypoint)
     } else {
-        let configured = script.runner.command.as_deref().expect("runner command");
+        let Some(configured) = script.runner.command() else {
+            return Err(script_error(
+                script,
+                "external runner has no interpreter command",
+            ));
+        };
         let executable = resolve_command(configured).ok_or_else(|| {
             script_error(
                 script,
@@ -377,7 +384,7 @@ fn run_process(
             )
         })?;
         let mut command = Command::new(executable);
-        command.args(&script.runner.args).arg(entrypoint);
+        command.args(script.runner.args()).arg(entrypoint);
         command
     };
     command
@@ -387,7 +394,7 @@ fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(&script.env);
-    if script.runner.family == TaskRunnerFamily::Python && script.python_helper {
+    if script.runner.is_python() && script.python_helper {
         let helper = state_root.join("python-helper");
         ensure_private_directory(&helper)?;
         fs::write(helper.join("wombat.py"), PYTHON_HELPER)

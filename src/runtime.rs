@@ -19,14 +19,13 @@ use crate::ladder::{CoreRung, ExecutionLadder, LadderRung, RungId};
 use crate::manifest::{
     ArtifactKind, ArtifactNotice, ArtifactNoticeKind, ArtifactPolicy, ArtifactSelection,
     ArtifactSelectionKind, BuildInput, Dependency, DependencyKind, EvaluatedArtifact,
-    EvaluatedDirectory, EvaluatedManifest, EvaluatedProduction, EvaluatedTask,
+    EvaluatedDirectory, EvaluatedManifest, EvaluatedProduction, EvaluatedTask, InterpreterFamily,
     MAX_SOURCE_TRACE_FRAMES, ManifestModule, ModuleSourceBase, Observation, ObservationSubject,
     ProcessEnvironmentChange, ProcessInvocation, ProcessObservation, Provider, ProviderBinding,
     ProviderOrigin, ProviderPreparation, Publications, Requirement, RequirementCandidate,
     RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome, Script,
     ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
-    SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskRunnerFamily,
-    TaskTargetRoot,
+    SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskTargetRoot,
 };
 use crate::path::{
     infer_target, infer_target_root, parse_explicit_target, parse_explicit_target_root,
@@ -2933,8 +2932,7 @@ fn declare_task(
     )?;
     reject_unknown_options(&options, "task")?;
 
-    if let Some(command) = runner.command.as_deref()
-        && runner.family != TaskRunnerFamily::Direct
+    if let Some(command) = runner.command()
         && !command.contains('/')
         && !command.contains('\\')
         && !state.borrow().providers.is_empty()
@@ -3222,8 +3220,7 @@ fn declare_script(
     reject_unknown_options(&options, "script")?;
     let payloads = collect_script_payloads(&root, entrypoint, &files)?;
 
-    if let Some(command) = runner.command.as_deref()
-        && runner.family != TaskRunnerFamily::Direct
+    if let Some(command) = runner.command()
         && !command.contains('/')
         && !command.contains('\\')
         && !state.borrow().providers.is_empty()
@@ -3411,14 +3408,14 @@ fn parse_task_runner(
             }
         };
         validate_interpreter_command(&command)?;
-        return Ok(TaskRunner {
+        return Ok(TaskRunner::Interpreter {
             contract_version: 1,
             family: if entrypoint.ends_with(".py") {
-                TaskRunnerFamily::Python
+                InterpreterFamily::Python
             } else {
-                TaskRunnerFamily::Custom
+                InterpreterFamily::Custom
             },
-            command: Some(command),
+            command,
             args,
         });
     }
@@ -3435,15 +3432,34 @@ fn parse_task_runner(
     if let Some(runner) = configured_name.and_then(|name| configured_defaults.get(name)) {
         return Ok(runner.clone());
     }
-    let (family, command) = match Path::new(entrypoint)
+    let runner = match Path::new(entrypoint)
         .extension()
         .and_then(|extension| extension.to_str())
     {
-        Some("py") => (TaskRunnerFamily::Python, Some("python3".to_string())),
-        Some("sh") => (TaskRunnerFamily::PosixShell, Some("sh".to_string())),
-        Some("bash") => (TaskRunnerFamily::Bash, Some("bash".to_string())),
-        Some("lua") => (TaskRunnerFamily::EmbeddedLua, None),
-        None if source_executable(absolute)? => (TaskRunnerFamily::Direct, None),
+        Some("py") => TaskRunner::Interpreter {
+            contract_version: 1,
+            family: InterpreterFamily::Python,
+            command: "python3".to_string(),
+            args: Vec::new(),
+        },
+        Some("sh") => TaskRunner::Interpreter {
+            contract_version: 1,
+            family: InterpreterFamily::PosixShell,
+            command: "sh".to_string(),
+            args: Vec::new(),
+        },
+        Some("bash") => TaskRunner::Interpreter {
+            contract_version: 1,
+            family: InterpreterFamily::Bash,
+            command: "bash".to_string(),
+            args: Vec::new(),
+        },
+        Some("lua") => TaskRunner::EmbeddedLua {
+            contract_version: 1,
+        },
+        None if source_executable(absolute)? => TaskRunner::Direct {
+            contract_version: 1,
+        },
         None => {
             return Err(WombatError::configuration(format!(
                 "extensionless task `{entrypoint}` must be executable or declare `interpreter`"
@@ -3455,12 +3471,7 @@ fn parse_task_runner(
             )));
         }
     };
-    Ok(TaskRunner {
-        contract_version: 1,
-        family,
-        command,
-        args: Vec::new(),
-    })
+    Ok(runner)
 }
 
 fn validate_interpreter_command(command: &str) -> Result<()> {
@@ -4150,7 +4161,6 @@ fn build_manifest(
         preparations,
         tasks: state.tasks.clone(),
         scripts: state.scripts.clone(),
-        script_outcomes: Vec::new(),
         artifact_policy: state.artifact_policy,
         artifact_notices: state.artifact_notices.clone(),
         artifact_selections: state.artifact_selections.clone(),

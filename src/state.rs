@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 use crate::manifest::{
     Artifact, ArtifactKind, EvaluatedTargetOrigin, FileContent, Production, SourceOrigin,
     SourceTrace, TargetPath, Task, TaskCachePolicy, TaskLogPolicy, TaskOutput, TaskRunner,
-    TaskRunnerFamily, TaskTargetRoot,
+    TaskTargetRoot,
 };
 use crate::{Result, WombatError};
 
@@ -389,7 +389,6 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         preparations: Vec::new(),
         tasks,
         scripts: Vec::new(),
-        script_outcomes: Vec::new(),
         artifact_policy: crate::manifest::ArtifactPolicy::default(),
         artifact_notices: Vec::new(),
         artifact_selections: Vec::new(),
@@ -414,11 +413,8 @@ fn state_tasks(artifacts: &[AppliedArtifact]) -> Vec<Task> {
             entrypoint: "tasks/target-state-placeholder".to_string(),
             entrypoint_digest: format!("sha256:{}", "0".repeat(64)),
             params: crate::frozen::FrozenValue::empty_map(),
-            runner: TaskRunner {
+            runner: TaskRunner::EmbeddedLua {
                 contract_version: 1,
-                family: TaskRunnerFamily::EmbeddedLua,
-                command: None,
-                args: Vec::new(),
             },
             python_helper: false,
             logs: TaskLogPolicy::Never,

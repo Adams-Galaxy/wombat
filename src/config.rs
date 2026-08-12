@@ -92,10 +92,10 @@ fn configured_task_interpreters(
     let mut interpreters = BTreeMap::new();
     for (name, configured) in config.runners {
         let family = match name.as_str() {
-            "python" => crate::manifest::TaskRunnerFamily::Python,
-            "shell" => crate::manifest::TaskRunnerFamily::PosixShell,
-            "bash" => crate::manifest::TaskRunnerFamily::Bash,
-            "lua" => crate::manifest::TaskRunnerFamily::Custom,
+            "python" => crate::manifest::InterpreterFamily::Python,
+            "shell" => crate::manifest::InterpreterFamily::PosixShell,
+            "bash" => crate::manifest::InterpreterFamily::Bash,
+            "lua" => crate::manifest::InterpreterFamily::Custom,
             _ => {
                 return Err(WombatError::configuration(format!(
                     "unknown task interpreter `{name}` in `{}`; expected python, shell, bash, or lua",
@@ -112,10 +112,10 @@ fn configured_task_interpreters(
         let command = expand_interpreter_command(&configured.command, home, path)?;
         interpreters.insert(
             name,
-            crate::manifest::TaskRunner {
+            crate::manifest::TaskRunner::Interpreter {
                 contract_version: 1,
                 family,
-                command: Some(command),
+                command,
                 args: configured.args,
             },
         );
@@ -325,14 +325,14 @@ args = ["-I"]
         .unwrap();
         let python = &interpreters["python"];
         assert_eq!(
-            python.command.as_deref(),
+            python.command(),
             Some(
                 home.join(".venvs/wombat/bin/python")
                     .to_string_lossy()
                     .as_ref()
             )
         );
-        assert_eq!(python.args, ["-I"]);
+        assert_eq!(python.args(), ["-I"]);
     }
 
     #[test]

@@ -7,13 +7,24 @@ use crate::manifest::SourceLocation;
 
 pub type Result<T> = std::result::Result<T, WombatError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    Configuration,
+    CorruptState,
+    Conflict,
+    Policy,
+    Process,
+    Filesystem,
+    Internal,
+}
+
 #[derive(Debug, Error)]
 pub enum WombatError {
     #[error("{}", .0.message)]
     Diagnostic(Box<Diagnostic>),
 
-    #[error("{0}")]
-    Configuration(String),
+    #[error("{message}")]
+    Classified { kind: ErrorKind, message: String },
 
     #[error("failed to access `{path}`: {source}")]
     Io {
@@ -34,6 +45,7 @@ pub enum WombatError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
+    pub kind: ErrorKind,
     pub message: String,
     pub primary: Option<SourceLocation>,
     pub source_line: Option<String>,
@@ -46,6 +58,7 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            kind: ErrorKind::Configuration,
             message: message.into(),
             primary: None,
             source_line: None,
@@ -101,15 +114,47 @@ impl WombatError {
     }
 
     pub fn configuration(message: impl Into<String>) -> Self {
-        Self::Configuration(message.into())
+        Self::classified(ErrorKind::Configuration, message)
+    }
+
+    pub fn corrupt_state(message: impl Into<String>) -> Self {
+        Self::classified(ErrorKind::CorruptState, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::classified(ErrorKind::Conflict, message)
+    }
+
+    pub fn policy(message: impl Into<String>) -> Self {
+        Self::classified(ErrorKind::Policy, message)
+    }
+
+    pub fn process(message: impl Into<String>) -> Self {
+        Self::classified(ErrorKind::Process, message)
+    }
+
+    pub fn invariant(message: impl Into<String>) -> Self {
+        Self::classified(ErrorKind::Internal, message)
     }
 
     pub fn diagnostic(diagnostic: Diagnostic) -> Self {
         Self::Diagnostic(Box::new(diagnostic))
     }
 
+    pub const fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Diagnostic(diagnostic) => diagnostic.kind,
+            Self::Classified { kind, .. } => *kind,
+            Self::Io { .. } => ErrorKind::Filesystem,
+            Self::Lua(_) => ErrorKind::Configuration,
+            Self::Json(_) => ErrorKind::CorruptState,
+            Self::ProjectHelpRequested => ErrorKind::Internal,
+        }
+    }
+
     pub fn with_note(self, note: impl Into<String>) -> Self {
         let note = note.into();
+        let kind = self.kind();
         match self {
             Self::Diagnostic(mut diagnostic) => {
                 diagnostic.notes.push(note);
@@ -118,6 +163,7 @@ impl WombatError {
             other => {
                 let message = other.to_string();
                 let mut diagnostic = Diagnostic::new(&message);
+                diagnostic.kind = kind;
                 diagnostic.notes.push(note);
                 diagnostic.underlying = Some(message);
                 Self::Diagnostic(Box::new(diagnostic))
@@ -144,8 +190,15 @@ impl WombatError {
                 diagnostic.underlying = Some(error.to_string());
                 diagnostic.render(trace)
             }
-            Self::Configuration(message) => Diagnostic::new(message).render(trace),
+            Self::Classified { message, .. } => Diagnostic::new(message).render(trace),
             Self::ProjectHelpRequested => Diagnostic::new("project help requested").render(trace),
+        }
+    }
+
+    fn classified(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self::Classified {
+            kind,
+            message: message.into(),
         }
     }
 }

@@ -16,7 +16,7 @@ fn materialisation_records_the_fixed_core_ladder() {
     .unwrap();
     let built = build(BuildOptions::new(&source, "build")).unwrap();
     let journal = ladder::read(&built.build_dir).unwrap();
-    assert_eq!(journal.format_version, 2);
+    assert_eq!(journal.format_version, 3);
     assert_eq!(journal.plan_id, built.manifest.plan_id);
     assert_eq!(journal.rungs.len(), 8);
     assert_eq!(
@@ -152,10 +152,16 @@ fn root_build_reuses_a_fresh_matching_product_without_reconstructing() {
     .unwrap();
     let first =
         build(BuildOptions::new(&source, "build").with_provider_reconciliation(true)).unwrap();
+    let manifest_before = fs::read(source.join("build/manifest.json")).unwrap();
     let second =
         build(BuildOptions::new(&source, "build").with_provider_reconciliation(true)).unwrap();
     assert_eq!(first.build_id, second.build_id);
     assert_eq!(second.status, wombat::BuildStatus::Reused);
+    assert_eq!(
+        fs::read(source.join("build/manifest.json")).unwrap(),
+        manifest_before,
+        "product reuse must not rewrite immutable product metadata"
+    );
     assert_eq!(fs::read_to_string(marker).unwrap(), "x");
 }
 

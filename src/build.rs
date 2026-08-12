@@ -189,25 +189,6 @@ pub struct PlanOutcome {
 pub type MaterialiseOutcome = BuildOutcome;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrepareOutcome {
-    pub build_dir: PathBuf,
-    pub plan_id: String,
-    pub completed: Vec<String>,
-    pub already_satisfied: Vec<String>,
-}
-
-impl PrepareOutcome {
-    pub fn display(&self) -> String {
-        format!(
-            "prepare complete for {} ({} changed, {} already satisfied)\n",
-            self.plan_id,
-            self.completed.len(),
-            self.already_satisfied.len()
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedBuild {
     pub build_dir: PathBuf,
     pub manifest: Manifest,
@@ -289,110 +270,126 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
     if plan.tasks.iter().any(|task| !task.cache.enabled) {
         return Ok(None);
     }
-    let opened = match open_build(&build_dir) {
-        Ok(opened) => opened,
-        Err(_) => return Ok(None),
-    };
-    if opened.manifest.plan_id != plan.plan_id {
-        return Ok(None);
-    }
-    if opened.manifest.execution_mode
-        != if options.compile_only {
+    let lock_path = build_dir.join(".wombat/lock");
+    ensure_plain_file(&lock_path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| WombatError::io(&lock_path, error))?;
+    acquire_exclusive(&lock, &build_dir)?;
+    let result = (|| {
+        let manifest = match verify_product(&build_dir) {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(None),
+        };
+        if manifest.plan_id != plan.plan_id {
+            return Ok(None);
+        }
+        let execution_mode = if options.compile_only {
             crate::manifest::ExecutionMode::CompileOnly
         } else {
             crate::manifest::ExecutionMode::Normal
+        };
+        if manifest.execution_mode != execution_mode {
+            return Ok(None);
         }
-    {
-        return Ok(None);
-    }
-    let mut authorization = None;
-    if options.reconcile_requirements && !options.compile_only && !plan.requirements.is_empty() {
-        authorization = Some(crate::requirements::authorize_target_plan_until(
-            &build_dir,
-            &plan,
-            options.requirement_boundary,
-            options.yes,
-        )?);
-    }
-    let state_root = options
-        .script_state_root
-        .clone()
-        .map_or_else(crate::scripts::materialise_state_root, Ok)?;
-    let execution_mode = opened.manifest.execution_mode;
-    let mut script_outcomes = Vec::new();
-    let mut journal = crate::ladder::ExecutionJournal::new_for_ladder(
-        plan.plan_id.clone(),
-        crate::ladder::CoreRung::MaterialiseAfter,
-        &plan.ladder,
-    );
-    journal.configure(execution_mode, Vec::new());
-    journal.build_id = Some(opened.manifest.build_id.clone());
-    journal.record_reuse("product");
-    let after: crate::ladder::RungId = crate::ladder::CoreRung::MaterialiseAfter.into();
-    let end = plan.ladder.position(&after).expect("core rung");
-    for rung in plan.ladder.leaf_ids().take(end + 1) {
-        journal.set_id(rung, crate::ladder::ExecutionStatus::Running);
-        if let Some(approved) = &mut authorization {
-            crate::requirements::prepare_target_plan_at_authorized(
-                &build_dir, &plan, rung, approved,
-            )?;
+        let mut authorization = None;
+        if options.reconcile_requirements && !options.compile_only && !plan.requirements.is_empty()
+        {
+            authorization = Some(crate::requirements::authorize_target_plan_until(
+                &build_dir,
+                &plan,
+                options.requirement_boundary,
+                options.yes,
+            )?);
         }
-        let scripts = plan
-            .scripts
-            .iter()
-            .filter(|script| &script.at == rung)
-            .cloned()
-            .collect::<Vec<_>>();
-        crate::scripts::check_runners(&scripts)?;
-        let outcomes = crate::scripts::execute_at(
-            &plan.scripts,
-            rung,
-            &crate::scripts::ScriptExecutionOptions {
-                state_root: &state_root,
-                payload_root: &opened.product_dir,
-                payload_kind: crate::scripts::PayloadKind::Product,
-                project_identity: &plan.project_identity,
-                plan_id: &plan.plan_id,
-                build_id: Some(&opened.manifest.build_id),
-                execution_mode,
-                allow_host_scripts: options.allow_host_scripts,
-                rerun: options.rerun_scripts,
-                target_root: None,
-            },
-        )?;
-        for outcome in &outcomes {
-            journal.record_action(
-                &outcome.identity,
+        let state_root = options
+            .script_state_root
+            .clone()
+            .map_or_else(crate::scripts::materialise_state_root, Ok)?;
+        let mut journal = crate::ladder::ExecutionJournal::new_for_ladder(
+            plan.plan_id.clone(),
+            crate::ladder::CoreRung::MaterialiseAfter,
+            &plan.ladder,
+        );
+        journal.configure(execution_mode, Vec::new());
+        journal.build_id = Some(manifest.build_id.clone());
+        journal.record_reuse("product");
+        let after: crate::ladder::RungId = crate::ladder::CoreRung::MaterialiseAfter.into();
+        let end = plan.ladder.position(&after).ok_or_else(|| {
+            WombatError::configuration("stored ladder has no materialise.after rung")
+        })?;
+        for rung in plan.ladder.leaf_ids().take(end + 1) {
+            journal.set_id(rung, crate::ladder::ExecutionStatus::Running);
+            if let Some(approved) = &mut authorization {
+                crate::requirements::prepare_target_plan_at_authorized(
+                    &build_dir, &plan, rung, approved,
+                )?;
+            }
+            let scripts = plan
+                .scripts
+                .iter()
+                .filter(|script| &script.at == rung)
+                .cloned()
+                .collect::<Vec<_>>();
+            crate::scripts::check_runners(&scripts)?;
+            let outcomes = crate::scripts::execute_at(
+                &plan.scripts,
                 rung,
-                match outcome.status {
-                    crate::manifest::ScriptOutcomeStatus::Ran => {
-                        crate::ladder::ExecutionStatus::Succeeded
-                    }
-                    _ => crate::ladder::ExecutionStatus::Skipped,
+                &crate::scripts::ScriptExecutionOptions {
+                    state_root: &state_root,
+                    payload_root: &build_dir,
+                    payload_kind: crate::scripts::PayloadKind::Product,
+                    project_identity: &plan.project_identity,
+                    plan_id: &plan.plan_id,
+                    build_id: Some(&manifest.build_id),
+                    execution_mode,
+                    allow_host_scripts: options.allow_host_scripts,
+                    rerun: options.rerun_scripts,
+                    target_root: None,
                 },
-                &outcome.reason,
+            )?;
+            for outcome in &outcomes {
+                journal.record_action(
+                    &outcome.identity,
+                    rung,
+                    match outcome.status {
+                        crate::manifest::ScriptOutcomeStatus::Ran => {
+                            crate::ladder::ExecutionStatus::Succeeded
+                        }
+                        _ => crate::ladder::ExecutionStatus::Skipped,
+                    },
+                    &outcome.reason,
+                );
+            }
+            journal.set_id(
+                rung,
+                if rung.core() == Some(crate::ladder::CoreRung::MaterialisePublish) {
+                    crate::ladder::ExecutionStatus::Reused
+                } else {
+                    crate::ladder::ExecutionStatus::Succeeded
+                },
             );
         }
-        script_outcomes.extend(outcomes);
-        journal.set_id(
-            rung,
-            if rung.core() == Some(crate::ladder::CoreRung::MaterialisePublish) {
-                crate::ladder::ExecutionStatus::Reused
-            } else {
-                crate::ladder::ExecutionStatus::Succeeded
-            },
-        );
+        crate::ladder::write(&build_dir, &journal)?;
+        let mut reused = outcome(BuildStatus::Reused, build_dir.clone(), manifest);
+        if options.requirement_boundary > crate::ladder::CoreRung::MaterialiseAfter {
+            reused.requirement_authorization = authorization;
+        }
+        Ok(Some(reused))
+    })();
+    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
+    match result {
+        Err(error) => {
+            let _ = unlock;
+            Err(error)
+        }
+        Ok(outcome) => {
+            unlock?;
+            Ok(outcome)
+        }
     }
-    let mut manifest = opened.manifest.clone();
-    manifest.script_outcomes = script_outcomes;
-    drop(opened);
-    write_json_atomic(&build_dir.join("manifest.json"), &manifest)?;
-    crate::ladder::write(&build_dir, &journal)?;
-    let mut reused = outcome(BuildStatus::Reused, build_dir, manifest);
-    if options.requirement_boundary > crate::ladder::CoreRung::MaterialiseAfter {
-        reused.requirement_authorization = authorization;
-    }
-    Ok(Some(reused))
 }
 
 fn reusable_stored_plan(
@@ -576,7 +573,6 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
         let mut staging = None;
         let mut materialised_manifest = None;
         let mut published_manifest = None;
-        let mut script_outcomes = Vec::new();
         let mut status = None;
         let materialise_after: crate::ladder::RungId =
             crate::ladder::CoreRung::MaterialiseAfter.into();
@@ -691,7 +687,6 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                             || "completed".to_string(),
                             |outcome| outcome.reason.clone(),
                         );
-                        script_outcomes.extend(outcomes);
                         (status, reason)
                     })
                 } else {
@@ -796,10 +791,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
             crate::ladder::write(&build_dir, &journal)?;
         }
 
-        let mut published = published_manifest.expect("publication rung produced a manifest");
-        published.script_outcomes = script_outcomes;
-        write_json_atomic(&build_dir.join("manifest.json"), &published)?;
-        published = verify_product(&build_dir)?;
+        let published = published_manifest.expect("publication rung produced a manifest");
         let mut outcome = outcome(
             status.expect("publication determines status"),
             build_dir.clone(),
@@ -1040,30 +1032,6 @@ pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
             Ok(outcome)
         }
     }
-}
-
-pub fn prepare(options: BuildOptions, yes: bool) -> Result<PrepareOutcome> {
-    let first = plan(options.clone())?;
-    let reconciled = crate::requirements::prepare_plan(&first.build_dir, &first.plan, yes)?;
-    let second = plan(options)?;
-    if first.plan.plan_id != second.plan.plan_id {
-        return Err(WombatError::configuration(format!(
-            "build plan changed during preparation: `{}` became `{}`; completed host work: {}; no rollback was attempted",
-            first.plan.plan_id,
-            second.plan.plan_id,
-            if reconciled.completed.is_empty() {
-                "none".to_string()
-            } else {
-                reconciled.completed.join(", ")
-            }
-        )));
-    }
-    Ok(PrepareOutcome {
-        build_dir: second.build_dir,
-        plan_id: second.plan.plan_id,
-        completed: reconciled.completed,
-        already_satisfied: reconciled.already_satisfied,
-    })
 }
 
 pub fn project_help(source_root: &Path, host: Option<HostContext>) -> Result<String> {
@@ -1549,7 +1517,6 @@ fn materialise_inner(
         preparations: desired.preparations,
         tasks: desired.tasks.into_iter().map(|task| task.task).collect(),
         scripts: desired.scripts,
-        script_outcomes: desired.script_outcomes,
         artifact_policy: desired.artifact_policy,
         artifact_notices: desired.artifact_notices,
         artifact_selections: desired.artifact_selections,
@@ -2540,11 +2507,6 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         }
     }
     validate_tasks(manifest, &source_paths)?;
-    let script_identities = manifest
-        .scripts
-        .iter()
-        .map(|script| script.identity.as_str())
-        .collect::<BTreeSet<_>>();
     for script in &manifest.scripts {
         validate_source_trace(
             &script.declared_at,
@@ -2560,15 +2522,6 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 "manifest script `{}` payloads are not uniquely sorted",
                 script.identity
             )));
-        }
-    }
-    for outcome in &manifest.script_outcomes {
-        if !script_identities.contains(outcome.identity.as_str())
-            || !manifest.ladder.contains(&outcome.rung)
-        {
-            return Err(WombatError::configuration(
-                "manifest contains an outcome for an unknown script or rung",
-            ));
         }
     }
     validate_artifact_metadata(
@@ -2934,34 +2887,13 @@ fn validate_tasks(
         validate_sha256(&task.entrypoint_digest, "manifest task entrypoint digest")?;
         validate_source_trace(&task.declared_at, source_paths, "manifest task declaration")?;
         if !matches!(task.params, crate::frozen::FrozenValue::Map(_))
-            || task.runner.contract_version != 1
-            || task.runner.command.as_deref().is_some_and(str::is_empty)
+            || task.runner.contract_version() != 1
+            || task.runner.command().is_some_and(str::is_empty)
             || task.cache.revision.as_deref().is_some_and(str::is_empty)
         {
             return Err(WombatError::configuration(
                 "manifest task contains invalid parameters, runner, or cache policy",
             ));
-        }
-        match task.runner.family {
-            crate::manifest::TaskRunnerFamily::EmbeddedLua
-            | crate::manifest::TaskRunnerFamily::Direct
-                if task.runner.command.is_some() =>
-            {
-                return Err(WombatError::configuration(
-                    "embedded and direct task runners must not record an interpreter command",
-                ));
-            }
-            crate::manifest::TaskRunnerFamily::Python
-            | crate::manifest::TaskRunnerFamily::PosixShell
-            | crate::manifest::TaskRunnerFamily::Bash
-            | crate::manifest::TaskRunnerFamily::Custom
-                if task.runner.command.is_none() =>
-            {
-                return Err(WombatError::configuration(
-                    "external task runners must record an interpreter command",
-                ));
-            }
-            _ => {}
         }
         if !task
             .outputs

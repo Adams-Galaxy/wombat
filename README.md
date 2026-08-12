@@ -306,7 +306,7 @@ end
 
 Only facts actually consulted during evaluation enter manifest provenance.
 Resolved inputs, the concrete target, consulted observations, and typed Lua
-source provenance are stored in manifest v14 and participate in build identity.
+source provenance are stored in manifest v15 and participate in build identity.
 Every Wombat-owned root, module, and repository `require()` load contributes its
 repository-relative path and digest. Consequently a comment or declaration
 line movement can produce a new exact build identity even when artifact bytes

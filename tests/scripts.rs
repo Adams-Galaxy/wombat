@@ -60,7 +60,7 @@ printf '%s\n' "$params" >> "$cache/marker"
     let (temporary, root) = repository(lua, shell);
     let state = temporary.path().join("state");
     let planned = plan(BuildOptions::new(&root, "build")).unwrap();
-    assert_eq!(planned.plan.format_version, 5);
+    assert_eq!(planned.plan.format_version, 6);
     assert!(
         planned
             .plan
@@ -69,8 +69,16 @@ printf '%s\n' "$params" >> "$cache/marker"
     );
     assert_eq!(planned.plan.scripts.len(), 2);
     let built = build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
-    assert_eq!(built.manifest.format_version, 14);
-    assert_eq!(built.manifest.script_outcomes.len(), 2);
+    assert_eq!(built.manifest.format_version, 15);
+    let journal = wombat::ladder::read(&built.build_dir).unwrap();
+    assert_eq!(
+        journal
+            .actions
+            .iter()
+            .filter(|action| action.identity.contains("mark.sh"))
+            .count(),
+        2
+    );
     assert_eq!(marker_contents(&state).lines().count(), 2);
 }
 
@@ -109,10 +117,12 @@ fn compile_only_scope_policy_skips_target_and_requires_host_authorization() {
             .with_script_state_root(temporary.path().join("state")),
     )
     .unwrap();
-    assert_eq!(
-        built.manifest.script_outcomes[0].status,
-        wombat::manifest::ScriptOutcomeStatus::CompileOnlySkip
-    );
+    let journal = wombat::ladder::read(&built.build_dir).unwrap();
+    assert!(journal.actions.iter().any(|action| {
+        action.identity.contains("mark.sh")
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+            && action.reason.contains("compile-only")
+    }));
 
     fs::write(
         root.join("wombat.lua"),
@@ -244,7 +254,17 @@ assert source.name == "payload" and scope == "target" and target_root is None
     .unwrap();
     let state = temporary.path().join("state");
     let built = build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
-    assert_eq!(built.manifest.script_outcomes.len(), 2);
+    let journal = wombat::ladder::read(&built.build_dir).unwrap();
+    assert_eq!(
+        journal
+            .actions
+            .iter()
+            .filter(|action| {
+                action.identity.contains("generate.py") || action.identity.contains("embedded.lua")
+            })
+            .count(),
+        2
+    );
     let contents = marker_contents(&state);
     assert!(contents.contains("companion"));
     assert!(contents.contains("lua"));

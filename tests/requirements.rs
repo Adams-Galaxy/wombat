@@ -63,7 +63,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 14);
+    assert_eq!(outcome.manifest.format_version, 15);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -94,7 +94,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 14);
+    assert_eq!(outcome.manifest.format_version, 15);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -157,14 +157,6 @@ return provider.define({
     .unwrap();
     assert_eq!(outcome.manifest.preparations.len(), 1);
     assert_eq!(outcome.manifest.preparations[0].identity, "catalog");
-    let mismatch = wombat::bootstrap_exact(&outcome.build_dir, true, "sha256:not-the-build")
-        .unwrap_err()
-        .to_string();
-    assert!(
-        mismatch.contains("refusing to mutate the host"),
-        "{mismatch}"
-    );
-
     fs::write(
         source.join("providers/custom.lua"),
         "local p=require('wombat.provider') return p.define({ resolve=function(c) return p.binding({identity=c.name,data={}}) end, plan=function() return {} end, check=function() return p.satisfied() end, reconcile=function() end })",

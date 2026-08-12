@@ -6,8 +6,8 @@ use crate::ladder::{ExecutionLadder, RungId};
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 14;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 5;
+pub const MANIFEST_FORMAT_VERSION: u32 = 15;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 6;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -77,7 +77,6 @@ pub struct Manifest {
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
     pub scripts: Vec<Script>,
-    pub script_outcomes: Vec<ScriptOutcome>,
     pub artifact_policy: ArtifactPolicy,
     pub artifact_notices: Vec<ArtifactNotice>,
     pub artifact_selections: Vec<ArtifactSelection>,
@@ -602,24 +601,99 @@ pub enum ScriptOutcomeStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskRunner {
-    pub contract_version: u32,
-    pub family: TaskRunnerFamily,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    pub args: Vec<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskRunner {
+    EmbeddedLua {
+        contract_version: u32,
+    },
+    Direct {
+        contract_version: u32,
+    },
+    Interpreter {
+        contract_version: u32,
+        family: InterpreterFamily,
+        command: String,
+        args: Vec<String>,
+    },
+}
+
+impl TaskRunner {
+    pub const fn contract_version(&self) -> u32 {
+        match self {
+            Self::EmbeddedLua { contract_version }
+            | Self::Direct { contract_version }
+            | Self::Interpreter {
+                contract_version, ..
+            } => *contract_version,
+        }
+    }
+
+    pub const fn is_embedded_lua(&self) -> bool {
+        matches!(self, Self::EmbeddedLua { .. })
+    }
+
+    pub const fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct { .. })
+    }
+
+    pub fn interpreter(&self) -> Option<(InterpreterFamily, &str, &[String])> {
+        match self {
+            Self::Interpreter {
+                family,
+                command,
+                args,
+                ..
+            } => Some((*family, command, args)),
+            Self::EmbeddedLua { .. } | Self::Direct { .. } => None,
+        }
+    }
+
+    pub fn command(&self) -> Option<&str> {
+        self.interpreter().map(|(_, command, _)| command)
+    }
+
+    pub fn args(&self) -> &[String] {
+        self.interpreter()
+            .map_or(&[], |(_, _, arguments)| arguments)
+    }
+
+    pub fn is_python(&self) -> bool {
+        matches!(
+            self,
+            Self::Interpreter {
+                family: InterpreterFamily::Python,
+                ..
+            }
+        )
+    }
+
+    pub const fn family_name(&self) -> &'static str {
+        match self {
+            Self::EmbeddedLua { .. } => "embedded_lua",
+            Self::Direct { .. } => "direct",
+            Self::Interpreter { family, .. } => family.as_str(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskRunnerFamily {
+pub enum InterpreterFamily {
     Python,
     PosixShell,
     Bash,
-    EmbeddedLua,
-    Direct,
     Custom,
+}
+
+impl InterpreterFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Python => "python",
+            Self::PosixShell => "posix_shell",
+            Self::Bash => "bash",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -686,7 +760,6 @@ pub(crate) struct EvaluatedManifest {
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<EvaluatedTask>,
     pub scripts: Vec<Script>,
-    pub script_outcomes: Vec<ScriptOutcome>,
     pub artifact_policy: ArtifactPolicy,
     pub artifact_notices: Vec<ArtifactNotice>,
     pub artifact_selections: Vec<ArtifactSelection>,

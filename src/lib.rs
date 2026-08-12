@@ -29,8 +29,8 @@ mod tasks;
 pub use add::{AddMethod, AddOutcome, AddStatus, add};
 pub use build::{
     BuildOptions, BuildOutcome, BuildStatus, MaterialiseOutcome, OpenedBuild, PlanOutcome,
-    PrepareOutcome, VerifiedBuild, build, materialise, open_build, plan, plan_or_reuse, prepare,
-    project_help, project_help_with_options, verify_build,
+    VerifiedBuild, build, materialise, open_build, plan, plan_or_reuse, project_help,
+    project_help_with_options, verify_build,
 };
 pub use context::{
     Architecture, Distribution, HostContext, Kernel, LooseVersion, OperatingSystem,
@@ -40,7 +40,7 @@ pub use deploy::{
     ApplyOutcome, ApplyStatus, ConflictPolicy, ConflictResolution, DeploymentOptions, DiffOutcome,
     PreparedApply, apply, diff, prepare_apply,
 };
-pub use error::{Diagnostic, Result, WombatError};
+pub use error::{Diagnostic, ErrorKind, Result, WombatError};
 pub use initialize::{InitOutcome, InitStatus, initialize};
 pub use inspection::{InspectSection, PlanInspectSection, compare, explain, inspect, inspect_plan};
 pub use manifest::Manifest;
@@ -51,7 +51,6 @@ pub use repository::{
     acquire_repository,
 };
 pub use requirements::{
-    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, authorize_target_plan, bootstrap,
-    bootstrap_exact, check, check_plan, check_target_plan, prepare_plan, prepare_target_plan,
-    prepare_target_plan_until, prepare_target_plan_until_authorized,
+    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, authorize_target_plan, check,
+    check_plan, check_target_plan, prepare_target_plan_until_authorized,
 };
