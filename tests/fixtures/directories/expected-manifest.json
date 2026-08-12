@@ -1,8 +1,6 @@
 {
   "format_version": 15,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:2bca023d93efb8dd44c11fda339c4fd765d3c591acf75b60417ca2cd6b87ce51",
-  "plan_id": "sha256:cd23b1157eddfc4592c641af4c5b24af7ad3e2fe1168b7d03ab0134bc7ce4649",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -84,7 +82,6 @@
       }
     }
   ],
-  "project_identity": "sha256:035fd6969dc848f91d2ae507d24232d0a465a6522b155b3a313be9d3d8df571b",
   "ladder": {
     "name": "default",
     "roots": [

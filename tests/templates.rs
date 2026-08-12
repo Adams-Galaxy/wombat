@@ -24,8 +24,33 @@ fn manifest_json(manifest: &wombat::Manifest) -> String {
     serde_json::to_string_pretty(manifest).unwrap()
 }
 
+/// Compare a manifest against a golden fixture without pinning the identities
+/// that depend on where the repository happens to sit.
+///
+/// `project_identity` digests the absolute repository root, and `plan_id` and
+/// `build_id` are derived from it, so all three differ per checkout location. A
+/// fixture that pinned them would only pass on the machine that generated it.
+/// Their shape is asserted here; their determinism is covered by the repeated
+/// build tests. Every other field is still compared exactly.
 fn exact_manifest_json(value: &str) -> serde_json::Value {
-    serde_json::from_str(value).unwrap()
+    let mut value: serde_json::Value = serde_json::from_str(value).unwrap();
+    let object = value.as_object_mut().unwrap();
+    for key in ["build_id", "plan_id", "project_identity"] {
+        let Some(identity) = object.remove(key) else {
+            continue;
+        };
+        let identity = identity.as_str().unwrap();
+        assert!(
+            identity.strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+            }),
+            "{key} must be a sha256 digest, got {identity}"
+        );
+    }
+    value
 }
 
 struct Repository {
