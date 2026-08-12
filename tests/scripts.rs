@@ -508,6 +508,59 @@ w.script('three.custom', {}, { interpreter={ command='/bin/sh' } })
     );
 }
 
+/// Script and task output is the primary evidence a user has that their own
+/// code ran, so the CLI must forward it live and attributed to its producer.
+/// Only the CLI installs the human event sink, so this exercises the binary.
+#[test]
+fn cli_forwards_script_output_attributed_to_its_producer() {
+    let lua = r#"
+local w=require('wombat')
+w.script('mark.sh', {}, { name='shell', schedule='always' })
+w.script('mark.lua', {}, { name='embedded', schedule='always' })
+"#;
+    let shell = "printf '%s\\n' 'subprocess script spoke'\n";
+    let (temporary, root) = repository(lua, shell);
+    fs::write(
+        root.join("scripts/mark.lua"),
+        "print('embedded script spoke')\n",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args(["--color", "never", "-S"])
+        .arg(&root)
+        .args(["build", "-B"])
+        .arg(temporary.path().join("build"))
+        .arg("--yes")
+        .env("HOME", temporary.path())
+        .env("XDG_STATE_HOME", temporary.path().join("state"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let attributed: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("script spoke"))
+        .collect();
+    assert_eq!(attributed.len(), 2, "{stderr}");
+    assert!(
+        attributed
+            .iter()
+            .all(|line| line.starts_with('[') && line.contains("] ")),
+        "output must carry its producer's identity: {attributed:?}"
+    );
+    assert!(
+        attributed.iter().any(|line| line.contains("mark.sh"))
+            && attributed.iter().any(|line| line.contains("mark.lua")),
+        "both runners must attribute output: {attributed:?}"
+    );
+}
+
 fn copy_product(source: &Path, destination: &Path) {
     fs::create_dir(destination).unwrap();
     for name in ["manifest.json", "tree", "providers", "scripts"] {

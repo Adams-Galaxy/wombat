@@ -363,7 +363,14 @@ fn run_task(
 }
 
 fn run_streaming(mut command: Command, identity: &str) -> Result<RunResult> {
-    let outcome = super::process::run(&mut command, identity, None, MAX_LOG_SIZE, None)?;
+    let outcome = super::process::run(
+        &mut command,
+        identity,
+        None,
+        MAX_LOG_SIZE,
+        None,
+        super::process::Forwarding::Attributed,
+    )?;
     Ok(RunResult {
         success: outcome.success,
         status: outcome.status.replace("exit status: ", "exit status "),

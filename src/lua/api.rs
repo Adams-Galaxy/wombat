@@ -410,6 +410,7 @@ pub(super) fn run_observed_process(
         options.timeout_ms.map(Duration::from_millis),
         output_limit,
         options.stdin.as_deref(),
+        crate::execution::process::Forwarding::Retained,
     )?;
     if outcome.timed_out {
         return Err(WombatError::process(format!(

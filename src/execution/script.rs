@@ -492,6 +492,17 @@ fn run_lua(
             Err(error) => RunResult::failure(error.to_string()),
         };
         execution.stdout = stdout;
+        // Embedded Lua output is buffered by the capture handle rather than a
+        // pipe, so it is attributed here instead of by the shared executor.
+        for line in execution.stdout.bytes.split(|byte| *byte == b'\n') {
+            if !line.is_empty() {
+                crate::presentation::emit(crate::presentation::Event::Progress(format!(
+                    "[{}] {}",
+                    script.identity,
+                    String::from_utf8_lossy(line).trim_end_matches('\r')
+                )));
+            }
+        }
         Ok(execution)
     })
 }
@@ -548,6 +559,7 @@ fn run_streaming(mut command: Command, identity: &str, timeout: Option<u64>) -> 
         timeout.map(Duration::from_secs),
         MAX_LOG_SIZE,
         None,
+        super::process::Forwarding::Attributed,
     )?;
     Ok(RunResult {
         success: outcome.success,

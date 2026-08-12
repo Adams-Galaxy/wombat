@@ -15,6 +15,19 @@ pub(crate) struct Captured {
     pub(crate) truncated: bool,
 }
 
+/// Whether subprocess output is only retained as evidence, or also forwarded
+/// line by line to the human event sink while the child is still running.
+///
+/// Tasks and scripts are user-authored and may run for a long time, so their
+/// output is attributed and shown live. Observations and provider queries are
+/// interrogations whose result is reported by their caller, so they stay
+/// retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Forwarding {
+    Retained,
+    Attributed,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProcessOutcome {
     pub(crate) success: bool,
@@ -32,6 +45,7 @@ pub(crate) fn run(
     timeout: Option<Duration>,
     output_limit: usize,
     stdin: Option<&[u8]>,
+    forwarding: Forwarding,
 ) -> Result<ProcessOutcome> {
     command
         .stdin(if stdin.is_some() {
@@ -57,8 +71,16 @@ pub(crate) fn run(
     let stderr = child.stderr.take().ok_or_else(|| {
         WombatError::invariant(format!("{label} process stderr was not captured"))
     })?;
-    let stdout_thread = thread::spawn(move || read_bounded(stdout, output_limit));
-    let stderr_thread = thread::spawn(move || read_bounded(stderr, output_limit));
+    let attribution = match forwarding {
+        Forwarding::Retained => None,
+        Forwarding::Attributed => Some(label.to_string()),
+    };
+    let stdout_attribution = attribution.clone();
+    let stderr_attribution = attribution;
+    let stdout_thread =
+        thread::spawn(move || read_bounded(stdout, output_limit, stdout_attribution));
+    let stderr_thread =
+        thread::spawn(move || read_bounded(stderr, output_limit, stderr_attribution));
     if let Some(input) = stdin {
         let mut child_stdin = child.stdin.take().ok_or_else(|| {
             WombatError::invariant(format!("{label} process stdin was not piped"))
@@ -150,10 +172,17 @@ pub(crate) fn run_inherited(command: &mut Command, label: &str) -> Result<Proces
     })
 }
 
-fn read_bounded(mut stream: impl Read, limit: usize) -> std::io::Result<Captured> {
+fn read_bounded(
+    mut stream: impl Read,
+    limit: usize,
+    attribution: Option<String>,
+) -> std::io::Result<Captured> {
     let mut bytes = Vec::new();
     let mut truncated = false;
     let mut buffer = [0_u8; 8 * 1024];
+    // Forwarding is line-oriented, so a chunk that splits a line is held here
+    // until its newline arrives rather than being attributed twice.
+    let mut pending = Vec::new();
     loop {
         let count = stream.read(&mut buffer)?;
         if count == 0 {
@@ -162,8 +191,32 @@ fn read_bounded(mut stream: impl Read, limit: usize) -> std::io::Result<Captured
         let available = limit.saturating_sub(bytes.len());
         bytes.extend_from_slice(&buffer[..count.min(available)]);
         truncated |= count > available;
+        if let Some(identity) = attribution.as_deref() {
+            pending.extend_from_slice(&buffer[..count]);
+            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                emit_attributed(identity, &line[..end]);
+            }
+        }
+    }
+    if let Some(identity) = attribution.as_deref()
+        && !pending.is_empty()
+    {
+        emit_attributed(identity, &pending);
     }
     Ok(Captured { bytes, truncated })
+}
+
+/// Forward one output line as a progress event attributed to its producer.
+///
+/// Output is user-authored and may not be valid UTF-8, so it is rendered
+/// lossily rather than failing an otherwise successful execution.
+fn emit_attributed(identity: &str, line: &[u8]) {
+    let text = String::from_utf8_lossy(line);
+    crate::presentation::emit(crate::presentation::Event::Progress(format!(
+        "[{identity}] {}",
+        text.trim_end_matches('\r')
+    )));
 }
 
 fn join_reader(

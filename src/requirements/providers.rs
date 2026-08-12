@@ -856,6 +856,7 @@ pub(super) fn run_bounded(
         None,
         OUTPUT_LIMIT,
         None,
+        crate::execution::process::Forwarding::Retained,
     )?;
     if output.stdout.truncated || output.stderr.truncated {
         return Err(WombatError::configuration(format!(
