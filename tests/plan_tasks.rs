@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
 use wombat::manifest::Production;
-use wombat::{BuildOptions, PlanInspectSection, build, inspect_plan, plan};
+use wombat::{BuildOptions, PlanInspectSection, build, inspect_plan, materialise, plan};
 
 fn repository() -> (tempfile::TempDir, std::path::PathBuf) {
     let temporary = tempdir().unwrap();
@@ -52,7 +52,7 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     let (_temporary, source) = repository();
     let options = BuildOptions::new(&source, "build");
     let planned = plan(options.clone()).unwrap();
-    assert_eq!(planned.plan.format_version, 2);
+    assert_eq!(planned.plan.format_version, 3);
     assert_eq!(planned.plan.tasks.len(), 1);
     assert_eq!(planned.plan.build_requirements.len(), 1);
     assert!(!planned.build_dir.join(".wombat/tasks").exists());
@@ -61,7 +61,7 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     assert!(inspected.contains("cache: true"));
 
     let built = build(options.clone()).unwrap();
-    assert_eq!(built.manifest.format_version, 11);
+    assert_eq!(built.manifest.format_version, 12);
     assert_eq!(built.manifest.plan_id, planned.plan.plan_id);
     assert_eq!(built.manifest.tasks[0].outputs.len(), 1);
     assert_eq!(
@@ -93,6 +93,26 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
 }
 
 #[test]
+fn stored_plan_materialises_without_reevaluating_lua() {
+    let (temporary, source) = repository();
+    let marker = temporary.path().join("constructed-once");
+    fs::write(
+        source.join("wombat.lua"),
+        format!(
+            "local f = assert(io.open({:?}, 'a'))\nf:write('x')\nf:close()\nlocal w = require('wombat')\nw.use('generated')\n",
+            marker
+        ),
+    )
+    .unwrap();
+    let options = BuildOptions::new(&source, "stored-build");
+    let constructed = plan(options.clone()).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "x");
+    let materialised = materialise(options).unwrap();
+    assert_eq!(constructed.plan.plan_id, materialised.manifest.plan_id);
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "x");
+}
+
+#[test]
 fn missing_task_interpreter_stops_before_execution() {
     let (_temporary, source) = repository();
     fs::write(
@@ -105,8 +125,8 @@ w.build.task("generate.py", {}, { interpreter = "wombat-plan-0010-missing" })
     .unwrap();
     let error = build(BuildOptions::new(&source, "build")).unwrap_err();
     let rendered = error.to_string();
-    assert!(rendered.contains("build requirements are not satisfied"));
-    assert!(rendered.contains("wombat prepare"));
+    assert!(rendered.contains("materialisation requirements are not satisfied"));
+    assert!(rendered.contains("install the required tools manually"));
     assert!(!source.join("build/.wombat/tasks").exists());
 }
 
@@ -393,7 +413,7 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("unsupported build plan format version 1") && error.contains("expected 2"),
+        error.contains("unsupported build plan format version 1") && error.contains("expected 3"),
         "{error}"
     );
 }

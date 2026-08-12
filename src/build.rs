@@ -34,6 +34,8 @@ pub struct BuildOptions {
     pub build_dir: PathBuf,
     pub project_arguments: Vec<OsString>,
     pub host: Option<HostContext>,
+    pub log_level: Option<crate::presentation::LogLevel>,
+    pub log_adjustment: i8,
     #[doc(hidden)]
     pub task_interpreters: BTreeMap<String, crate::manifest::TaskRunner>,
 }
@@ -45,6 +47,8 @@ impl BuildOptions {
             build_dir: build_dir.into(),
             project_arguments: Vec::new(),
             host: None,
+            log_level: None,
+            log_adjustment: 0,
             task_interpreters: BTreeMap::new(),
         }
     }
@@ -59,6 +63,16 @@ impl BuildOptions {
 
     pub fn with_host(mut self, host: HostContext) -> Self {
         self.host = Some(host);
+        self
+    }
+
+    pub fn with_log_level(mut self, log_level: crate::presentation::LogLevel) -> Self {
+        self.log_level = Some(log_level);
+        self
+    }
+
+    pub fn with_log_adjustment(mut self, adjustment: i8) -> Self {
+        self.log_adjustment = adjustment;
         self
     }
 
@@ -105,6 +119,10 @@ pub struct PlanOutcome {
     pub build_dir: PathBuf,
     pub plan: crate::manifest::BuildPlan,
 }
+
+/// Result of executing an already-constructed plan.  This deliberately carries
+/// no evaluated Lua state: callers can only materialise the private plan bundle.
+pub type MaterialiseOutcome = BuildOutcome;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepareOutcome {
@@ -164,6 +182,7 @@ struct IdentityPayload<'a> {
     inputs: &'a [crate::manifest::BuildInput],
     target: &'a crate::context::ResolvedTarget,
     observations: &'a [crate::manifest::Observation],
+    process_observations: &'a [crate::manifest::ProcessObservation],
     modules: &'a [crate::manifest::ManifestModule],
     dependencies: &'a [crate::manifest::Dependency],
     build_providers: &'a [crate::manifest::Provider],
@@ -186,12 +205,23 @@ enum CurrentProduct {
 }
 
 pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
+    let planned = plan(options.clone())?;
+    materialise_at(options, planned.build_dir)
+}
+
+/// Materialise the exact plan previously written beneath `build_dir`.
+/// Configuration Lua is never evaluated by this operation.
+pub fn materialise(options: BuildOptions) -> Result<MaterialiseOutcome> {
+    materialise_at(options.clone(), options.build_dir.clone())
+}
+
+fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result<BuildOutcome> {
     let source_root = fs::canonicalize(&options.source_root)
         .map_err(|error| WombatError::io(&options.source_root, error))?;
-    let requested_build = if options.build_dir.is_absolute() {
-        options.build_dir
+    let requested_build = if requested_build_dir.is_absolute() {
+        requested_build_dir
     } else {
-        source_root.join(options.build_dir)
+        source_root.join(requested_build_dir)
     };
     let build_dir = resolve_maybe_missing(&requested_build)?;
     validate_build_location(&source_root, &build_dir)?;
@@ -213,31 +243,14 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
         ensure_workspace_marker(&build_dir, &source_root)?;
         recover_publication(&build_dir)?;
 
-        let host = options.host.map_or_else(HostContext::observe, Ok)?;
-        let mut desired = match evaluate_with(
-            &source_root,
-            EvaluationOptions {
-                project_arguments: options.project_arguments,
-                host,
-                task_interpreters: options.task_interpreters,
-            },
-        )? {
-            EvaluationOutcome::Manifest(manifest) => *manifest,
-            EvaluationOutcome::ProjectHelp(_) => {
-                return Err(WombatError::configuration(
-                    "project help was requested where a build was expected",
-                ));
-            }
-        };
-        let plan = crate::plan::freeze(&source_root, &desired)?;
-        crate::plan::publish(&build_dir, &source_root, &plan)?;
-        desired.plan_id = plan.plan_id.clone();
+        let plan = crate::plan::read(&build_dir)?;
+        let mut desired = crate::plan::read_execution(&build_dir, &plan)?;
+        validate_stored_plan_closure(&source_root, &plan, &desired)?;
         let construction = crate::requirements::check_plan(&build_dir, &plan)?;
         if !construction.satisfied() {
             return Err(WombatError::configuration(format!(
-                "build requirements are not satisfied:\n{}run `wombat prepare -B {}` before building",
+                "materialisation requirements are not satisfied:\n{}install the required tools manually before materialising",
                 construction.display(),
-                build_dir.display()
             )));
         }
         crate::tasks::check_runners(&plan.tasks)?;
@@ -250,7 +263,7 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
             .tempdir_in(&staging_root)
             .map_err(|error| WombatError::io(&staging_root, error))?;
         let cache = crate::cache::BuildCache::open(&build_dir)?;
-        let manifest = materialise(&source_root, staging.path(), desired, &cache)?;
+        let manifest = materialise_product(&source_root, staging.path(), desired, &cache)?;
         let staged = verify_product(staging.path())?;
         debug_assert_eq!(staged, manifest);
 
@@ -288,6 +301,79 @@ pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
     }
 }
 
+fn validate_stored_plan_closure(
+    source_root: &Path,
+    plan: &crate::manifest::BuildPlan,
+    desired: &crate::manifest::EvaluatedManifest,
+) -> Result<()> {
+    if plan.plan_id != desired.plan_id {
+        return Err(WombatError::configuration(
+            "stored plan execution payload does not match plan identity",
+        ));
+    }
+    for source in &plan.sources {
+        let path = source_root.join(&source.path);
+        let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+        if digest_string(Sha256::digest(&bytes)) != source.digest {
+            return Err(WombatError::configuration(format!(
+                "stored plan is stale because source `{}` changed; run `wombat plan construct`",
+                source.path
+            )));
+        }
+    }
+    for artifact in &plan.artifacts {
+        use crate::manifest::PlannedProduction;
+        match &artifact.production {
+            PlannedProduction::Static {
+                source_digest,
+                executable,
+            }
+            | PlannedProduction::Template {
+                source_digest,
+                executable,
+                ..
+            } => {
+                let path = source_root.join(&artifact.source);
+                let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+                if digest_string(Sha256::digest(&bytes)) != *source_digest
+                    || executable_intent(
+                        &fs::metadata(&path).map_err(|error| WombatError::io(&path, error))?,
+                    ) != *executable
+                {
+                    return Err(WombatError::configuration(format!(
+                        "stored plan is stale because artifact source `{}` changed; run `wombat plan construct`",
+                        artifact.source
+                    )));
+                }
+            }
+            PlannedProduction::GeneratedLua { content_digest, .. } => {
+                let Some(evaluated) = desired
+                    .artifacts
+                    .iter()
+                    .find(|candidate| candidate.target == artifact.target)
+                else {
+                    return Err(WombatError::configuration(
+                        "stored plan execution payload omitted a generated artifact",
+                    ));
+                };
+                let crate::manifest::EvaluatedProduction::GeneratedLua { content, .. } =
+                    &evaluated.production
+                else {
+                    return Err(WombatError::configuration(
+                        "stored plan generated payload changed kind",
+                    ));
+                };
+                if digest_string(Sha256::digest(content)) != *content_digest {
+                    return Err(WombatError::configuration(
+                        "stored generated payload integrity mismatch",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
     let source_root = fs::canonicalize(&options.source_root)
         .map_err(|error| WombatError::io(&options.source_root, error))?;
@@ -321,6 +407,8 @@ pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
                 project_arguments: options.project_arguments,
                 host,
                 task_interpreters: options.task_interpreters,
+                log_level: options.log_level,
+                log_adjustment: options.log_adjustment,
             },
         )? {
             EvaluationOutcome::Manifest(manifest) => *manifest,
@@ -331,7 +419,9 @@ pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
             }
         };
         let plan = crate::plan::freeze(&source_root, &desired)?;
-        crate::plan::publish(&build_dir, &source_root, &plan)?;
+        let mut desired = desired;
+        desired.plan_id = plan.plan_id.clone();
+        crate::plan::publish(&build_dir, &source_root, &plan, &desired)?;
         Ok(PlanOutcome {
             build_dir: build_dir.clone(),
             plan,
@@ -392,6 +482,8 @@ pub fn project_help_with_options(options: BuildOptions) -> Result<String> {
             project_arguments: vec![OsString::from("--help")],
             host,
             task_interpreters: options.task_interpreters,
+            log_level: options.log_level,
+            log_adjustment: options.log_adjustment,
         },
     )? {
         EvaluationOutcome::ProjectHelp(help) => Ok(help),
@@ -756,7 +848,7 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn materialise(
+fn materialise_product(
     source_root: &Path,
     product_root: &Path,
     desired: crate::manifest::EvaluatedManifest,
@@ -809,6 +901,7 @@ fn materialise_inner(
         inputs: desired.inputs,
         target: desired.target,
         observations: desired.observations,
+        process_observations: desired.process_observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
         build_providers: desired.build_providers,
@@ -1509,6 +1602,7 @@ fn compute_build_id(manifest: &Manifest) -> Result<String> {
         inputs: &manifest.inputs,
         target: &manifest.target,
         observations: &manifest.observations,
+        process_observations: &manifest.process_observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
         build_providers: &manifest.build_providers,

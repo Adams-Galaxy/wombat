@@ -360,6 +360,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
             declared_at: None,
         },
         observations: Vec::new(),
+        process_observations: Vec::new(),
         modules: Vec::new(),
         dependencies: Vec::new(),
         build_providers: Vec::new(),

@@ -5,9 +5,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::manifest::{ArtifactPolicy, SourceFile, UnallocatedPolicy};
+use crate::presentation::LogLevel;
 use crate::{Result, WombatError};
 
-const PROJECT_FORMAT_VERSION: u32 = 1;
+const PROJECT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +16,25 @@ struct ProjectConfig {
     format_version: u32,
     #[serde(default)]
     artifacts: ArtifactConfig,
+    #[serde(default)]
+    log: LogConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogConfig {
+    #[serde(default = "default_log_level")]
+    level: String,
+}
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
+}
+fn default_log_level() -> String {
+    "warn".to_string()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -33,12 +53,12 @@ enum ConfiguredUnallocated {
     Error,
 }
 
-pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, Option<SourceFile>)> {
+pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, LogLevel, Option<SourceFile>)> {
     let path = root.join("wombat.toml");
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((ArtifactPolicy::default(), None));
+            return Ok((ArtifactPolicy::default(), LogLevel::Warn, None));
         }
         Err(error) => return Err(WombatError::io(&path, error)),
     };
@@ -59,8 +79,10 @@ pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, Option<SourceFile>)> 
         ConfiguredUnallocated::Warn => UnallocatedPolicy::Warn,
         ConfiguredUnallocated::Error => UnallocatedPolicy::Error,
     };
+    let log = LogLevel::parse(&config.log.level).ok_or_else(|| WombatError::configuration(format!("repository `wombat.toml` log.level must be debug, info, notice, warn, or error; got `{}`", config.log.level)))?;
     Ok((
         ArtifactPolicy { unallocated },
+        log,
         Some(SourceFile {
             path: "wombat.toml".to_string(),
             digest: format!(

@@ -15,9 +15,10 @@ arbitrary leading-dot targets use the same generic convention as every other
 path.
 
 ```sh
-wombat -S examples/dotfiles deploy --target-root /tmp/wombat-root -- \
+wombat -S examples/dotfiles build -- \
   --name "Example User" --email example@example.invalid
 ```
 
-Use `wombat inspect`, `wombat check`, and `wombat bootstrap` against the
-resulting build to explore the exact product.
+Use `wombat plan inspect`, `wombat inspect`, and `wombat check` against the
+resulting build to explore the stored plan and exact product. Deployment returns
+with Plan 0013.

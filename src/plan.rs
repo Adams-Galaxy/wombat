@@ -81,6 +81,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         inputs: desired.inputs.clone(),
         target: desired.target.clone(),
         observations: desired.observations.clone(),
+        process_observations: desired.process_observations.clone(),
         modules: desired.modules.clone(),
         dependencies: desired.dependencies.clone(),
         build_providers: desired.build_providers.clone(),
@@ -99,7 +100,12 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
     Ok(plan)
 }
 
-pub(crate) fn publish(build_dir: &Path, source_root: &Path, plan: &BuildPlan) -> Result<()> {
+pub(crate) fn publish(
+    build_dir: &Path,
+    source_root: &Path,
+    plan: &BuildPlan,
+    execution: &EvaluatedManifest,
+) -> Result<()> {
     let internal = build_dir.join(".wombat");
     let staging = Builder::new()
         .prefix("plan-")
@@ -107,6 +113,7 @@ pub(crate) fn publish(build_dir: &Path, source_root: &Path, plan: &BuildPlan) ->
         .map_err(|error| WombatError::io(&internal, error))?;
     let plan_path = staging.path().join("plan.json");
     write_json(&plan_path, plan)?;
+    write_json(&staging.path().join("execution.json"), execution)?;
     materialise_provider_payloads(source_root, staging.path(), "build", &plan.build_providers)?;
     materialise_provider_payloads(source_root, staging.path(), "target", &plan.providers)?;
     sync_directory(staging.path())?;
@@ -153,6 +160,19 @@ pub fn read(build_dir: &Path) -> Result<BuildPlan> {
     let plan: BuildPlan = serde_json::from_slice(&bytes)?;
     validate(&plan)?;
     Ok(plan)
+}
+
+pub(crate) fn read_execution(build_dir: &Path, plan: &BuildPlan) -> Result<EvaluatedManifest> {
+    let path = build_dir.join(".wombat/plan/execution.json");
+    let bytes = fs::read(&path).map_err(|error| WombatError::io(&path, error))?;
+    let execution: EvaluatedManifest = serde_json::from_slice(&bytes)?;
+    if execution.plan_id != plan.plan_id {
+        return Err(WombatError::configuration(format!(
+            "stored plan execution payload belongs to `{}`, not `{}`",
+            execution.plan_id, plan.plan_id
+        )));
+    }
+    Ok(execution)
 }
 
 pub fn validate(plan: &BuildPlan) -> Result<()> {
@@ -203,6 +223,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         inputs: &'a [crate::manifest::BuildInput],
         target: &'a crate::context::ResolvedTarget,
         observations: &'a [crate::manifest::Observation],
+        process_observations: &'a [crate::manifest::ProcessObservation],
         modules: &'a [crate::manifest::ManifestModule],
         dependencies: &'a [crate::manifest::Dependency],
         build_providers: &'a [Provider],
@@ -224,6 +245,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         inputs: &plan.inputs,
         target: &plan.target,
         observations: &plan.observations,
+        process_observations: &plan.process_observations,
         modules: &plan.modules,
         dependencies: &plan.dependencies,
         build_providers: &plan.build_providers,

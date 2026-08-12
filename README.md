@@ -4,16 +4,13 @@ Wombat is an experimental Lua-powered dotfiles compiler. It evaluates Lua
 configuration into an explicit, inspectable manifest before any target mutation
 takes place.
 
-The project is in early vertical-slice development. `init` creates the smallest
-conventional source repository, and `build` evaluates configuration into an
-inspectable construction plan and materialises a deterministic, self-contained build product
-without changing a target. `setup` acquires a repository and carries one exact
-product through requirement bootstrap and guarded deployment. `diff`, `apply`,
-and `deploy` then inspect or
-guardedly reconcile that exact product with a deployment root. `inspect`, `explain`,
-and `compare` make exact completed products understandable without evaluating
-Lua. `add` is an explicit authoring command that copies one existing target file
-or regular-file directory tree into Wombat source state.
+The project is in early vertical-slice development. `plan construct` evaluates
+configuration and persists one executable plan; `plan materialise` consumes that
+exact plan without running Lua again. `build` composes those stages. `inspect`,
+`explain`, `compare`, `diff`, and `check` make exact completed products
+understandable without evaluating Lua. `add` is an explicit authoring command
+that copies one existing target file or regular-file directory tree into Wombat
+source state. Deployment and fresh-machine workflows return in Plan 0013.
 
 ## Repository shape
 

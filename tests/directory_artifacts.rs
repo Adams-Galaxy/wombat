@@ -156,7 +156,7 @@ fn unallocated_policy_ignore_warn_and_error_are_distinct_after_exclusions() {
         write(
             temp.path(),
             "wombat.toml",
-            &format!("format_version = 1\n[artifacts]\nunallocated = \"{policy}\"\n"),
+            &format!("format_version = 2\n[artifacts]\nunallocated = \"{policy}\"\n"),
         );
         write(
             temp.path(),
@@ -184,7 +184,7 @@ fn unallocated_policy_ignore_warn_and_error_are_distinct_after_exclusions() {
     write(
         excluded.path(),
         "wombat.toml",
-        "format_version = 1\n[artifacts]\nunallocated = \"error\"\n",
+        "format_version = 2\n[artifacts]\nunallocated = \"error\"\n",
     );
     write(
         excluded.path(),

@@ -5,8 +5,8 @@ use crate::frozen::FrozenValue;
 
 use crate::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 11;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 2;
+pub const MANIFEST_FORMAT_VERSION: u32 = 12;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 3;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -64,6 +64,7 @@ pub struct Manifest {
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
+    pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
     pub build_providers: Vec<Provider>,
@@ -89,6 +90,7 @@ pub struct BuildPlan {
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
+    pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
     pub build_providers: Vec<Provider>,
@@ -357,6 +359,43 @@ pub struct Observation {
     pub value: FrozenValue,
 }
 
+/// A construction-time process result. Raw streams are intentionally never
+/// persisted: Lua has already consumed them during construction, while the
+/// executable plan only needs an identity commitment and safe inspection data.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessObservation {
+    pub invocation: ProcessInvocation,
+    pub cwd: String,
+    pub environment: Vec<ProcessEnvironmentChange>,
+    pub stdin_digest: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub max_output: u64,
+    pub sensitive: bool,
+    pub ok: bool,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub stdout_size: u64,
+    pub stdout_digest: String,
+    pub stderr_size: u64,
+    pub stderr_digest: String,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProcessInvocation {
+    Exec { argv: Vec<String> },
+    Shell { command: String, shell: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessEnvironmentChange {
+    pub name: String,
+    pub value: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestModule {
@@ -547,13 +586,15 @@ pub struct FileContent {
     pub executable: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedManifest {
     pub plan_id: String,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,
     pub target: ResolvedTarget,
     pub observations: Vec<Observation>,
+    pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
     pub build_providers: Vec<Provider>,
@@ -570,7 +611,8 @@ pub(crate) struct EvaluatedManifest {
     pub directories: Vec<EvaluatedDirectory>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedArtifact {
     pub kind: ArtifactKind,
     pub source: String,
@@ -583,7 +625,8 @@ pub(crate) struct EvaluatedArtifact {
     pub declared_at: SourceTrace,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum EvaluatedProduction {
     Static,
     Template {
@@ -601,13 +644,15 @@ pub(crate) enum EvaluatedProduction {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedTask {
     pub task: Task,
     pub fingerprint: SourceFingerprint,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedDirectory {
     pub declared_source: String,
     pub root: String,
@@ -622,7 +667,8 @@ pub(crate) struct EvaluatedDirectory {
     pub snapshot: Vec<DirectoryLeaf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedTargetRoot {
     pub path: String,
     pub origin: EvaluatedTargetOrigin,

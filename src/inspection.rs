@@ -21,6 +21,7 @@ pub enum InspectSection {
     Tasks,
     Artifacts,
     Sources,
+    Observations,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +32,7 @@ pub enum PlanInspectSection {
     Tasks,
     Artifacts,
     Sources,
+    Observations,
 }
 
 pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
@@ -135,7 +137,34 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
                 .iter()
                 .map(|source| format!("{}\n  digest: {}", source.path, source.digest)),
         ),
+        PlanInspectSection::Observations => render_observations(&plan.observations, &plan.process_observations),
     }
+}
+
+fn render_observations(
+    context: &[crate::manifest::Observation],
+    processes: &[crate::manifest::ProcessObservation],
+) -> String {
+    let mut output = render_list(
+        "Context observations",
+        context.iter().map(|observation| {
+            format!(
+                "{:?}:{}\n  value: {}",
+                observation.subject,
+                observation.path,
+                json(&observation.value)
+            )
+        }),
+    );
+    output.push_str(&render_list("Process observations", processes.iter().map(|observation| {
+        let invocation = if observation.sensitive { "<redacted>".to_string() } else { json(&observation.invocation) };
+        format!("{}\n  cwd: {}\n  status: {}{}{}\n  stdout: {} {}\n  stderr: {} {}\n  declared at: {}",
+            invocation, observation.cwd, if observation.ok { "success" } else { "failure" },
+            observation.code.map(|code| format!(" code={code}")).unwrap_or_default(),
+            observation.signal.map(|signal| format!(" signal={signal}")).unwrap_or_default(),
+            observation.stdout_size, observation.stdout_digest, observation.stderr_size, observation.stderr_digest, observation.declared_at)
+    })));
+    output
 }
 
 fn render_provider(provider: &crate::manifest::Provider) -> String {
@@ -501,6 +530,9 @@ fn render_section(manifest: &Manifest, section: InspectSection) -> String {
                 .iter()
                 .map(|source| format!("{}\n  digest: {}", source.path, source.digest)),
         ),
+        InspectSection::Observations => {
+            render_observations(&manifest.observations, &manifest.process_observations)
+        }
     }
 }
 

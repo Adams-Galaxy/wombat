@@ -42,6 +42,34 @@ end
 
 wombat.host = native.host_context()
 wombat.target = native.target_context()
+wombat.paths = { repository = native.repository_path }
+wombat.data = {}
+
+function wombat.data.toml(path)
+    if type(path) ~= "string" then error("w.data.toml() requires a string path", 2) end
+    return native.toml_data(path)
+end
+
+function wombat.exec(argv, options)
+    if type(argv) ~= "table" then error("w.exec() requires an argv array", 2) end
+    if options ~= nil and type(options) ~= "table" then error("w.exec() options must be a table", 2) end
+    return native.exec(argv, options)
+end
+
+function wombat.shell(command, options)
+    if type(command) ~= "string" then error("w.shell() requires a command string", 2) end
+    if options ~= nil and type(options) ~= "table" then error("w.shell() options must be a table", 2) end
+    return native.shell(command, options)
+end
+
+wombat.log = {}
+for _, level in ipairs({ "debug", "info", "notice", "warn", "error" }) do
+    wombat.log[level] = function(message, fields)
+        if type(message) ~= "string" then error("w.log." .. level .. "() requires a string message", 2) end
+        if fields ~= nil and type(fields) ~= "table" then error("w.log." .. level .. "() fields must be a table", 2) end
+        return native.log(level, message, fields)
+    end
+end
 
 function wombat.use(name, config)
     return native.use_module(name, config)

@@ -2,15 +2,17 @@ use std::fs;
 use std::path::{Component, Path};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{Result, WombatError};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DirectoryLeaf {
     pub relative: String,
     pub fingerprint: SourceFingerprint,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SourceFingerprint {
     len: u64,
     modified: Option<SystemTime>,

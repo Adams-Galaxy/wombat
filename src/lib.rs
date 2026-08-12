@@ -26,9 +26,9 @@ mod tasks;
 
 pub use add::{AddMethod, AddOutcome, AddStatus, add};
 pub use build::{
-    BuildOptions, BuildOutcome, BuildStatus, OpenedBuild, PlanOutcome, PrepareOutcome,
-    VerifiedBuild, build, open_build, plan, prepare, project_help, project_help_with_options,
-    verify_build,
+    BuildOptions, BuildOutcome, BuildStatus, MaterialiseOutcome, OpenedBuild, PlanOutcome,
+    PrepareOutcome, VerifiedBuild, build, materialise, open_build, plan, prepare, project_help,
+    project_help_with_options, verify_build,
 };
 pub use context::{
     Architecture, Distribution, HostContext, Kernel, LooseVersion, OperatingSystem,
@@ -42,7 +42,7 @@ pub use error::{Diagnostic, Result, WombatError};
 pub use initialize::{InitOutcome, InitStatus, initialize};
 pub use inspection::{InspectSection, PlanInspectSection, compare, explain, inspect, inspect_plan};
 pub use manifest::Manifest;
-pub use presentation::{ColorPolicy, Presenter, Role};
+pub use presentation::{ColorPolicy, LogLevel, Presenter, Role};
 pub use reconcile::{ReconciliationAction, ReconciliationItem, ReconciliationPlan};
 pub use repository::{
     AcquisitionOutcome, AcquisitionStatus, RepositoryIdentity, RepositoryLocator,

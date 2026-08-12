@@ -7,6 +7,28 @@ pub enum ColorPolicy {
     Never,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Notice,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "debug" => Some(Self::Debug),
+            "info" => Some(Self::Info),
+            "notice" => Some(Self::Notice),
+            "warn" => Some(Self::Warn),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
     Success,
