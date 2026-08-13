@@ -9,8 +9,8 @@ telling you to rebuild. There are no migrations — see
 
 | Format | Version | Location |
 | --- | --- | --- |
-| Manifest | 17 | `<build>/manifest.json` |
-| Build plan | 8 | `<build>/.wombat/plan/plan.json` |
+| Manifest | 18 | `<build>/manifest.json` |
+| Build plan | 9 | `<build>/.wombat/plan/plan.json` |
 | Execution journal | 3 | `<build>/.wombat/execution-journal.json`, and per target |
 | Target state | 3 | `$XDG_STATE_HOME/wombat/targets/<target>/state.json` |
 | Script state | 1 | `$XDG_STATE_HOME/wombat/scripts/materialise/<project>/…/state.json` |

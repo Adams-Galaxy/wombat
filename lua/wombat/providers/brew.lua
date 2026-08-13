@@ -18,8 +18,8 @@ return provider.define({
             commands = { candidate.name }
             local aliases = config.aliases or {}
             package = aliases[candidate.name] or default_aliases[candidate.name] or candidate.name
-        else
-            if candidate.provider ~= "brew" then
+        elseif candidate.kind == "package" then
+            if candidate.provider ~= nil and candidate.provider ~= "brew" then
                 return provider.unsupported("package explicitly requests another provider")
             end
             local options = candidate.with or {}
@@ -31,6 +31,8 @@ return provider.define({
                     error("Homebrew package does not support `with." .. key .. "`")
                 end
             end
+        else
+            error("Homebrew provider received unknown candidate kind `" .. tostring(candidate.kind) .. "`")
         end
         if package_kind ~= "formula" and package_kind ~= "cask" then
             error("Homebrew package `with.kind` must be `formula` or `cask`")

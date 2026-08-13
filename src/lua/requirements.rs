@@ -80,7 +80,7 @@ pub(super) fn configure_providers(
                 "provider `{name}` is configured more than once"
             )));
         }
-        let origin = if matches!(name.as_str(), "brew" | "apt") {
+        let origin = if matches!(name.as_str(), "brew" | "apt" | "git") {
             let conflicting = root.join("providers").join(format!("{name}.lua"));
             if conflicting.exists() {
                 return Err(WombatError::configuration(format!(
@@ -272,7 +272,8 @@ pub(super) fn declare_requirement(
     let mut selected = None;
     for (candidate_index, candidate) in candidates.iter().enumerate() {
         if let RequirementCandidate::Package {
-            provider: required, ..
+            provider: Some(required),
+            ..
         } = candidate
             && !providers.iter().any(|provider| provider.name == *required)
         {
@@ -284,8 +285,10 @@ pub(super) fn declare_requirement(
         let candidates_providers = providers.iter().filter(|provider| match candidate {
             RequirementCandidate::Command { .. } => true,
             RequirementCandidate::Package {
-                provider: required, ..
+                provider: Some(required),
+                ..
             } => provider.name == *required,
+            RequirementCandidate::Package { provider: None, .. } => true,
         });
         for provider in candidates_providers {
             let outcome = resolve_provider_requirement(state, provider, candidate, &target)?;
@@ -377,11 +380,13 @@ pub(super) fn parse_requirement_candidate(
             })
         }
         RequirementKind::Package => {
-            let provider = take_string(options, "provider", "package requirement")?;
-            validate_provider_name(&provider)?;
+            let provider = take_optional_string(options, "provider", "package requirement")?;
+            if let Some(provider) = &provider {
+                validate_provider_name(provider)?;
+            }
             let publications = options
                 .remove("publishes")
-                .map(parse_publications)
+                .map(|value| parse_publications("publishes", value))
                 .transpose()?
                 .unwrap_or(Publications {
                     commands: Vec::new(),
@@ -408,11 +413,11 @@ pub(super) fn parse_requirement_candidate(
     }
 }
 
-pub(super) fn parse_publications(value: FrozenValue) -> Result<Publications> {
+pub(super) fn parse_publications(field: &str, value: FrozenValue) -> Result<Publications> {
     let FrozenValue::Map(mut values) = value else {
-        return Err(WombatError::configuration(
-            "package `publishes` must be a table",
-        ));
+        return Err(WombatError::configuration(format!(
+            "package `{field}` must be a table"
+        )));
     };
     let commands = match values.remove("commands") {
         None => Vec::new(),
@@ -428,10 +433,14 @@ pub(super) fn parse_publications(value: FrozenValue) -> Result<Publications> {
                 )),
             })
             .collect::<Result<Vec<_>>>()?,
+        // An empty Lua table `{}` cannot signal "array" on its own, so
+        // `FrozenValue::from_lua` always freezes it as an empty map; accept
+        // that as an empty command list rather than rejecting it.
+        Some(FrozenValue::Map(values)) if values.is_empty() => Vec::new(),
         Some(_) => {
-            return Err(WombatError::configuration(
-                "package `publishes.commands` must be an array",
-            ));
+            return Err(WombatError::configuration(format!(
+                "package `{field}.commands` must be an array"
+            )));
         }
     };
     reject_unknown_options(&values, "package publications")?;
@@ -505,11 +514,13 @@ pub(super) fn resolve_provider_requirement(
 
 const BREW_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/brew.lua");
 const APT_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/apt.lua");
+const GIT_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/git.lua");
 
 pub(super) fn builtin_provider_source(name: &str) -> Result<&'static str> {
     match name {
         "brew" => Ok(BREW_PROVIDER_LUA),
         "apt" => Ok(APT_PROVIDER_LUA),
+        "git" => Ok(GIT_PROVIDER_LUA),
         _ => Err(WombatError::configuration(format!(
             "unknown built-in provider `{name}`"
         ))),
@@ -873,7 +884,7 @@ pub(super) fn parse_provider_resolution(
     let package = take_optional_string(&mut values, "package", "provider binding")?;
     let publications = values
         .remove("publications")
-        .map(parse_publications)
+        .map(|value| parse_publications("publications", value))
         .transpose()?
         .unwrap_or(Publications {
             commands: Vec::new(),

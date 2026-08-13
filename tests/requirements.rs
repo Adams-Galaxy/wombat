@@ -63,7 +63,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 17);
+    assert_eq!(outcome.manifest.format_version, 18);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -94,7 +94,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 17);
+    assert_eq!(outcome.manifest.format_version, 18);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -117,6 +117,110 @@ assert(search.package == "ripgrep")
     .unwrap();
     assert!(provider.contains("update-index"));
     assert!(preparation.contains("elevated: true"));
+}
+
+#[test]
+fn package_requirement_defaults_to_the_sole_configured_provider() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        r#"local w = require("wombat")
+w.providers({ "apt" })
+local essential = w.need.package("build-essential")
+assert(essential.provider == "apt")
+"#,
+    )
+    .unwrap();
+    let outcome = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
+    )
+    .unwrap();
+    let requirement = &outcome.manifest.requirements[0];
+    assert_eq!(requirement.binding.provider, "apt");
+    assert_eq!(
+        requirement.binding.package.as_deref(),
+        Some("build-essential")
+    );
+    assert_eq!(requirement.attempts.len(), 1);
+}
+
+#[test]
+fn unpinned_package_requirement_tries_configured_providers_in_priority_order() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        r#"local w = require("wombat")
+w.providers({ "apt", "brew" })
+w.need.package("zsh", { publishes = { commands = { "zsh" } } })
+"#,
+    )
+    .unwrap();
+
+    let debian = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("debian"))
+            .with_host(debian_host()),
+    )
+    .unwrap();
+    let requirement = &debian.manifest.requirements[0];
+    assert_eq!(requirement.binding.provider, "apt");
+    assert_eq!(requirement.attempts.len(), 1);
+
+    let macos = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("macos")).with_host(macos_host()),
+    )
+    .unwrap();
+    let requirement = &macos.manifest.requirements[0];
+    assert_eq!(requirement.binding.provider, "brew");
+    assert_eq!(requirement.attempts.len(), 2);
+    assert!(matches!(
+        requirement.attempts[0].outcome,
+        wombat::manifest::ResolutionOutcome::Unsupported { .. }
+    ));
+}
+
+#[test]
+fn explicit_package_provider_still_pins_selection_and_rejects_unconfigured_names() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        r#"local w = require("wombat")
+w.providers({ "apt", "brew" })
+w.need.package("zsh", { provider = "apt", publishes = { commands = { "zsh" } } })
+"#,
+    )
+    .unwrap();
+    let outcome = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
+    )
+    .unwrap();
+    let requirement = &outcome.manifest.requirements[0];
+    assert_eq!(requirement.binding.provider, "apt");
+    assert_eq!(requirement.attempts.len(), 1);
+
+    fs::write(
+        source.join("wombat.lua"),
+        r#"local w = require("wombat")
+w.providers({ "apt" })
+w.need.package("zsh", { provider = "brew", publishes = { commands = { "zsh" } } })
+"#,
+    )
+    .unwrap();
+    let error = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("unconfigured"))
+            .with_host(debian_host()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("requests provider `brew`, which is not configured"),
+        "{error}"
+    );
 }
 
 #[test]

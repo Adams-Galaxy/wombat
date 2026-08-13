@@ -726,7 +726,9 @@ fn validate_provider_scope(
         )?;
         match &provider.origin {
             crate::model::manifest::ProviderOrigin::Builtin { contract_version } => {
-                if !matches!(provider.name.as_str(), "brew" | "apt") || *contract_version != 1 {
+                if !matches!(provider.name.as_str(), "brew" | "apt" | "git")
+                    || *contract_version != 1
+                {
                     return Err(WombatError::configuration(format!(
                         "unsupported built-in provider contract `{}-v{contract_version}`",
                         provider.name
@@ -828,9 +830,10 @@ fn validate_provider_scope(
                 ..
             } = candidate
             {
-                if !provider_names.contains(provider.as_str())
-                    || !matches!(with, crate::model::frozen::FrozenValue::Map(_))
-                {
+                let provider_valid = provider
+                    .as_deref()
+                    .is_none_or(|name| provider_names.contains(name));
+                if !provider_valid || !matches!(with, crate::model::frozen::FrozenValue::Map(_)) {
                     return Err(WombatError::configuration(
                         "manifest package candidate has an invalid provider or options",
                     ));
@@ -877,7 +880,7 @@ fn validate_provider_scope(
         'candidates: for (candidate_index, candidate) in requirement.candidates.iter().enumerate() {
             for provider in providers {
                 if let crate::model::manifest::RequirementCandidate::Package {
-                    provider: required,
+                    provider: Some(required),
                     ..
                 } = candidate
                     && provider.name != *required

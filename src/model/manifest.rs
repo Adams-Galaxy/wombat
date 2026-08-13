@@ -27,8 +27,8 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 17;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 8;
+pub const MANIFEST_FORMAT_VERSION: u32 = 18;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 9;
 
 /// Bump whenever construction can produce different output for unchanged
 /// configuration. Products built under a different value are rejected and
@@ -285,7 +285,13 @@ pub enum RequirementCandidate {
     },
     Package {
         name: String,
-        provider: String,
+        /// Pins resolution to one configured provider. Absent means try every
+        /// configured provider in priority order, as [`RequirementCandidate::Command`]
+        /// always does — package names and options aren't portable between
+        /// ecosystems, so this is how a candidate opts into that instead of
+        /// leaving it ambiguous.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         minimum: Option<String>,
         publications: Publications,

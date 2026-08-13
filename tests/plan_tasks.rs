@@ -52,7 +52,7 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     let (_temporary, source) = repository();
     let options = BuildOptions::new(&source, "build");
     let planned = plan(options.clone()).unwrap();
-    assert_eq!(planned.plan.format_version, 8);
+    assert_eq!(planned.plan.format_version, 9);
     assert_eq!(planned.plan.tasks.len(), 1);
     assert!(planned.plan.requirements.is_empty());
     assert!(!planned.build_dir.join(".wombat/tasks").exists());
@@ -61,7 +61,7 @@ fn plan_inspection_does_not_execute_tasks_and_build_publishes_generated_outputs(
     assert!(inspected.contains("cache: true"));
 
     let built = build(options.clone()).unwrap();
-    assert_eq!(built.manifest.format_version, 17);
+    assert_eq!(built.manifest.format_version, 18);
     assert_eq!(built.manifest.plan_id, planned.plan.plan_id);
     assert_eq!(built.manifest.tasks[0].outputs.len(), 1);
     assert_eq!(
@@ -429,7 +429,7 @@ fn build_plan_round_trips_replaces_atomically_and_rejects_tampering() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("unsupported build plan format version 1") && error.contains("expected 8"),
+        error.contains("unsupported build plan format version 1") && error.contains("expected 9"),
         "{error}"
     );
 }

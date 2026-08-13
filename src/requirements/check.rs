@@ -54,6 +54,7 @@ pub(super) fn check_requirement(
         ProviderOrigin::Builtin { .. } => match provider.name.as_str() {
             "brew" => check_brew(&requirement.binding, selected.minimum())?,
             "apt" => check_apt(&requirement.binding, selected.minimum())?,
+            "git" => check_git(&requirement.binding)?,
             name => {
                 return Err(WombatError::configuration(format!(
                     "unsupported built-in provider `{name}`"
@@ -213,4 +214,100 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
             "no Apt candidate is available",
         )),
     }
+}
+
+pub(super) fn check_git(binding: &ProviderBinding) -> Result<CheckItem> {
+    let (repository, to, reference) = git_identity(binding)?;
+    let Some(git) = which("git") else {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Unavailable,
+            "git is not available on PATH",
+        ));
+    };
+    if !Path::new(to).join(".git").is_dir() {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Missing,
+            &format!("{to} is not a git checkout"),
+        ));
+    }
+    // An existing checkout with no `origin` at all (or a different one) is the
+    // same "wrong thing is there" outcome as a mismatched remote, not an
+    // inconclusive one — treat both as outdated rather than unavailable.
+    let remote = run_bounded(
+        &git,
+        &["-C", to, "remote", "get-url", "origin"],
+        &BTreeMap::new(),
+    )?;
+    let observed_remote = String::from_utf8_lossy(&remote.stdout.bytes)
+        .trim()
+        .to_string();
+    if !remote.success || observed_remote != repository {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Outdated,
+            &format!(
+                "checkout remote is {}, expected {repository}",
+                if remote.success {
+                    observed_remote.as_str()
+                } else {
+                    "unset"
+                }
+            ),
+        ));
+    }
+    let Some(reference) = reference else {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Satisfied,
+            &format!("checked out at {to}"),
+        ));
+    };
+    // Resolved locally, not against `origin`, so a satisfied check never
+    // touches the network: `reconcile` already fetched every ref it pinned.
+    let wanted = run_bounded(
+        &git,
+        &[
+            "-C",
+            to,
+            "rev-parse",
+            "--verify",
+            &format!("{reference}^{{commit}}"),
+        ],
+        &BTreeMap::new(),
+    )?;
+    if !wanted.success {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Outdated,
+            &format!("ref `{reference}` is not resolvable locally; a fetch is needed"),
+        ));
+    }
+    let head = run_bounded(&git, &["-C", to, "rev-parse", "HEAD"], &BTreeMap::new())?;
+    if !head.success {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Unavailable,
+            &format!("git rev-parse HEAD failed: {}", output_detail(&head)),
+        ));
+    }
+    let wanted_commit = String::from_utf8_lossy(&wanted.stdout.bytes)
+        .trim()
+        .to_string();
+    let head_commit = String::from_utf8_lossy(&head.stdout.bytes)
+        .trim()
+        .to_string();
+    if wanted_commit != head_commit {
+        return Ok(provider_item(
+            binding,
+            CheckStatus::Outdated,
+            &format!("checked out at {head_commit}, expected {reference} ({wanted_commit})"),
+        ));
+    }
+    Ok(provider_item(
+        binding,
+        CheckStatus::Satisfied,
+        &format!("checked out {reference} at {to}"),
+    ))
 }

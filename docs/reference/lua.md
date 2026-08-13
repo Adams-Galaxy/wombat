@@ -246,6 +246,9 @@ fails the build.
   `materialise.before`.
 - `options.accept` — alternatives that also satisfy it: a command string, a
   candidate table, or an array of either.
+- `options.provider` (`package` only) — pin resolution to one configured
+  provider. Omit it to try every configured provider in priority order, the
+  same as `command` always does.
 
 Name the rung as a string. `w.rungs.materialise.tasks` works too, but the string
 is checked against the ladder — and an unknown rung is an error either way now,
@@ -257,6 +260,17 @@ haven't been selected yet, and when `when` names a rung the ladder doesn't have.
 ```lua
 w.need.command("git")
 w.need.command("python3", { minimum = "3.12", when = "materialise.tasks" })
+w.need.package("build-essential")
+```
+
+`package` is for something with nothing on `PATH` to check — a meta-package, a
+font, a certificate. Since package names and options aren't portable between
+ecosystems, pin `provider` explicitly once more than one provider is configured
+and the package only exists on one of them:
+
+```lua
+w.providers({ "apt", "brew" })
+w.need.package("build-essential", { provider = "apt" })
 ```
 
 ### `w.prefer.command(name, options?)` · `w.prefer.package(name, options?)`
@@ -271,8 +285,9 @@ w.prefer.command("rg", { accept = { "grep" } })
 ### `w.providers(entries)`
 
 Root-only — calling it from a module fails. Selects the ordered providers
-permitted to satisfy requirements. Built-ins are `brew` (macOS) and `apt`
-(Debian-family Linux); custom providers are ordinary tracked Lua.
+permitted to satisfy requirements. Built-ins are `brew` (macOS), `apt`
+(Debian-family Linux), and `git` (any target); custom providers are ordinary
+tracked Lua.
 
 A provider that doesn't suit the target refuses it, so listing several and
 letting the target decide is normal. Requirements declared before this call
@@ -281,6 +296,30 @@ fail, because there'd be no policy to resolve them against.
 ```lua
 w.providers({ "brew" })
 ```
+
+### `git`
+
+For a package that lives in a repository rather than a package manager — a
+tmux/vim plugin, a version manager, anything installed by cloning it
+somewhere. `with` takes:
+
+- `with.repository` — a clone URL, required.
+- `with.to` — an absolute destination path, required.
+- `with.ref` — a branch, tag, or commit to pin. Omit it to track whatever the
+  clone's default branch resolves to at clone time.
+
+```lua
+w.providers({ "git" })
+w.need.package("tpm", {
+    with = { repository = "https://github.com/tmux-plugins/tpm.git", to = w.host.home .. "/.tmux/plugins/tpm" },
+})
+```
+
+An existing `with.to` is reused only when its `origin` remote already matches
+`with.repository`; anything else there is left untouched and fails the build,
+since it isn't `git`'s to overwrite. Checking is local — a pinned `ref` is
+compared against what the last `reconcile` fetched, not against the network —
+so a satisfied `git` package never makes a connection.
 
 ## Tasks and scripts
 
