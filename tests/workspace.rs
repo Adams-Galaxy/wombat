@@ -232,6 +232,40 @@ fn failed_evaluation_leaves_the_previous_product_untouched() {
 }
 
 #[test]
+fn products_survive_a_release_but_not_a_construction_change() {
+    let repository = Repository::new();
+    repository.build().unwrap();
+
+    let released = repository.temporary.path().join("released");
+    copy_product(&repository.build_dir, &released);
+    retag(
+        &released,
+        "wombat_version",
+        serde_json::Value::from("99.0.0"),
+    );
+    verify_build(&released).expect("a new release alone must not invalidate a product");
+
+    let reconstructed = repository.temporary.path().join("reconstructed");
+    copy_product(&repository.build_dir, &reconstructed);
+    retag(
+        &reconstructed,
+        "construction_version",
+        serde_json::Value::from(99),
+    );
+    let error = verify_build(&reconstructed).unwrap_err().to_string();
+    assert!(error.contains("construction version"), "{error}");
+    assert!(error.contains("rebuild"), "{error}");
+}
+
+fn retag(product: &std::path::Path, key: &str, value: serde_json::Value) {
+    let path = product.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    manifest[key] = value;
+    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+#[test]
 fn verifier_rejects_missing_extra_and_manifest_tampering() {
     let repository = Repository::new();
     repository.build().unwrap();
@@ -272,7 +306,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 }
 
 #[test]
-fn verifier_rejects_legacy_unknown_v16_fields_and_internally_inconsistent_provenance() {
+fn verifier_rejects_legacy_unknown_v17_fields_and_internally_inconsistent_provenance() {
     let repository = Repository::new();
     repository.build().unwrap();
 

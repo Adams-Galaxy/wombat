@@ -2,6 +2,7 @@
 
 use super::materialisation::compute_build_id;
 use super::*;
+use crate::model::manifest::CONSTRUCTION_VERSION;
 
 pub(super) fn verify_product(root: &Path) -> Result<Manifest> {
     let manifest_path = root.join("manifest.json");
@@ -35,10 +36,10 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             manifest.format_version
         )));
     }
-    if manifest.wombat_version != WOMBAT_VERSION {
+    if manifest.construction_version != CONSTRUCTION_VERSION {
         return Err(WombatError::configuration(format!(
-            "build was produced by Wombat {}, but this is Wombat {WOMBAT_VERSION}",
-            manifest.wombat_version
+            "build was constructed under construction version {} by Wombat {}, but this is construction version {CONSTRUCTION_VERSION}; rebuild this product with the current Wombat",
+            manifest.construction_version, manifest.wombat_version
         )));
     }
     manifest.ladder.validate()?;

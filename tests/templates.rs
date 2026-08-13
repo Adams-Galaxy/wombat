@@ -173,7 +173,7 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 }
 
 #[test]
-fn template_fixture_matches_exact_manifest_v16_and_rendered_tree() {
+fn template_fixture_matches_exact_manifest_v17_and_rendered_tree() {
     let root = fixture("templates");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");

@@ -309,7 +309,9 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
     let tasks = state_tasks(artifacts);
     let manifest = crate::model::manifest::Manifest {
         format_version: crate::model::manifest::MANIFEST_FORMAT_VERSION,
+        construction_version: crate::model::manifest::CONSTRUCTION_VERSION,
         wombat_version: env!("CARGO_PKG_VERSION").to_string(),
+        project: None,
         build_id: String::new(),
         plan_id: format!("sha256:{}", "0".repeat(64)),
         execution_mode: crate::model::manifest::ExecutionMode::Normal,

@@ -18,6 +18,8 @@ const PROJECT_FORMAT_VERSION: u32 = 3;
 struct ProjectConfig {
     format_version: u32,
     #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
     artifacts: ArtifactConfig,
     #[serde(default)]
     log: LogConfig,
@@ -87,12 +89,27 @@ enum ConfiguredUnallocated {
     Error,
 }
 
-pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, LogLevel, Option<SourceFile>)> {
+pub(crate) struct ProjectSettings {
+    pub(crate) artifact_policy: ArtifactPolicy,
+    pub(crate) log_level: LogLevel,
+    /// Names the persistent script state namespace. When absent the namespace
+    /// follows the repository location, so relocating a checkout restarts
+    /// `once` and `onchange` state.
+    pub(crate) project: Option<String>,
+    pub(crate) source: Option<SourceFile>,
+}
+
+pub(crate) fn load(root: &Path) -> Result<ProjectSettings> {
     let path = root.join("wombat.toml");
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((ArtifactPolicy::default(), LogLevel::Warn, None));
+            return Ok(ProjectSettings {
+                artifact_policy: ArtifactPolicy::default(),
+                log_level: LogLevel::Warn,
+                project: None,
+                source: None,
+            });
         }
         Err(error) => return Err(WombatError::io(&path, error)),
     };
@@ -118,10 +135,12 @@ pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, LogLevel, Option<Sour
         ConfiguredUnallocated::Error => UnallocatedPolicy::Error,
     };
     let log = LogLevel::parse(&config.log.level).ok_or_else(|| WombatError::configuration(format!("repository `wombat.toml` log.level must be debug, info, notice, warn, or error; got `{}`", config.log.level)))?;
-    Ok((
-        ArtifactPolicy { unallocated },
-        log,
-        Some(SourceFile {
+    let project = config.project.map(validate_project_name).transpose()?;
+    Ok(ProjectSettings {
+        artifact_policy: ArtifactPolicy { unallocated },
+        log_level: log,
+        project,
+        source: Some(SourceFile {
             path: "wombat.toml".to_string(),
             digest: format!(
                 "sha256:{}",
@@ -131,7 +150,22 @@ pub(crate) fn load(root: &Path) -> Result<(ArtifactPolicy, LogLevel, Option<Sour
                     .collect::<String>()
             ),
         }),
-    ))
+    })
+}
+
+fn validate_project_name(name: String) -> Result<String> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    if valid {
+        Ok(name)
+    } else {
+        Err(WombatError::configuration(format!(
+            "repository `wombat.toml` project must be 1 to 64 characters of ASCII letters, digits, `-`, or `_`; got `{name}`"
+        )))
+    }
 }
 
 pub(crate) fn workflow_policy(root: &Path) -> Result<WorkflowPolicy> {

@@ -6,8 +6,14 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 16;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 7;
+pub const MANIFEST_FORMAT_VERSION: u32 = 17;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 8;
+
+/// Bump whenever construction can produce different output for unchanged
+/// configuration. Products built under a different value are rejected and
+/// identities computed under it differ; the release version deliberately does
+/// not, so publishing Wombat does not invalidate every product.
+pub const CONSTRUCTION_VERSION: u32 = 1;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -58,7 +64,9 @@ impl std::fmt::Display for SourceTrace {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format_version: u32,
+    pub construction_version: u32,
     pub wombat_version: String,
+    pub project: Option<String>,
     pub build_id: String,
     pub plan_id: String,
     pub execution_mode: ExecutionMode,
@@ -94,7 +102,9 @@ pub enum ExecutionMode {
 #[serde(deny_unknown_fields)]
 pub struct BuildPlan {
     pub format_version: u32,
+    pub construction_version: u32,
     pub wombat_version: String,
+    pub project: Option<String>,
     pub plan_id: String,
     pub project_arguments: Vec<String>,
     pub sources: Vec<SourceFile>,
@@ -745,6 +755,7 @@ pub struct FileContent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedManifest {
     pub plan_id: String,
+    pub project: Option<String>,
     pub project_arguments: Vec<String>,
     pub sources: Vec<SourceFile>,
     pub inputs: Vec<BuildInput>,

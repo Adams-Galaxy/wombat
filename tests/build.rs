@@ -143,7 +143,7 @@ fn root_selection_order_preserves_outputs_but_changes_exact_source_identity() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v16() {
+fn path_fixture_matches_the_exact_manifest_v17() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -157,7 +157,7 @@ fn path_fixture_matches_the_exact_manifest_v16() {
 }
 
 #[test]
-fn directory_fixture_matches_manifest_v16_and_materialised_tree() {
+fn directory_fixture_matches_manifest_v17_and_materialised_tree() {
     let root = fixture("directories");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");

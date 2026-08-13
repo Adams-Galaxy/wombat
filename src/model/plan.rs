@@ -6,8 +6,9 @@ use serde::Serialize;
 use tempfile::Builder;
 
 use crate::model::manifest::{
-    BUILD_PLAN_FORMAT_VERSION, BuildPlan, EvaluatedManifest, EvaluatedProduction, PlannedArtifact,
-    PlannedProduction, Provider, ProviderOrigin, RendererIdentity,
+    BUILD_PLAN_FORMAT_VERSION, BuildPlan, CONSTRUCTION_VERSION, EvaluatedManifest,
+    EvaluatedProduction, PlannedArtifact, PlannedProduction, Provider, ProviderOrigin,
+    RendererIdentity,
 };
 use crate::{Result, WombatError};
 
@@ -74,7 +75,9 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
     }
     let mut plan = BuildPlan {
         format_version: BUILD_PLAN_FORMAT_VERSION,
+        construction_version: crate::model::manifest::CONSTRUCTION_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
+        project: desired.project.clone(),
         plan_id: String::new(),
         project_arguments: desired.project_arguments.clone(),
         sources: desired.sources.clone(),
@@ -192,10 +195,10 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
             plan.format_version
         )));
     }
-    if plan.wombat_version != WOMBAT_VERSION {
+    if plan.construction_version != CONSTRUCTION_VERSION {
         return Err(WombatError::configuration(format!(
-            "build plan was produced by Wombat {}, but this is Wombat {WOMBAT_VERSION}",
-            plan.wombat_version
+            "build plan was constructed under construction version {} by Wombat {}, but this is construction version {CONSTRUCTION_VERSION}",
+            plan.construction_version, plan.wombat_version
         )));
     }
     let expected = compute_id(plan)?;
@@ -289,7 +292,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
     #[derive(Serialize)]
     struct Identity<'a> {
         format_version: u32,
-        wombat_version: &'a str,
+        construction_version: u32,
         sources: &'a [crate::model::manifest::SourceFile],
         inputs: &'a [crate::model::manifest::BuildInput],
         target: &'a crate::model::context::ResolvedTarget,
@@ -310,7 +313,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
     }
     let identity = Identity {
         format_version: plan.format_version,
-        wombat_version: &plan.wombat_version,
+        construction_version: plan.construction_version,
         sources: &plan.sources,
         inputs: &plan.inputs,
         target: &plan.target,

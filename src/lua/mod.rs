@@ -164,6 +164,7 @@ struct RuntimeState {
     target_first_read: Option<Location>,
     root_policy_started: bool,
     project_arguments: Vec<OsString>,
+    project: Option<String>,
     input_specs: BTreeMap<u64, InputSpec>,
     next_input_spec: u64,
     inputs_declared: bool,
@@ -252,7 +253,12 @@ pub(crate) fn evaluate(root: &Path) -> Result<EvaluatedManifest> {
 pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<EvaluationOutcome> {
     let root = fs::canonicalize(root).map_err(|source| WombatError::io(root, source))?;
     reject_legacy_artifact_trees(&root)?;
-    let (artifact_policy, configured_log_level, project_config) = crate::project::load(&root)?;
+    let settings = crate::project::load(&root)?;
+    let (artifact_policy, configured_log_level, project_config) = (
+        settings.artifact_policy,
+        settings.log_level,
+        settings.source,
+    );
     let log_level = options
         .log_level
         .unwrap_or_else(|| adjust_log_level(configured_log_level, options.log_adjustment));
@@ -284,6 +290,7 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         target_first_read: None,
         root_policy_started: false,
         project_arguments: options.project_arguments,
+        project: settings.project,
         input_specs: BTreeMap::new(),
         next_input_spec: 1,
         inputs_declared: false,

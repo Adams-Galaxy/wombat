@@ -245,7 +245,7 @@ struct WorkspaceMarker {
 #[derive(Serialize)]
 struct IdentityPayload<'a> {
     format_version: u32,
-    wombat_version: &'a str,
+    construction_version: u32,
     plan_id: &'a str,
     sources: &'a [crate::model::manifest::SourceFile],
     inputs: &'a [crate::model::manifest::BuildInput],

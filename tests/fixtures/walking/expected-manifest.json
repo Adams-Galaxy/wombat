@@ -1,8 +1,10 @@
 {
-  "format_version": 16,
+  "format_version": 17,
+  "construction_version": 1,
   "wombat_version": "0.1.0",
-  "build_id": "sha256:486936cf730afc7eb7680bf0a18e6cf97ef52dcf39d829928659fc0cefc36876",
-  "plan_id": "sha256:12dd2e5592ca7fc014b88d4930780635a3536dc02679ba416cf3e167ace679d7",
+  "project": null,
+  "build_id": "sha256:4810f1d956e7b2ad0969c95b1f277b8e6b004503bc02b66550c6409eff563cac",
+  "plan_id": "sha256:73103058e3898689f07288dd9dc0b33e2b2e5ec0c46fdfcd5c79825040b6757b",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [

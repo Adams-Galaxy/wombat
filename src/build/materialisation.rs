@@ -74,7 +74,9 @@ fn materialise_inner(
     revalidate_lua_sources(source_root, &desired.sources)?;
     let mut manifest = Manifest {
         format_version: MANIFEST_FORMAT_VERSION,
+        construction_version: crate::model::manifest::CONSTRUCTION_VERSION,
         wombat_version: WOMBAT_VERSION.to_string(),
+        project: desired.project.clone(),
         build_id: String::new(),
         plan_id: desired.plan_id,
         execution_mode,
@@ -784,7 +786,7 @@ fn reject_source_symlinks(root: &Path, source: &Path) -> Result<()> {
 pub(super) fn compute_build_id(manifest: &Manifest) -> Result<String> {
     let payload = IdentityPayload {
         format_version: manifest.format_version,
-        wombat_version: &manifest.wombat_version,
+        construction_version: manifest.construction_version,
         plan_id: &manifest.plan_id,
         sources: &manifest.sources,
         inputs: &manifest.inputs,

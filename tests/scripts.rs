@@ -60,7 +60,7 @@ printf '%s\n' "$params" >> "$cache/marker"
     let (temporary, root) = repository(lua, shell);
     let state = temporary.path().join("state");
     let planned = plan(BuildOptions::new(&root, "build")).unwrap();
-    assert_eq!(planned.plan.format_version, 7);
+    assert_eq!(planned.plan.format_version, 8);
     assert!(
         planned
             .plan
@@ -69,7 +69,7 @@ printf '%s\n' "$params" >> "$cache/marker"
     );
     assert_eq!(planned.plan.scripts.len(), 2);
     let built = build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
-    assert_eq!(built.manifest.format_version, 16);
+    assert_eq!(built.manifest.format_version, 17);
     let journal = wombat::ladder::read(&built.build_dir).unwrap();
     assert_eq!(
         journal
@@ -414,6 +414,51 @@ printf x > "$cache/marker"
     copy_directory(&root, &relocated);
     build(BuildOptions::new(&relocated, "build-relocated").with_script_state_root(&state)).unwrap();
     assert_eq!(marker_contents(&state), "xx");
+}
+
+#[test]
+fn a_declared_project_keeps_once_state_across_relocation() {
+    let lua = "local w=require('wombat')\nw.script('mark.sh', {}, { schedule='once' })\n";
+    let shell = r#"for arg in "$@"; do case "$arg" in --cache-dir=*) cache=${arg#*=};; esac; done
+printf x >> "$cache/marker"
+"#;
+    let (temporary, root) = repository(lua, shell);
+    fs::write(
+        root.join("wombat.toml"),
+        "format_version = 3\nproject = \"proving\"\n",
+    )
+    .unwrap();
+    let state = temporary.path().join("state");
+    build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
+    assert_eq!(marker_contents(&state), "x");
+
+    let relocated = temporary.path().join("relocated-source");
+    copy_directory(&root, &relocated);
+    build(BuildOptions::new(&relocated, "build-relocated").with_script_state_root(&state)).unwrap();
+    assert_eq!(
+        marker_contents(&state),
+        "x",
+        "a declared project must not restart once state when the checkout moves"
+    );
+}
+
+#[test]
+fn an_unusable_project_name_is_refused() {
+    let (_temporary, root) = repository("local w=require('wombat')\n", "exit 0\n");
+    for name in ["../escape", "with space", ""] {
+        fs::write(
+            root.join("wombat.toml"),
+            format!("format_version = 3\nproject = \"{name}\"\n"),
+        )
+        .unwrap();
+        let error = plan(BuildOptions::new(&root, "build"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("project must be 1 to 64 characters"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
