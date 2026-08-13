@@ -579,6 +579,47 @@ fn interrupted_publication_recovers_the_previous_product() {
     assert!(verify_build(&repository.build_dir).is_ok());
 }
 
+/// Publication backs up and restores `scripts/`, so recovery has to clear it
+/// first. Renaming a directory onto a non-empty one is ENOTEMPTY, which would
+/// leave the rollback stranded and the next run hitting the same failure.
+#[test]
+fn interrupted_publication_recovers_a_product_that_has_scripts() {
+    let repository = Repository::new();
+    fs::create_dir_all(repository.root.join("scripts")).unwrap();
+    fs::write(repository.root.join("scripts/mark.sh"), "exit 0\n").unwrap();
+    fs::write(
+        repository.root.join("wombat.lua"),
+        "local w = require(\"wombat\")\nw.use(\"app\")\nw.use(\"shell\")\nw.script(\"mark.sh\")\n",
+    )
+    .unwrap();
+    let state = repository.temporary.path().join("script-state");
+    let first = build(
+        BuildOptions::new(&repository.root, &repository.build_dir).with_script_state_root(&state),
+    )
+    .unwrap();
+    assert!(repository.build_dir.join("scripts").exists());
+
+    // Stage the directory an interrupted publication leaves behind: the previous
+    // product under `rollback`, and a partially published one still in place.
+    let rollback = repository.build_dir.join(".wombat/rollback");
+    fs::create_dir(&rollback).unwrap();
+    for name in ["manifest.json", "tree", "scripts"] {
+        fs::rename(repository.build_dir.join(name), rollback.join(name)).unwrap();
+    }
+    fs::create_dir(repository.build_dir.join("tree")).unwrap();
+    fs::create_dir(repository.build_dir.join("scripts")).unwrap();
+    fs::write(repository.build_dir.join("scripts/stale.sh"), "exit 1\n").unwrap();
+
+    let recovered = build(
+        BuildOptions::new(&repository.root, &repository.build_dir).with_script_state_root(&state),
+    )
+    .unwrap();
+    assert_eq!(recovered.build_id, first.build_id);
+    assert!(!rollback.exists());
+    assert!(!repository.build_dir.join("scripts/stale.sh").exists());
+    assert!(verify_build(&repository.build_dir).is_ok());
+}
+
 #[test]
 fn initialized_workspace_preserves_unrelated_top_level_files() {
     let repository = Repository::new();

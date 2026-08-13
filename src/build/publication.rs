@@ -1,4 +1,17 @@
 //! Transactional publication, rollback recovery, and interruption tests.
+//!
+//! Publishing swaps a staged product into the build directory. The ordering
+//! here is the whole point: a build that is interrupted — power loss, a killed
+//! process, a full disk — must leave either the previous verified product or a
+//! state the next run can recover, never a directory that looks like a finished
+//! product but is not one.
+//!
+//! Two rules produce that. The previous product moves aside into `.wombat/
+//! rollback` before anything new lands, and `manifest.json` is published last.
+//! The manifest is what makes a directory a product, so until it is in place a
+//! half-published tree is simply not a product yet. `recover_publication` runs
+//! at the start of the next build and decides, from what survived, which side of
+//! the swap to keep.
 
 #[cfg(test)]
 use super::materialisation::{
@@ -7,6 +20,11 @@ use super::materialisation::{
 use super::validation::verify_product;
 use super::*;
 
+/// Classifies what is sitting in a build directory before we touch it.
+///
+/// A directory with neither manifest nor tree is empty rather than broken, which
+/// is the ordinary first-build case. Anything else has to verify: a product that
+/// fails verification is `Invalid` and will be replaced, not trusted.
 pub(super) fn inspect_product(root: &Path) -> CurrentProduct {
     let manifest = root.join("manifest.json");
     let tree = root.join("tree");
@@ -22,6 +40,18 @@ pub(super) fn inspect_product(root: &Path) -> CurrentProduct {
     }
 }
 
+/// Repairs a build directory left mid-swap by an interrupted publication.
+///
+/// A surviving `.wombat/rollback` means a previous run was interrupted between
+/// backing the old product up and finishing the new one. Which side to keep is
+/// decided by verification rather than by guessing how far the swap got:
+///
+/// - the current product verifies, so the swap completed and the backup is
+///   stale;
+/// - it does not, but the backup does, so restore the backup;
+/// - neither verifies, so drop the backup and let the caller rebuild.
+///
+/// Called before publication, so every build starts from a coherent directory.
 pub(super) fn recover_publication(build_dir: &Path) -> Result<()> {
     let rollback = build_dir.join(".wombat/rollback");
     if !rollback
@@ -48,6 +78,11 @@ pub(super) fn publish(build_dir: &Path, staged: &Path) -> Result<()> {
     publish_with_hook(build_dir, staged, |_| Ok(()))
 }
 
+/// Points at which a test can interrupt publication.
+///
+/// These exist so the recovery paths above are exercised for real — a test
+/// stops the swap at each step and asserts the directory is still recoverable —
+/// rather than being reasoned about and hoped for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationStep {
     BeforeBackup,
@@ -64,9 +99,15 @@ fn publish_with_hook(
     let rollback = build_dir.join(".wombat/rollback");
     remove_entry_if_exists(&rollback)?;
     fs::create_dir(&rollback).map_err(|error| WombatError::io(&rollback, error))?;
+    // Tracks whether the build directory still holds the previous product
+    // untouched. While it does, failing just means deleting the backup; once we
+    // have started moving things, failing means putting the old product back.
     let mut product_was_mutated = false;
     let result = (|| {
         after_step(PublicationStep::BeforeBackup)?;
+        // Move the previous product aside rather than deleting it. Renames
+        // within the same directory are atomic, so an interruption here leaves
+        // the old product intact under `rollback` for the next run to find.
         for name in ["tree", "providers", "scripts", "manifest.json"] {
             let current = build_dir.join(name);
             if current
@@ -99,6 +140,10 @@ fn publish_with_hook(
         }
         product_was_mutated = true;
         after_step(PublicationStep::TreePublished)?;
+        // The manifest goes last, and only after the tree is fully in place. It
+        // is what makes this directory a product, so publishing it earlier would
+        // let an interruption leave a manifest describing a tree that is not
+        // there yet.
         fs::rename(
             staged.join("manifest.json"),
             build_dir.join("manifest.json"),
@@ -109,6 +154,9 @@ fn publish_with_hook(
         Ok(())
     })();
     if let Err(error) = result {
+        // Clear whatever we managed to publish before restoring, so the restore
+        // renames land on empty paths instead of failing halfway and leaving
+        // both products partially present.
         if product_was_mutated {
             remove_reserved_product(build_dir)?;
             restore_rollback(build_dir, &rollback)?;
@@ -120,6 +168,10 @@ fn publish_with_hook(
     remove_entry(&rollback)
 }
 
+/// Puts a backed-up product back, in the same order publication used.
+///
+/// Callers must clear the reserved paths first; these renames expect their
+/// destinations to be free.
 fn restore_rollback(build_dir: &Path, rollback: &Path) -> Result<()> {
     for name in ["tree", "providers", "scripts", "manifest.json"] {
         let source = rollback.join(name);
@@ -134,10 +186,14 @@ fn restore_rollback(build_dir: &Path, rollback: &Path) -> Result<()> {
     remove_entry_if_exists(rollback)
 }
 
+/// Clears the paths publication owns, leaving everything else in the build
+/// directory alone. Callers run this before [`restore_rollback`], whose renames
+/// need free destinations.
 fn remove_reserved_product(build_dir: &Path) -> Result<()> {
     remove_entry_if_exists(&build_dir.join("manifest.json"))?;
     remove_entry_if_exists(&build_dir.join("tree"))?;
-    remove_entry_if_exists(&build_dir.join("providers"))
+    remove_entry_if_exists(&build_dir.join("providers"))?;
+    remove_entry_if_exists(&build_dir.join("scripts"))
 }
 
 pub(super) fn clear_directory_contents(directory: &Path) -> Result<()> {
@@ -148,6 +204,10 @@ pub(super) fn clear_directory_contents(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Requires a real directory, creating it when absent.
+///
+/// Symlinks are refused throughout publication: following one would let a
+/// crafted or careless workspace redirect writes outside the build directory.
 pub(super) fn ensure_plain_directory(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
