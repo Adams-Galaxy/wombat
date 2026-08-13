@@ -19,8 +19,9 @@ is covered under [fresh machines](#a-fresh-machine) below.
 
 ## Create a repository
 
-Wombat never guesses which repository you mean from your current directory. You
-either pass `--source`, or configure a default. Let's make one explicitly:
+Wombat never guesses which repository you mean from your current directory —
+not even if you're standing in it. You either pass `--source` every time, or set
+a default once. Let's create one:
 
 ```sh
 wombat init ./dotfiles
@@ -39,6 +40,14 @@ dotfiles/
 
 `init` won't overwrite anything you've written by hand, and running it twice is
 fine.
+
+Every command below passes `--source ./dotfiles`. To stop typing it, put this in
+`~/.config/wombat/config.toml` and drop the flag:
+
+```toml
+format_version = 2
+repository = "~/dotfiles"
+```
 
 ## Add a file
 
@@ -71,9 +80,8 @@ This is the part that makes Wombat different from a symlink manager. Build the
 plan first, and read it:
 
 ```sh
-cd dotfiles
-wombat plan construct
-wombat plan inspect
+wombat --source ./dotfiles plan construct
+wombat --source ./dotfiles plan inspect
 ```
 
 `plan construct` runs your Lua once and freezes the result — every artifact,
@@ -83,19 +91,19 @@ home directory yet.
 Now produce the actual files, still without deploying:
 
 ```sh
-wombat plan materialise
-wombat inspect artifacts
-wombat explain ~/.config/starship.toml
+wombat --source ./dotfiles plan materialise
+wombat --source ./dotfiles inspect artifacts
+wombat --source ./dotfiles explain ~/.config/starship.toml
 ```
 
-You now have a complete product in `build/`: a `manifest.json` describing
+You now have a complete product in `dotfiles/build/`: a `manifest.json` describing
 everything, and a `tree/` holding the exact bytes that would be deployed.
 `explain` traces a single artifact back to the declaration that produced it.
 
 ## See what would change
 
 ```sh
-wombat diff
+wombat --source ./dotfiles diff
 ```
 
 `diff` is read-only. It compares three things — what Wombat deployed last time,
@@ -105,7 +113,7 @@ do.
 ## Deploy
 
 ```sh
-wombat apply
+wombat --source ./dotfiles apply
 ```
 
 `apply` does construct, materialise, and deploy in one step, so it's what you'll
@@ -115,8 +123,8 @@ manage sitting where an artifact should go, it asks. In a script, where nobody
 can answer, it fails instead of guessing — pass `--conflict` to decide in
 advance.
 
-Change the source file and run `wombat diff` again to see the update, then
-`wombat apply` to take it.
+Change the source file and run `diff` again to see the update, then `apply` to
+take it.
 
 ## A fresh machine
 
