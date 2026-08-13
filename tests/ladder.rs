@@ -118,6 +118,34 @@ fn obsolete_build_requirement_namespace_is_not_an_alias() {
     );
 }
 
+/// A missing key on `w.rungs` would read as nil, and a nil `when` or `at` means
+/// unspecified, so a typo would quietly move the action to the default rung.
+#[test]
+fn a_mistyped_rung_handle_fails_rather_than_defaulting() {
+    let temporary = tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w = require('wombat')\nw.providers({ 'brew' })\nw.need.command('sh', { when = w.rungs.materialise.taks })\n",
+    )
+    .unwrap();
+    let error = wombat::plan(BuildOptions::new(&source, "build").with_host(macos_fixture_host()))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown rung handle `taks`"), "{error}");
+
+    fs::write(
+        source.join("wombat.lua"),
+        "local w = require('wombat')\nw.providers({ 'brew' })\nw.script('mark.sh', {}, { at = w.rungs.deploy.aftr })\n",
+    )
+    .unwrap();
+    let error = wombat::plan(BuildOptions::new(&source, "build").with_host(macos_fixture_host()))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown rung handle `aftr`"), "{error}");
+}
+
 #[test]
 fn unified_requirements_are_the_only_persisted_requirement_scope() {
     let temporary = tempdir().unwrap();

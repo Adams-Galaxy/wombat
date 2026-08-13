@@ -76,6 +76,11 @@ enum Command {
         /// Repository path. Defaults to the selected configured/default source.
         path: Option<PathBuf>,
     },
+    /// Show or change Wombat's own configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Add an existing home file to Wombat source state.
     Add {
         /// Absolute existing file beneath the target root.
@@ -190,6 +195,17 @@ enum ColorArg {
     Auto,
     Always,
     Never,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Show the resolved source repository and where that choice came from.
+    Show,
+    /// Record a default source repository, so `--source` is not needed.
+    SetSource {
+        /// Repository path. Defaults to the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

@@ -41,12 +41,12 @@ dotfiles/
 `init` won't overwrite anything you've written by hand, and running it twice is
 fine.
 
-Every command below passes `--source ./dotfiles`. To stop typing it, put this in
-`~/.config/wombat/config.toml` and drop the flag:
+Every command below passes `--source ./dotfiles`. To stop typing it, record a
+default once and drop the flag:
 
-```toml
-format_version = 2
-repository = "~/dotfiles"
+```sh
+wombat config set-source ./dotfiles
+wombat config show            # confirms what's resolved, and why
 ```
 
 ## Add a file

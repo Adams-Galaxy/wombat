@@ -25,7 +25,7 @@ freshness = "5m"
 | Key | Values | Default | Meaning |
 | --- | --- | --- | --- |
 | `format_version` | `3` | required | Config format. Mismatches are rejected |
-| `project` | 1–64 chars of ASCII letters, digits, `-`, `_` | unset | Names this project's script state |
+| `project` | 1-64 chars of ASCII letters, digits, `-`, `_` | unset | Names this project's script state |
 | `artifacts.unallocated` | `ignore`, `warn`, `error` | `warn` | What to do about source files no declaration selected |
 | `log.level` | `debug`, `info`, `notice`, `warn`, `error` | `warn` | Minimum level for optional log output |
 | `workflow.reuse` | boolean | `true` | Allow reusing a fresh matching product |
@@ -68,7 +68,19 @@ args = []
 | `runners.<name>.args` | Extra arguments passed before the entrypoint |
 
 Without this file and without `--source`, the source defaults to
-`~/.local/share/wombat/`.
+`~/.local/share/wombat/` — which is also where `wombat setup` clones to, so a
+one-line `curl | sh` install lands somewhere sensible without configuring
+anything.
+
+You don't have to write this file by hand:
+
+```sh
+wombat config set-source ~/dotfiles   # or no argument, for the current directory
+wombat config show                    # what's resolved, and why
+```
+
+`set-source` rewrites only the `repository` line, leaving comments and
+`[runners]` untouched.
 
 ## Environment variables
 

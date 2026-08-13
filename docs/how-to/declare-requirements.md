@@ -44,11 +44,16 @@ A requirement is satisfied before the rung it declares, defaulting to
 `materialise.before`. Say so when something is only needed later:
 
 ```lua
-w.need.command("python3", { when = w.rungs.materialise.tasks })
+w.need.command("python3", { when = "materialise.tasks" })
 ```
 
 That matters because it decides how early a build fails. A tool only needed by a
 task shouldn't block the whole build before anything has run.
+
+Name the rung as a string. The typed handle `w.rungs.materialise.tasks` works
+too, but a string is checked against the ladder, so a typo is reported rather
+than resolving to something else. Handles are for building a ladder, not for
+pointing at one — see [run tasks and scripts](run-tasks-and-scripts.md).
 
 ## See it before it happens
 

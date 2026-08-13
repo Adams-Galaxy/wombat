@@ -167,6 +167,59 @@ pub(crate) fn run() -> ExitCode {
                     }
                 })
         }
+        Command::Config { command } => match command {
+            ConfigCommand::Show => wombat::config::describe_source(cli.source.as_deref())
+                .map(|resolution| {
+                    let origin = match resolution.origin {
+                        wombat::config::SourceOrigin::Explicit => "--source argument",
+                        wombat::config::SourceOrigin::Configured => "configured repository",
+                        wombat::config::SourceOrigin::Default => "built-in default",
+                    };
+                    println!(
+                        "source: {}",
+                        stdout.paint(wombat::Role::Path, resolution.source.display().to_string())
+                    );
+                    println!("  from: {origin}");
+                    println!(
+                        "config: {}{}",
+                        resolution.config_path.display(),
+                        if resolution.config_exists {
+                            ""
+                        } else {
+                            " (not present)"
+                        }
+                    );
+                    if !resolution.source.join("wombat.lua").exists() {
+                        eprintln!(
+                            "{}",
+                            stderr.paint(
+                                wombat::Role::Warning,
+                                "warning: no `wombat.lua` there yet; run `wombat init` to create one"
+                            )
+                        );
+                    }
+                }),
+            ConfigCommand::SetSource { path } => (|| -> wombat::Result<()> {
+                let selected = wombat::config::resolve_source_candidate(path.as_deref())?;
+                let written = wombat::config::set_configured_source(&selected)?;
+                println!(
+                    "{} {}",
+                    stdout.paint(wombat::Role::Success, "source"),
+                    stdout.paint(wombat::Role::Path, selected.display().to_string())
+                );
+                println!("recorded in {}", written.display());
+                if !selected.join("wombat.lua").exists() {
+                    eprintln!(
+                        "{}",
+                        stderr.paint(
+                            wombat::Role::Warning,
+                            "warning: no `wombat.lua` there yet; run `wombat init` to create one"
+                        )
+                    );
+                }
+                Ok(())
+            })(),
+        },
         Command::Add {
             target,
             target_root,

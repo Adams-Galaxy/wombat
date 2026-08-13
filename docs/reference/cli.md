@@ -124,6 +124,28 @@ repository file still matches the digest the product recorded.
 `compare` with one path compares `build` to it; with two, compares them
 directly. It reports semantic changes and hides what didn't move.
 
+### `config show` · `config set-source [PATH]`
+
+Wombat's own configuration, rather than a repository's.
+
+`config show` prints the resolved source repository, which of the three
+resolution routes chose it — an explicit `--source`, the configured
+`repository`, or the built-in default — and the config file path. It warns when
+the resolved directory has no `wombat.lua` yet. Since Wombat never infers the
+repository from your working directory, this is usually the fastest answer to
+"why is it building that?".
+
+`config set-source` records a default so `--source` isn't needed. `PATH`
+defaults to the current directory:
+
+```sh
+cd ~/dotfiles
+wombat config set-source
+```
+
+It rewrites only the `repository` line, so comments, `[runners]` entries, and
+your formatting survive. If no config file exists, it writes a minimal one.
+
 ### `init [PATH]`
 
 Create the smallest conventional repository: `wombat.lua`, `wombat.toml`,

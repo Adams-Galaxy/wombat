@@ -195,6 +195,133 @@ fn parse_config(path: &Path, contents: &str) -> Result<UserConfig> {
     Ok(config)
 }
 
+/// Where the resolved source repository came from.
+///
+/// Wombat never infers the repository from the working directory, so telling a
+/// user which of these applied is usually the answer to "why is it building
+/// that?".
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceOrigin {
+    /// An explicit `--source` argument.
+    Explicit,
+    /// The `repository` key in the user configuration file.
+    Configured,
+    /// The built-in default beneath the home directory.
+    Default,
+}
+
+/// The resolved source repository, where that choice came from, and the user
+/// configuration path it was read from.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct SourceResolution {
+    pub source: PathBuf,
+    pub origin: SourceOrigin,
+    pub config_path: PathBuf,
+    pub config_exists: bool,
+}
+
+#[doc(hidden)]
+pub fn describe_source(explicit: Option<&Path>) -> Result<SourceResolution> {
+    let config_path = user_config_path()?;
+    let config_exists = config_path.exists();
+    let origin = if explicit.is_some() {
+        SourceOrigin::Explicit
+    } else if config_exists {
+        SourceOrigin::Configured
+    } else {
+        SourceOrigin::Default
+    };
+    Ok(SourceResolution {
+        source: resolve_source_candidate(explicit)?,
+        origin,
+        config_path,
+        config_exists,
+    })
+}
+
+#[doc(hidden)]
+pub fn user_config_path() -> Result<PathBuf> {
+    let config_root = match env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => {
+            return Err(WombatError::configuration(format!(
+                "XDG_CONFIG_HOME must be absolute, got `{}`",
+                path.display()
+            )));
+        }
+        None => {
+            let home = env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                WombatError::configuration("HOME is not set; cannot locate Wombat configuration")
+            })?;
+            home.join(".config")
+        }
+    };
+    Ok(config_root.join("wombat/config.toml"))
+}
+
+/// Records `repository` in the user configuration, creating the file when it is
+/// absent.
+///
+/// Rewrites only the `repository` line so hand-written comments, `[runners]`
+/// entries, and formatting survive.
+#[doc(hidden)]
+pub fn set_configured_source(source: &Path) -> Result<PathBuf> {
+    if !source.is_absolute() {
+        return Err(WombatError::configuration(format!(
+            "source `{}` must be absolute",
+            source.display()
+        )));
+    }
+    let path = user_config_path()?;
+    let existing = match fs::read_to_string(&path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(WombatError::io(&path, error)),
+    };
+    let value = source.to_string_lossy();
+    let updated = match existing {
+        None => format!("format_version = {CONFIG_FORMAT_VERSION}\nrepository = \"{value}\"\n"),
+        Some(contents) => rewrite_repository(&contents, &value),
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
+    }
+    crate::storage::atomic::write_bytes(&path, updated.as_bytes(), false)?;
+    Ok(path)
+}
+
+fn rewrite_repository(contents: &str, value: &str) -> String {
+    let replacement = format!("repository = \"{value}\"");
+    let mut lines: Vec<String> = Vec::new();
+    let mut replaced = false;
+    let mut in_table = false;
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && !replaced && trimmed.starts_with("repository") {
+            lines.push(replacement.clone());
+            replaced = true;
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    if !replaced {
+        // Keep the key above any table header, where top-level keys must live.
+        let insert_at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .unwrap_or(lines.len());
+        lines.insert(insert_at, replacement);
+    }
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    updated
+}
+
 fn repository_path(path: &Path, value: &str, home: &Path) -> Result<PathBuf> {
     if value == "~" {
         return Ok(home.to_path_buf());
@@ -242,7 +369,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{resolve_source_with, task_interpreters_from_config};
+    use super::{resolve_source_with, rewrite_repository, task_interpreters_from_config};
 
     #[test]
     fn explicit_source_bypasses_host_configuration() {
@@ -333,6 +460,29 @@ args = ["-I"]
             )
         );
         assert_eq!(python.args(), ["-I"]);
+    }
+
+    #[test]
+    fn recording_a_source_preserves_comments_and_tables() {
+        let existing = "# my wombat config\nformat_version = 2\nrepository = \"~/old\"\n\n# venv\n[runners.python]\ncommand = \"python3\"\n";
+        let updated = rewrite_repository(existing, "/srv/dotfiles");
+        assert!(updated.contains("# my wombat config"));
+        assert!(updated.contains("repository = \"/srv/dotfiles\""));
+        assert!(!updated.contains("~/old"));
+        assert!(updated.contains("# venv"));
+        assert!(updated.contains("[runners.python]"));
+    }
+
+    #[test]
+    fn recording_a_source_inserts_above_any_table() {
+        let existing = "format_version = 2\n[runners.python]\ncommand = \"python3\"\n";
+        let updated = rewrite_repository(existing, "/srv/dotfiles");
+        let repository = updated.find("repository =").expect("key is inserted");
+        let table = updated.find("[runners.python]").expect("table is kept");
+        assert!(
+            repository < table,
+            "a top-level key must precede any table: {updated}"
+        );
     }
 
     #[test]

@@ -129,7 +129,16 @@ local function rung_handle(id, children, core)
 end
 local function readonly(entries)
     return setmetatable({}, {
-        __index = entries,
+        -- A missing key would otherwise read as nil, and a nil `at` or `when`
+        -- means "unspecified", so a typo would silently move an action to the
+        -- default rung instead of failing.
+        __index = function(_, key)
+            local value = entries[key]
+            if value == nil then
+                error("unknown rung handle `" .. tostring(key) .. "`", 2)
+            end
+            return value
+        end,
         __newindex = function() error("w.rungs handles are immutable", 2) end,
         __metatable = false,
     })

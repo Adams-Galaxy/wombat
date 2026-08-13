@@ -54,14 +54,17 @@ inside the build directory and never enter the product.
 ## Write a script
 
 ```lua
-local configure = w.rung("configure")
-
 w.script("configure.py", { profile = "desktop" }, {
-    at = configure,
+    at = "configure",
     schedule = "onchange",
     files = { "helpers/**" },
 })
 ```
+
+Name the rung as a string. A string is checked against the ladder, so a typo is
+reported; the typed handle works too, but it's what you use to *build* a ladder
+rather than to point at one. A custom rung declared in another module can only
+be named by string anyway.
 
 Schedules:
 
@@ -88,7 +91,9 @@ Tasks are artifact factories, so they may only sit on rungs up to artifact
 construction. Scripts may sit at any leaf.
 
 If you want a custom rung, the root selects the whole ladder, including every
-mandatory core event in order:
+mandatory core event in order. This is where handles are required — `w.ladder()`
+takes handles, not strings, because it's constructing the tree rather than
+referring to it:
 
 ```lua
 local configure = w.rung("configure")
