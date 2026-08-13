@@ -6,6 +6,8 @@ use std::process::ExitCode;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 mod commands;
+#[cfg(test)]
+mod surface;
 
 pub(crate) use commands::run;
 

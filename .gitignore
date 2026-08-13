@@ -18,7 +18,7 @@
 
 # Local design notebook. Promote implementation-critical truths into committed
 # documentation, tests, or code before relying on them.
-/docs/development-docs/
+/notes/
 
 # Local agent context bubble and signpost into the development notebook.
 /AGENTS.md

@@ -1,0 +1,11 @@
+format_version = 3
+
+[artifacts]
+unallocated = "warn"
+
+[log]
+level = "warn"
+
+[workflow]
+reuse = true
+freshness = "5m"
