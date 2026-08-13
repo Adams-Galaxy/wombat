@@ -201,14 +201,14 @@ pub(crate) fn run() -> ExitCode {
                 }),
             ConfigCommand::SetSource { path } => (|| -> wombat::Result<()> {
                 let selected = wombat::config::resolve_source_candidate(path.as_deref())?;
-                let written = wombat::config::set_configured_source(&selected)?;
+                let recorded = wombat::config::set_configured_source(&selected)?;
                 println!(
                     "{} {}",
                     stdout.paint(wombat::Role::Success, "source"),
-                    stdout.paint(wombat::Role::Path, selected.display().to_string())
+                    stdout.paint(wombat::Role::Path, recorded.source.display().to_string())
                 );
-                println!("recorded in {}", written.display());
-                if !selected.join("wombat.lua").exists() {
+                println!("recorded in {}", recorded.config_path.display());
+                if !recorded.source.join("wombat.lua").exists() {
                     eprintln!(
                         "{}",
                         stderr.paint(

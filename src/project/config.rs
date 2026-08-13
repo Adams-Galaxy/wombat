@@ -234,7 +234,7 @@ pub fn describe_source(explicit: Option<&Path>) -> Result<SourceResolution> {
         SourceOrigin::Default
     };
     Ok(SourceResolution {
-        source: resolve_source_candidate(explicit)?,
+        source: normalize_existing(resolve_source_candidate(explicit)?),
         origin,
         config_path,
         config_exists,
@@ -261,13 +261,22 @@ pub fn user_config_path() -> Result<PathBuf> {
     Ok(config_root.join("wombat/config.toml"))
 }
 
+/// The source recorded by [`set_configured_source`] and the file it was written
+/// to.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RecordedSource {
+    pub source: PathBuf,
+    pub config_path: PathBuf,
+}
+
 /// Records `repository` in the user configuration, creating the file when it is
 /// absent.
 ///
 /// Rewrites only the `repository` line so hand-written comments, `[runners]`
 /// entries, and formatting survive.
 #[doc(hidden)]
-pub fn set_configured_source(source: &Path) -> Result<PathBuf> {
+pub fn set_configured_source(source: &Path) -> Result<RecordedSource> {
     if !source.is_absolute() {
         return Err(WombatError::configuration(format!(
             "source `{}` must be absolute",
@@ -280,6 +289,7 @@ pub fn set_configured_source(source: &Path) -> Result<PathBuf> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(WombatError::io(&path, error)),
     };
+    let source = normalize_existing(source.to_path_buf());
     let value = source.to_string_lossy();
     let updated = match existing {
         None => format!("format_version = {CONFIG_FORMAT_VERSION}\nrepository = \"{value}\"\n"),
@@ -289,7 +299,17 @@ pub fn set_configured_source(source: &Path) -> Result<PathBuf> {
         fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
     }
     crate::storage::atomic::write_bytes(&path, updated.as_bytes(), false)?;
-    Ok(path)
+    Ok(RecordedSource {
+        source,
+        config_path: path,
+    })
+}
+
+/// Canonicalises a path that exists, so a recorded or displayed source does not
+/// keep `./` segments or a symlinked spelling. A path that does not exist yet is
+/// returned unchanged.
+fn normalize_existing(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
 }
 
 fn rewrite_repository(contents: &str, value: &str) -> String {
