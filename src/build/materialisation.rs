@@ -783,6 +783,14 @@ fn reject_source_symlinks(root: &Path, source: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Digests everything that could change what this product contains.
+///
+/// The payload is listed explicitly rather than serialising the whole manifest,
+/// so adding a field is a decision about identity instead of an accident. Two
+/// things are deliberately absent: `project_identity`, which digests where the
+/// repository sits, and `wombat_version`, which changes on every release. Their
+/// exclusion is what makes the same configuration produce the same `build_id` on
+/// any machine.
 pub(super) fn compute_build_id(manifest: &Manifest) -> Result<String> {
     let payload = IdentityPayload {
         format_version: manifest.format_version,

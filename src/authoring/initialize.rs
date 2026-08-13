@@ -1,3 +1,13 @@
+//! Repository scaffolding for `wombat init`.
+//!
+//! Creates the smallest repository that works and nothing more. It tolerates
+//! unrelated files, is idempotent for the exact scaffold it writes, and refuses
+//! to overwrite anything handwritten — running `init` in a directory you have
+//! already worked in must never cost you work.
+//!
+//! It deliberately does not initialise Git, build, deploy, or change which
+//! repository is configured. Those are separate decisions the user makes
+//! explicitly.
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

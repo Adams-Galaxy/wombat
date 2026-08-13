@@ -1,3 +1,13 @@
+//! Wombat's error type, its coarse classification, and diagnostic rendering.
+//!
+//! [`ErrorKind`] is deliberately small. It exists so callers and the CLI can
+//! reason about what went wrong in categories — bad configuration, a corrupt
+//! product, a refused conflict, an external process, the filesystem, or a broken
+//! internal invariant — without matching on message text.
+//!
+//! Errors carry source provenance where they have it, so a Lua mistake can be
+//! rendered as a compiler-style diagnostic pointing at the line that caused it
+//! rather than a stack trace of Wombat's own internals.
 use std::io;
 use std::path::PathBuf;
 
@@ -7,17 +17,44 @@ use crate::model::manifest::SourceLocation;
 
 pub type Result<T> = std::result::Result<T, WombatError>;
 
+/// Coarse classification of what went wrong.
+///
+/// Deliberately small, and matched on rather than message text. Callers use it
+/// to decide whether a failure is the user's to fix, the environment's, or ours.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
+    /// The repository or invocation asked for something invalid. The user can
+    /// fix this by editing configuration or changing the command.
     Configuration,
+    /// Persisted data could not be trusted — a manifest, plan, journal, or state
+    /// file that is corrupt or from an unsupported version. Usually resolved by
+    /// rebuilding.
     CorruptState,
+    /// Two things want the same resource: another Wombat holds a lock, or a
+    /// target file is not what we expected. Ordinary contention, not a fault.
     Conflict,
+    /// Refused on policy grounds — an unauthorised mutation, or a guard the user
+    /// has to lift explicitly. Never escalate this into an attempt.
     Policy,
+    /// An external process failed, timed out, or could not be started. The
+    /// failure belongs to the thing we invoked, not to Wombat.
     Process,
+    /// The filesystem refused an operation.
     Filesystem,
+    /// An invariant Wombat is responsible for did not hold. Always a bug here,
+    /// never something the user can fix.
     Internal,
 }
 
+/// Every error Wombat produces.
+///
+/// [`Diagnostic`](WombatError::Diagnostic) is the rich form, carrying source
+/// provenance so a configuration mistake can be rendered pointing at the line
+/// that caused it. The other variants are for failures with no user source to
+/// point at.
+///
+/// The CLI maps all of these to exit code 1, except usage errors and `check`'s
+/// operational failures, which exit 2.
 #[derive(Debug, Error)]
 pub enum WombatError {
     #[error("{}", .0.message)]
@@ -43,6 +80,15 @@ pub enum WombatError {
     ProjectHelpRequested,
 }
 
+/// A compiler-style diagnostic: what went wrong, where, and what to do.
+///
+/// `primary` and `source_line` are what let Wombat render a caret under the
+/// offending line. `user_frames` holds filtered Lua frames — bundled and C
+/// frames are excluded, because a stack through Wombat's own runtime tells the
+/// user nothing about their configuration.
+///
+/// `underlying` keeps the raw error as fallback evidence, shown only under
+/// `--trace`, so the concise default stays readable without losing detail.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
     pub kind: ErrorKind,

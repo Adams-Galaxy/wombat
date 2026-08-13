@@ -1,3 +1,17 @@
+//! The `src/` naming grammar: selectors, projection, and target encoding.
+//!
+//! This is where a declaration like `w.install("nvim")` becomes a set of source
+//! files and the target paths they deploy to. The grammar is generic — `dot_`
+//! becomes a leading dot, `unalloc_` and `@` sever target inference, `literal_`
+//! escapes a name that would otherwise look like metadata — so no target
+//! directory is special-cased.
+//!
+//! Entries whose real name begins with a dot are invisible unless selected
+//! explicitly. That keeps editor droppings and `.DS_Store` out of products
+//! without maintaining a blocklist of things to ignore.
+//!
+//! Glob matching is deterministic and ordered, because selection order feeds
+//! build identity.
 use globset::{GlobBuilder, GlobMatcher};
 use std::path::Path;
 
@@ -19,6 +33,11 @@ pub(crate) struct CompiledSelector {
     pub static_root: String,
 }
 
+/// Turns a declaration into the physical source path and match rules it means.
+///
+/// `static_root` is the fixed prefix before any glob metacharacter. It is what
+/// lets a selector be watched and validated without expanding it — a glob still
+/// has a concrete directory it can never escape.
 pub(crate) fn compile_selector(declared: &str, hidden: bool) -> Result<CompiledSelector> {
     if declared != "." {
         validate_selector_shape(declared)?;
@@ -44,6 +63,12 @@ pub(crate) fn compile_selector(declared: &str, hidden: bool) -> Result<CompiledS
     })
 }
 
+/// Projects a physical `src/` path to the logical path it deploys to.
+///
+/// Each component is decoded independently, so metadata in one segment cannot
+/// change the meaning of another. Components whose real name begins with a dot
+/// are refused unless explicitly authorised, which is what keeps `.git` and
+/// editor droppings out of products without a blocklist.
 pub(crate) fn project_physical(path: &str, hidden_allowed: bool) -> Result<SourceProjection> {
     validate_relative_path(path, "physical source path")?;
     let mut allocated = true;

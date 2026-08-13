@@ -1,3 +1,17 @@
+//! The Lua frontend: VM lifecycle, evaluation state, and the module graph.
+//!
+//! Configuration Lua runs exactly once, here, during construction. Everything it
+//! declares is frozen into a plan before any of it executes, so the plan is a
+//! complete description of what Wombat is permitted to do rather than a running
+//! commentary on what it did.
+//!
+//! Values crossing the boundary are frozen on the way out. Lua cannot hand Rust
+//! a table it will mutate later, which is what makes a recorded declaration
+//! trustworthy.
+//!
+//! Each API subsystem gets a narrow view of the evaluation state rather than
+//! unrestricted access, so it is clear which parts of a build any given
+//! declaration can affect.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

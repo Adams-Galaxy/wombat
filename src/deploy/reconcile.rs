@@ -1,3 +1,14 @@
+//! Three-way reconciliation between last-applied state, the target, and the
+//! desired product.
+//!
+//! Two-way comparison cannot tell "this changed because the configuration
+//! changed" from "this changed because the user edited it". Comparing against
+//! the previous applied state as well is what makes that distinction, and
+//! therefore what makes safe removal and honest conflict reporting possible.
+//!
+//! Every artifact resolves to exactly one action. Creates, updates, adoptions,
+//! and stale removals are safe and automatic; anything ambiguous becomes a
+//! conflict for the caller to resolve rather than a guess made here.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;

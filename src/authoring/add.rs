@@ -1,3 +1,17 @@
+//! `wombat add`: importing an existing file or directory into source state.
+//!
+//! Add copies bytes into `src/` and writes a declaration into the generated
+//! region of a module. It changes repository source only — it never writes to
+//! the target, so importing a file cannot damage the thing being imported.
+//!
+//! The whole import is preflighted before any mutation. Symlinks, special files,
+//! empty trees, ownership conflicts, partial directory coverage, and existing
+//! source with different contents are all refused up front, so a rejected `add`
+//! leaves the repository exactly as it was rather than half-imported.
+//!
+//! When an existing directory declaration already covers the file and maps it to
+//! the same target, only the bytes are copied and the owning module is reported.
+//! Writing a second declaration would create two owners for one artifact.
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;

@@ -1,4 +1,19 @@
-//! Shared subprocess execution and process-global working-directory serialization.
+//! Shared subprocess execution and process-global working-directory
+//! serialization.
+//!
+//! Every subprocess Wombat runs — construction observations, tasks, scripts,
+//! provider queries — goes through [`run`]. One implementation means one place
+//! that gets reaping, timeouts, and bounded capture right, instead of four that
+//! each get them slightly wrong.
+//!
+//! The guarantees callers depend on:
+//!
+//! - output is bounded, so a runaway process cannot exhaust memory;
+//! - a timeout terminates the whole process group, not just the child we
+//!   spawned, so a shell that forked does not leave orphans behind;
+//! - the child is always reaped, on every path including errors;
+//! - nothing here writes to stdout or stderr. Forwarded output becomes an event
+//!   the CLI renders, which is what keeps library use quiet.
 
 use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
@@ -9,6 +24,10 @@ use std::time::{Duration, Instant};
 
 use crate::{Result, WombatError};
 
+/// Retained output, and whether the limit cut it short.
+///
+/// `truncated` matters because a caller that verifies output must not treat a
+/// clipped stream as the whole story.
 #[derive(Debug)]
 pub(crate) struct Captured {
     pub(crate) bytes: Vec<u8>,
@@ -32,6 +51,14 @@ pub(crate) struct ProcessOutcome {
     pub(crate) timed_out: bool,
 }
 
+/// Runs a command to completion and returns what it did.
+///
+/// Never inherits stdin — a build must not stop waiting for input nobody is
+/// there to type. `stdin` supplies bytes explicitly when a process needs them.
+///
+/// Returns `Err` only when the process could not be run or observed. A command
+/// that ran and failed is a successful observation with `success: false`, which
+/// leaves the caller to decide whether that is fatal.
 pub(crate) fn run(
     command: &mut Command,
     label: &str,
@@ -48,6 +75,9 @@ pub(crate) fn run(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Give the child its own process group so a timeout can signal the whole
+    // tree. Without this we would kill the shell and leave whatever it spawned
+    // running.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -70,6 +100,8 @@ pub(crate) fn run(
     };
     let stdout_attribution = attribution.clone();
     let stderr_attribution = attribution;
+    // Both pipes are drained on their own threads. Reading them in sequence
+    // would deadlock as soon as a process filled the pipe we were not reading.
     let stdout_thread =
         thread::spawn(move || read_bounded(stdout, output_limit, stdout_attribution));
     let stderr_thread =
@@ -92,6 +124,9 @@ pub(crate) fn run(
             break status;
         }
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            // SIGTERM the group first so children get a chance to exit, then
+            // kill the process we spawned. The `wait` that follows is what
+            // actually reaps it — skipping it would leave a zombie.
             terminate_process_group(process_id);
             let _ = child.kill();
             timed_out = true;
@@ -126,6 +161,13 @@ pub(crate) fn run(
     })
 }
 
+/// Runs a command with the terminal attached, for provider operations that must
+/// interact with the user.
+///
+/// This is how `sudo` and Homebrew reach the terminal to prompt for a password
+/// or show progress. Nothing is captured, so the returned outcome carries status
+/// only — use [`run`] whenever the output is evidence rather than a
+/// conversation.
 pub(crate) fn run_inherited(command: &mut Command, label: &str) -> Result<ProcessOutcome> {
     command
         .stdin(Stdio::inherit())
@@ -234,6 +276,17 @@ fn display_status(status: std::process::ExitStatus) -> String {
     status.to_string()
 }
 
+/// Runs `operation` with the process working directory changed, serialized
+/// against every other caller.
+///
+/// The working directory is process-global, so two embedded Lua actions running
+/// concurrently would otherwise see each other's directory. The lock makes that
+/// impossible, and the guard restores the previous directory on success, error,
+/// and panic alike.
+///
+/// A poisoned lock is recovered rather than propagated: the directory is
+/// restored by the guard regardless, so a panicking caller does not need to take
+/// the rest of the build down with it.
 pub(crate) fn with_working_directory<T>(
     directory: &Path,
     operation: impl FnOnce() -> Result<T>,

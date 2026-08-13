@@ -289,18 +289,38 @@ impl CoreRung {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// What happened to a rung or action, as recorded in the journal.
+///
+/// `Running` is written before the work starts, so a journal reopened with a
+/// `Running` entry means the previous run died partway. That is what
+/// distinguishes `Interrupted` from `Failed`: nobody recorded a failure, the
+/// process simply stopped existing.
 pub enum ExecutionStatus {
+    /// Not reached yet.
     Pending,
+    /// Started, and no outcome recorded. Reopening turns this into
+    /// `Interrupted`.
     Running,
     Succeeded,
+    /// Ran and reported failure. The reason is kept alongside.
     Failed,
+    /// Started but never completed, discovered by reopening the journal.
     Interrupted,
+    /// Deliberately not run — compile-only policy, or a schedule that was
+    /// already satisfied.
     Skipped,
+    /// Satisfied by a previous run's result rather than executed again.
     Reused,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// The operational record of one ladder execution.
+///
+/// Kept outside the product on purpose. Manifests are sealed at publication, so
+/// "what happened when this ran" lives here instead — which is why inspection
+/// combines the two, and reports execution state as unavailable when no journal
+/// exists rather than inventing an outcome.
 pub struct ExecutionJournal {
     pub format_version: u32,
     pub plan_id: String,

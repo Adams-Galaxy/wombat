@@ -1,3 +1,16 @@
+//! Human-readable views of sealed products and stored plans.
+//!
+//! Inspection opens and verifies a product; it never evaluates repository Lua.
+//! That is what lets it explain a product built last month, or on another
+//! machine, without the repository being in the state that produced it.
+//!
+//! These are deliberately human views rather than a second machine-readable
+//! schema — `manifest.json` is the product contract, and duplicating it here
+//! would create two things to keep in step.
+//!
+//! Where a view needs execution results, it combines the immutable manifest with
+//! the relevant journal. A product with no journal reports that execution state
+//! is unavailable rather than inventing an outcome.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};

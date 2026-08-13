@@ -203,6 +203,10 @@ fn execute(script: &Script, options: &ScriptExecutionOptions<'_>) -> Result<Scri
         }
     }
 
+    // State is keyed by project then by script, so two repositories cannot
+    // collide and one script's schedule cannot be mistaken for another's. The
+    // project component comes from the declared name when there is one, which is
+    // what lets state survive relocating a checkout.
     let identity = short_digest(&script.identity);
     let project = options
         .project_identity

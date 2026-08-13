@@ -1,3 +1,17 @@
+//! Requirement checking, authorization, and provider reconciliation.
+//!
+//! Modules declare products — a command or a package — and root configuration
+//! chooses which providers may satisfy them. Nothing here embeds a
+//! package-manager invocation in a module, which is what lets one repository
+//! serve macOS and Linux.
+//!
+//! Requirements carry a rung deadline, so they are satisfied at the point they
+//! are actually needed rather than all at the start. That decides how early a
+//! build fails: a tool only a task needs should not block everything before it.
+//!
+//! This module never prompts and never prints. It emits typed events and returns
+//! an authorization the CLI is responsible for obtaining, which is what keeps
+//! "nothing mutates before every decision is made" true.
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -159,6 +173,11 @@ impl BootstrapOutcome {
     }
 }
 
+/// Report whether this environment satisfies a product, mutating nothing.
+///
+/// Results are ephemeral by design: environment state is not part of build
+/// identity, so a check is a statement about this machine right now rather than
+/// something recorded into the product.
 pub fn check(build_dir: &Path) -> Result<CheckOutcome> {
     let opened = open_build(build_dir)?;
     let _environment_lock = EnvironmentLock::shared()?;
@@ -177,6 +196,11 @@ pub fn check_target_plan(build_dir: &Path, plan: &BuildPlan) -> Result<CheckOutc
     check_context(&RequirementContext::target_plan(plan, build_dir))
 }
 
+/// Collect authorization for every provider mutation a plan implies.
+///
+/// Returns what the caller must consent to before anything is installed. This
+/// module never prompts — obtaining consent is the CLI's job, which is what
+/// keeps library use non-interactive.
 pub fn authorize_target_plan(
     build_dir: &Path,
     plan: &BuildPlan,

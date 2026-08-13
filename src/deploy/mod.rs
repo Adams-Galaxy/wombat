@@ -1,3 +1,14 @@
+//! Deployment planning and the read-only half of the guarded workflow.
+//!
+//! Deployment is strictly two-phase, and this module owns the first phase:
+//! open and verify the product, acquire target state, compute the three-way
+//! reconciliation, collect warnings, and gather every conflict resolution.
+//! Nothing here mutates the host or the target.
+//!
+//! [`apply`] performs the second phase once every decision is settled. Keeping
+//! the split physical is what guarantees that declining a conflict leaves the
+//! machine untouched — there is no code path from planning to mutation that
+//! skips authorization.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
@@ -229,6 +240,11 @@ impl PreparedApply {
     }
 }
 
+/// Report what deployment would do, changing nothing.
+///
+/// Takes only a shared lock, so several inspections can run at once, and warns
+/// when a newer plan has been constructed but not materialised — the product
+/// being compared is then no longer the newest intent.
 pub fn diff(options: &DeploymentOptions) -> Result<DiffOutcome> {
     require_deployment_platform()?;
     let opened = open_build(&options.build_dir)?;
@@ -248,6 +264,14 @@ pub fn diff(options: &DeploymentOptions) -> Result<DiffOutcome> {
     Ok(DiffOutcome { plan, output })
 }
 
+/// Phase one: everything that can be decided without touching the machine.
+///
+/// Verifies the product, checks target compatibility, obtains requirement
+/// authorization, takes an exclusive lock, and computes the reconciliation. The
+/// returned value holds that lock, so the caller can resolve conflicts with the
+/// user and know the target has not moved underneath them.
+///
+/// Nothing here mutates the host or the target.
 pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     require_deployment_platform()?;
     let opened = open_build(&options.build_dir)?;
@@ -292,6 +316,10 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     })
 }
 
+/// Prepare and deploy in one call, resolving conflicts by `policy`.
+///
+/// The convenience form for callers with no user to ask. Interactive callers
+/// use [`prepare_apply`] and supply resolutions individually.
 pub fn apply(options: &DeploymentOptions, policy: ConflictPolicy) -> Result<ApplyOutcome> {
     let prepared = prepare_apply(options)?;
     let conflicts = prepared

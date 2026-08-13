@@ -1,3 +1,13 @@
+//! Last-applied target state: what Wombat believes it deployed, and the lock
+//! that protects it.
+//!
+//! This record is the third input to reconciliation, and the reason Wombat can
+//! remove an artifact it no longer declares without keeping a list of files it
+//! is allowed to delete.
+//!
+//! State is private, versioned, and held under a lock for the span of a
+//! deployment — including while the user is being asked about conflicts, so an
+//! answer cannot be invalidated between the question and the write.
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -92,6 +102,12 @@ pub(crate) enum LockMode {
 }
 
 #[derive(Debug)]
+/// An open, locked target-state record.
+///
+/// Holds its lock for as long as it lives. Deployment keeps the guard across
+/// conflict prompts on purpose: releasing it to ask a question would let another
+/// process change the target between the question and the answer, making the
+/// user's decision stale before it was acted on.
 pub(crate) struct TargetStateGuard {
     directory: PathBuf,
     state_path: PathBuf,

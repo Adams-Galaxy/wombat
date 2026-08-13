@@ -1,3 +1,13 @@
+//! Source fingerprints and directory snapshots.
+//!
+//! A fingerprint is what lets a rebuild decide whether a source actually
+//! changed. It combines content digest with the metadata that would change
+//! meaning, so touching a file without editing it does not invalidate a product
+//! and editing it always does.
+//!
+//! Directory snapshots are deterministic and ordered, which is what makes glob
+//! and directory selection reproducible: the same tree yields the same leaves in
+//! the same sequence on every machine.
 use std::fs;
 use std::path::{Component, Path};
 use std::time::SystemTime;

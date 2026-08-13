@@ -1,3 +1,12 @@
+//! Colour policy, log levels, and the event sink the CLI installs.
+//!
+//! Nothing in Wombat prints directly. Subsystems emit events through this module's sink,
+//! and only a caller that installed a sink sees them — which is what keeps
+//! library use silent and leaves the CLI owning every decision about colour,
+//! verbosity, and which stream output lands on.
+//!
+//! The sink is process-global and set once, so a library embedding Wombat gets
+//! no output at all unless it asks for it.
 use std::env;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::sync::OnceLock;

@@ -1,3 +1,10 @@
+//! Clap argument types and the CLI's own vocabulary.
+//!
+//! The composition root: this is where global options, per-command arguments,
+//! and their defaults live. Command behaviour is in [`commands`].
+//!
+//! Repository-defined inputs are kept in a separate namespace after `--`, so a
+//! repository can name an option `--target` without colliding with Wombat's own.
 use std::ffi::OsString;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;

@@ -1,3 +1,15 @@
+//! The frozen build plan: how it is derived, persisted, and identified.
+//!
+//! Construction evaluates Lua once and freezes the result here. The plan is the
+//! complete set of operations Wombat may perform — nothing can appear later
+//! because a condition changed at execution time, which is what makes
+//! `plan inspect` a real answer rather than a forecast.
+//!
+//! `plan_id` digests configuration content only. Where the repository sits on
+//! disk and which release built it are deliberately excluded, so the same
+//! configuration yields the same plan on any machine. Publication is staged and
+//! atomic for the same reason products are: a half-written plan must never be
+//! mistaken for a complete one.
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -99,6 +111,8 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         artifact_selections: desired.artifact_selections.clone(),
         artifacts,
     };
+    // Computed last, over the finished plan, so the identity covers every
+    // decision construction made rather than a partially assembled one.
     plan.plan_id = compute_id(&plan)?;
     Ok(plan)
 }
@@ -109,6 +123,9 @@ pub(crate) fn publish(
     plan: &BuildPlan,
     execution: &EvaluatedManifest,
 ) -> Result<()> {
+    // Staged in a sibling directory and renamed into place, for the same reason
+    // products are: an interrupted write must not leave a plan that looks
+    // complete. `plan.previous` keeps the old one until the swap succeeds.
     let internal = build_dir.join(".wombat");
     let staging = Builder::new()
         .prefix("plan-")

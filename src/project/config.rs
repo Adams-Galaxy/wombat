@@ -1,3 +1,12 @@
+//! User configuration: which repository to build, and which interpreters to use.
+//!
+//! Wombat never infers the repository from the working directory. Resolution has
+//! exactly three routes, in order: an explicit `--source`, the `repository` key
+//! here, then `~/.local/share/wombat`. [`describe_source`] reports which one
+//! applied, because "why is it building that?" is otherwise unanswerable.
+//!
+//! Writing this file preserves what the user wrote — only the `repository` line
+//! is rewritten, so comments and `[runners]` survive.
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;

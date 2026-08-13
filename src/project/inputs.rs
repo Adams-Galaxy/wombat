@@ -1,3 +1,13 @@
+//! Repository-declared build inputs: their schema, parsing, and help.
+//!
+//! Inputs are the repository's own command line, passed after `--` and kept in a
+//! namespace entirely separate from Wombat's options. That separation is why
+//! `wombat build --help` and `wombat build -- --help` are different things.
+//!
+//! Resolution happens before any module evaluates, so an unknown or malformed
+//! option fails before configuration has a chance to act on a half-resolved
+//! value. Resolved inputs are frozen into the manifest and feed build identity:
+//! two products built with different inputs are different products.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 

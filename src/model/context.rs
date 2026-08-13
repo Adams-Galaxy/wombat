@@ -1,3 +1,17 @@
+//! Observed host facts and the resolved deployment target.
+//!
+//! Operating-system identity is structured rather than a single string, so
+//! configuration can ask precise questions — major version, distribution id,
+//! kernel — instead of pattern-matching a name. [`LooseVersion`] compares what
+//! platforms actually report, which is not reliably semver.
+//!
+//! Only facts a configuration actually reads are recorded as observations and
+//! feed build identity. That is deliberate: a product should depend on the host
+//! details it consulted and no others, so an unrelated OS upgrade does not
+//! invalidate it.
+//!
+//! The target starts as a normalisation of the host and may be replaced once, by
+//! root configuration, before anything reads it.
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;

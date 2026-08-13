@@ -1,3 +1,13 @@
+//! Build-local caching of task results and rendered templates.
+//!
+//! Caches live inside the build directory and never enter the product, so a
+//! build with a warm cache is byte-identical to a cold one. That property is
+//! what makes the cache safe to discard at any time.
+//!
+//! Entries are keyed by everything that could change the output — inputs,
+//! params, runner identity, source digests — so a stale hit is a key collision
+//! rather than an expiry problem. Restoration verifies what it restores, and a
+//! corrupt entry is recomputed instead of trusted.
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

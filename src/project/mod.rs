@@ -1,3 +1,11 @@
+//! Repository configuration: `wombat.toml` and the policies it carries.
+//!
+//! This is the repository's own settings — artifact policy, log level, workflow
+//! reuse and freshness, and the optional project name — as distinct from the
+//! user's settings in `config`, which say which repository to use.
+//!
+//! Unknown keys are rejected rather than ignored, so a misspelled setting fails
+//! loudly instead of silently doing nothing.
 use std::fs;
 use std::path::Path;
 

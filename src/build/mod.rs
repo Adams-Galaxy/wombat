@@ -1,3 +1,20 @@
+//! Build workflow: workspace ownership, reuse decisions, and the root entry
+//! points.
+//!
+//! A build directory is an owned workspace, not a scratch folder. It carries a
+//! marker recording which source it belongs to, so Wombat refuses to reuse a
+//! workspace produced from somewhere else rather than mixing two products
+//! together. Unrelated files a user put there are left alone.
+//!
+//! Reuse is decided from content: when the configuration digests match a fresh
+//! existing product, the build is reused rather than repeated. That only holds
+//! because identity covers everything that could change the output, which is why
+//! the identity payload is listed explicitly rather than derived from the whole
+//! manifest.
+//!
+//! The heavy lifting lives in the children — `materialisation` executes the
+//! plan, `publication` swaps the result into place, `validation` decides whether
+//! a product can be trusted, and `cache` avoids repeating work.
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
@@ -128,8 +145,11 @@ impl BuildOptions {
         self
     }
 
-    /// Root workflows opt into provider reconciliation. Library callers can
-    /// construct exact products for inspection without mutating the host.
+    /// Opts into installing what the repository declares.
+    ///
+    /// Off by default so library callers can construct and inspect an exact
+    /// product without touching the host. Root workflows turn it on; nothing is
+    /// installed until the resulting plan is authorized.
     pub fn with_provider_reconciliation(mut self, reconcile: bool) -> Self {
         self.reconcile_requirements = reconcile;
         self
@@ -171,11 +191,21 @@ impl BuildOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// What a build did, beyond succeeding.
+///
+/// The distinction matters for reuse: `Unchanged` and `Reused` both mean nothing
+/// was rebuilt, but `Reused` means an existing fresh product satisfied the
+/// request without even re-running construction.
 pub enum BuildStatus {
+    /// No product was there before.
     Created,
+    /// A product was there, and its content changed.
     Updated,
+    /// Rebuilt to the same identity as the existing product.
     Unchanged,
+    /// A fresh matching product already existed, so nothing was rebuilt.
     Reused,
+    /// The existing product failed verification and was replaced.
     Repaired,
 }
 
@@ -272,6 +302,10 @@ enum CurrentProduct {
     Invalid,
 }
 
+/// Construct and materialise a product. Does not deploy.
+///
+/// Reuses an existing fresh product when the configuration closure still
+/// matches, so calling this repeatedly is cheap and idempotent.
 pub fn build(options: BuildOptions) -> Result<BuildOutcome> {
     if let Some(reused) = try_reuse_product(&options)? {
         return Ok(reused);
@@ -461,12 +495,21 @@ fn reusable_stored_plan(
         Ok(modified) => modified.elapsed().unwrap_or(std::time::Duration::MAX),
         Err(_) => return Ok(None),
     };
+    // Freshness is a cheap first gate, not the correctness one. A plan older
+    // than the window is discarded without inspecting it; a young one still has
+    // to prove its whole closure below.
     if age > crate::project::workflow_policy(&source_root)?.freshness {
         return Ok(None);
     }
+    // Every source the plan read must still hash the same. This is what makes
+    // reuse safe rather than a guess: an edit anywhere in the closure, including
+    // files a glob happened to match, means reconstruction.
     if validate_stored_plan_closure(&source_root, &plan, &desired).is_err() {
         return Ok(None);
     }
+    // Only the host facts this plan actually consulted are compared. Checking
+    // everything would discard plans over an unrelated OS detail; checking
+    // nothing would reuse a plan whose conditionals would now go the other way.
     let host = options.host.clone().map_or_else(HostContext::observe, Ok)?;
     if !observed_host_facts_match(&plan.observations, &host) {
         return Ok(None);
@@ -485,6 +528,11 @@ pub fn plan_or_reuse(options: BuildOptions) -> Result<PlanOutcome> {
 
 /// Materialise the exact plan previously written beneath `build_dir`.
 /// Configuration Lua is never evaluated by this operation.
+/// Execute the plan already stored beneath `build_dir`.
+///
+/// Configuration Lua is never evaluated here — that is the point of the split.
+/// What runs is exactly what `plan construct` froze and what `plan inspect`
+/// showed, with no opportunity for a decision to be remade.
 pub fn materialise(options: BuildOptions) -> Result<MaterialiseOutcome> {
     materialise_at(options.clone(), options.build_dir.clone())
 }
@@ -987,6 +1035,10 @@ fn frozen_value_at_path<'a>(
         })
 }
 
+/// Evaluate configuration once and persist the executable plan.
+///
+/// This is the only operation that runs repository Lua. Everything downstream
+/// consumes the frozen result.
 pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
     let source_root = fs::canonicalize(&options.source_root)
         .map_err(|error| WombatError::io(&options.source_root, error))?;
@@ -1082,6 +1134,11 @@ pub fn project_help_with_options(options: BuildOptions) -> Result<String> {
     }
 }
 
+/// Verify a published product against its manifest.
+///
+/// Checks format and construction versions, identity, and that the tree on disk
+/// is exactly what the manifest describes — no missing files, no extra ones, no
+/// symlinks, and matching modes. A product that fails this is not deployed.
 pub fn verify_build(build_dir: &Path) -> Result<VerifiedBuild> {
     let build_dir =
         fs::canonicalize(build_dir).map_err(|error| WombatError::io(build_dir, error))?;
@@ -1111,6 +1168,11 @@ pub fn verify_build(build_dir: &Path) -> Result<VerifiedBuild> {
     })
 }
 
+/// Open a verified product, holding a shared lock for as long as the returned
+/// value lives.
+///
+/// The lock is what stops a concurrent build republishing the product out from
+/// under a deployment that is midway through reading it.
 pub fn open_build(build_dir: &Path) -> Result<OpenedBuild> {
     let requested_build_dir =
         fs::canonicalize(build_dir).map_err(|error| WombatError::io(build_dir, error))?;

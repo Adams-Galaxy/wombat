@@ -1,3 +1,14 @@
+//! Target path validation and the rules for turning a declaration into a
+//! deployment path.
+//!
+//! Everything a repository can name eventually passes through here. Paths must
+//! stay relative, stay inside the target root, and mean the same thing on every
+//! machine — a manifest path is literal, and never consults the deploying
+//! machine's environment.
+//!
+//! Traversal, absolute paths, and Windows separators are refused rather than
+//! normalised away, because silently reinterpreting a path the user wrote is how
+//! a deployment ends up outside the directory they expected.
 use std::path::{Component, Path};
 
 use crate::model::manifest::{

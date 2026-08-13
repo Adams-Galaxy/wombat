@@ -104,6 +104,9 @@ fn execute_inner(
                 authorization,
             )?;
         }
+        // Recorded as Running before the work starts. If the process dies here,
+        // reopening the journal sees Running and reports Interrupted rather than
+        // silently treating unfinished work as never attempted.
         journal.set_id(&rung, ExecutionStatus::Running);
         crate::execution::ladder::write_at(&journal_path, &journal)?;
         crate::execution::script::check_runners(

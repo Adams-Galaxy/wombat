@@ -1,3 +1,14 @@
+//! Typed repository locators and safe Git acquisition.
+//!
+//! Shorthand expansion is deliberately narrow: a bare owner becomes that owner's
+//! GitHub `dotfiles`, `owner/name` becomes GitHub HTTPS, and `--ssh` changes
+//! only that expansion. Anything explicit — HTTPS, SSH, `git+`, `file://`, a
+//! local path — is used exactly as written.
+//!
+//! Acquisition reuses an existing checkout only when its origin matches, and
+//! never pulls, switches branches, changes remotes, or cleans a working tree.
+//! Setup runs on machines where the user may already have work in progress, and
+//! quietly moving their repository underneath them is not recoverable.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

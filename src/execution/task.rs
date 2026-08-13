@@ -1,3 +1,17 @@
+//! Task execution: artifact factories running in private workspaces.
+//!
+//! Tasks produce artifacts, which is what separates them from scripts. A task
+//! gets a private output directory, a work directory cleared before every run,
+//! and a cache that persists between runs, and whatever it leaves in `output`
+//! becomes an ordinary owned artifact.
+//!
+//! Runner inference — Python, POSIX shell, Bash, embedded Lua, or a direct
+//! executable — is resolved during construction and frozen, so materialisation
+//! never has to guess how to run something.
+//!
+//! Results are cached against everything that could change them, and restoration
+//! is verified. Caches stay inside the build directory, so a cached build and a
+//! cold build produce identical bytes.
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

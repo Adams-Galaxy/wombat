@@ -1,3 +1,24 @@
+//! The persisted product and plan schemas, and the version gates that guard
+//! them.
+//!
+//! `manifest.json` is the canonical product contract: every artifact, its
+//! provenance, the resolved target, the ladder, and the identities. Once
+//! published it is sealed — operational results belong in execution journals, so
+//! that inspecting a product tells you what it *is* rather than what has since
+//! happened to it.
+//!
+//! Two versions gate compatibility, and they mean different things.
+//! [`MANIFEST_FORMAT_VERSION`] and [`BUILD_PLAN_FORMAT_VERSION`] describe the
+//! wire shape. [`CONSTRUCTION_VERSION`] describes whether construction could
+//! produce different output for unchanged configuration — bump that one for a
+//! renderer fix or a selection change, even when the schema is untouched.
+//!
+//! The release version is recorded as provenance only. Publishing Wombat does
+//! not invalidate anyone's products; changing what construction produces does.
+//!
+//! There are no migrations. A version mismatch is refused with a message telling
+//! the user to rebuild, which is cheap because a product is reproducible from
+//! its repository.
 use serde::{Deserialize, Serialize};
 
 use crate::execution::ladder::{ExecutionLadder, RungId};
@@ -93,8 +114,13 @@ pub struct Manifest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Whether this product was built for the machine that built it.
 pub enum ExecutionMode {
+    /// Built for this host, with requirement gates reconciled normally.
     Normal,
+    /// Built for a different target. Provider reconciliation is skipped and the
+    /// skipped gates are recorded, so the product stays honest about not having
+    /// been reconciled — deploying one requires acknowledging that.
     CompileOnly,
 }
 
@@ -612,13 +638,21 @@ pub enum ScriptOutcomeStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// How a task or script is executed, resolved during construction.
+///
+/// An enum rather than a struct with an optional command, so "an interpreter
+/// with no command" cannot be represented at all. The wire form rejects unknown
+/// fields, so a manifest mixing variants is refused rather than silently taking
+/// the first thing that parses.
 pub enum TaskRunner {
-    EmbeddedLua {
-        contract_version: u32,
-    },
-    Direct {
-        contract_version: u32,
-    },
+    /// Wombat's embedded Lua. Runs in-process, serialized against other embedded
+    /// actions because it shares the process working directory.
+    EmbeddedLua { contract_version: u32 },
+    /// The entrypoint is executed directly, so it needs a shebang. macOS runs a
+    /// shebang-less text file under a shell; Linux returns `ENOEXEC`.
+    Direct { contract_version: u32 },
+    /// An interpreter runs the entrypoint. `command` may be configured by the
+    /// user's `[runners]` settings, which is how a project pins a virtualenv.
     Interpreter {
         contract_version: u32,
         family: InterpreterFamily,
