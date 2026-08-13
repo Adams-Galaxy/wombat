@@ -162,6 +162,19 @@ Copy one existing file or directory tree into source state and declare it. See
 `--target-root` sets the root the target path is derived from, defaulting to your
 home. `add` changes repository source only; it never writes to the target.
 
+### `completions <SHELL>`
+
+Print a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell`
+to stdout. For zsh:
+
+```sh
+wombat completions zsh > "${fpath[1]}/_wombat"
+```
+
+Any directory on `$fpath` works; pick one your shell already scans, then start
+a new shell. The script is generated from Wombat's own argument definitions,
+so it never drifts from `--help`.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -262,6 +262,18 @@ fn relative_xdg_and_missing_home_are_rejected() {
 }
 
 #[test]
+fn completions_prints_a_zsh_script_naming_wombat() {
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args(["completions", "zsh"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let script = String::from_utf8_lossy(&output.stdout);
+    assert!(script.starts_with("#compdef wombat"));
+    assert!(script.contains("_wombat"));
+}
+
+#[test]
 fn user_home_is_never_accepted_as_a_build_directory() {
     let fixture = CliFixture::new();
     let output = fixture.run(&[

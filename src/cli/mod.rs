@@ -10,6 +10,7 @@ use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::builder::styling;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 mod commands;
@@ -18,8 +19,54 @@ mod surface;
 
 pub(crate) use commands::run;
 
+/// Help styling, using the same colours as Wombat's own output so help and
+/// command output read as one product.
+///
+/// Applied only when colour is enabled — [`parse_cli`] resolves `--color`,
+/// `NO_COLOR`, and terminal detection before building the command, so these
+/// styles are never emitted into a pipe.
+const HELP_STYLES: styling::Styles = styling::Styles::styled()
+    .header(
+        styling::AnsiColor::Green
+            .on_default()
+            .effects(styling::Effects::BOLD.insert(styling::Effects::UNDERLINE)),
+    )
+    .usage(
+        styling::AnsiColor::Green
+            .on_default()
+            .effects(styling::Effects::BOLD),
+    )
+    // Literals are what you type: flags, subcommands, and values. Cyan is the
+    // colour Wombat already uses for paths in its output.
+    .literal(
+        styling::AnsiColor::Cyan
+            .on_default()
+            .effects(styling::Effects::BOLD),
+    )
+    .placeholder(styling::AnsiColor::Cyan.on_default())
+    .valid(
+        styling::AnsiColor::Cyan
+            .on_default()
+            .effects(styling::Effects::BOLD),
+    )
+    .invalid(
+        styling::AnsiColor::Yellow
+            .on_default()
+            .effects(styling::Effects::BOLD),
+    )
+    .error(
+        styling::AnsiColor::Red
+            .on_default()
+            .effects(styling::Effects::BOLD),
+    );
+
 #[derive(Debug, Parser)]
-#[command(name = "wombat", version, about = "A Lua-powered dotfiles compiler")]
+#[command(
+    name = "wombat",
+    version,
+    about = "A Lua-powered dotfiles compiler",
+    styles = HELP_STYLES
+)]
 struct Cli {
     /// Wombat source repository. Defaults to configured source or ~/.local/share/wombat.
     #[arg(short = 'S', long, global = true)]
@@ -176,6 +223,14 @@ enum Command {
         allow_host_scripts: bool,
         #[arg(last = true, allow_hyphen_values = true)]
         project_arguments: Vec<OsString>,
+    },
+    /// Print a shell completion script to stdout.
+    ///
+    /// Source it directly, or write it to the completions directory your
+    /// shell already scans (for zsh, any directory on `$fpath`).
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
     /// Check whether this local environment satisfies a completed build.
     Check {

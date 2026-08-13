@@ -358,6 +358,10 @@ pub(crate) fn run() -> ExitCode {
                 .with_requirement_authorization(outcome.requirement_authorization.take());
             apply_options(&options, effective_policy(conflict), stdout, stderr)
         })(),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "wombat", &mut io::stdout());
+            Ok(())
+        }
         Command::Check { build_dir, compile_only, project_arguments } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
             let planned = wombat::plan_or_reuse(with_log_level(
                 configured_build_options(&source_root, build_dir, project_arguments)?,

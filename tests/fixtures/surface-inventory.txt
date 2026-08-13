@@ -8,6 +8,7 @@ wombat apply [--allow-host-scripts --clean --conflict --rerun-scripts --target-r
 wombat build [--allow-host-scripts --clean --compile-only --rerun-scripts --yes -B/--build-dir project_arguments]
 wombat check [--compile-only -B/--build-dir project_arguments]
 wombat compare [products]
+wombat completions [shell]
 wombat config []
 wombat config set-source [path]
 wombat config show []
