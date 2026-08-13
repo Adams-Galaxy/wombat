@@ -254,7 +254,6 @@ struct IdentityPayload<'a> {
     process_observations: &'a [crate::model::manifest::ProcessObservation],
     modules: &'a [crate::model::manifest::ManifestModule],
     dependencies: &'a [crate::model::manifest::Dependency],
-    project_identity: &'a str,
     ladder: &'a crate::execution::ladder::ExecutionLadder,
     providers: &'a [crate::model::manifest::Provider],
     requirements: &'a [crate::model::manifest::Requirement],

@@ -793,7 +793,6 @@ pub(super) fn compute_build_id(manifest: &Manifest) -> Result<String> {
         process_observations: &manifest.process_observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
-        project_identity: &manifest.project_identity,
         ladder: &manifest.ladder,
         providers: &manifest.providers,
         requirements: &manifest.requirements,

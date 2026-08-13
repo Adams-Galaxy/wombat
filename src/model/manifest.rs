@@ -6,8 +6,8 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 15;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 6;
+pub const MANIFEST_FORMAT_VERSION: u32 = 16;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 7;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 

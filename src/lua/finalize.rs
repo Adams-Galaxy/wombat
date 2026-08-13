@@ -265,7 +265,15 @@ pub(super) fn build_manifest(
     let ladder = state.ladder.clone().unwrap_or_default();
     validate_ladder_actions(&ladder, &state.requirements, &state.tasks, &state.scripts)?;
     let requirements = normalize_requirements(state.requirements.clone(), &ladder)?;
-    let project_identity = digest_bytes(state.root.to_string_lossy().as_bytes());
+    // Namespaces persistent script scheduling state per checkout; deliberately
+    // excluded from plan and build identity so the same configuration produces
+    // the same product wherever it is built. Canonicalized so a symlinked path
+    // does not orphan that state.
+    let root = state
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| state.root.clone());
+    let project_identity = digest_bytes(root.to_string_lossy().as_bytes());
     Ok(EvaluatedManifest {
         plan_id: String::new(),
         project_arguments: state

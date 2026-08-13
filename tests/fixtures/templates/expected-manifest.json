@@ -1,6 +1,8 @@
 {
-  "format_version": 15,
+  "format_version": 16,
   "wombat_version": "0.1.0",
+  "build_id": "sha256:3cb136ae2eb14b1ae7788b5aace671717fbc7a4d69553ae89d4c38ac0d6cfaf4",
+  "plan_id": "sha256:48c8b56ccfed8d5f684cb2a5bf2c3130f73a8c22da5a895864f9a8d3a20f072b",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
