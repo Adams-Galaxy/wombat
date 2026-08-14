@@ -34,7 +34,12 @@ Rendering uses a versioned contract called `handlebars-v1`, backed by full
 Handlebars: interpolation, `if`/`unless`/`each`/`with` (including `else`
 blocks), comments, raw blocks, whitespace control, the built-in comparison and
 logic helpers (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `and`, `or`, `not`, `len`),
-`lookup`, `log`, subexpressions, and inline partials/decorators.
+`lookup`, `log`, subexpressions, and inline partials/decorators, plus one
+Wombat-specific addition: `coalesce`, which returns the first param that
+is neither missing nor null, rendered with ordinary Handlebars interpolation
+semantics. It is a value-returning fallback, not `or`'s boolean result:
+`false`, `0`, and `""` are deliberate values and therefore win. Calling it
+without arguments, or with only missing/null arguments, is an error.
 
 Two things stay deliberately stricter than stock Handlebars, on every
 construct that resolves a value — plain interpolation, `if`/`unless`
@@ -56,6 +61,8 @@ shell = "{{shell}}"
 {{#if (eq shell "zsh")}}
 default_shell = "{{shell}}"
 {{/if}}
+
+border_color = "{{coalesce tmux.border.color generic.border.color palette.bright_black}}"
 ```
 
 ## Whitespace

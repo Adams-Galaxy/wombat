@@ -44,15 +44,29 @@ impl Guard {
     /// holding the lock is ordinary contention the user can act on, whereas a
     /// genuine `Error` means the filesystem could not lock at all.
     pub(crate) fn try_acquire(file: File, path: &Path, mode: Mode) -> Result<Self> {
+        Self::try_acquire_with(
+            file,
+            path,
+            mode,
+            format!(
+                "state at `{}` is in use by another Wombat process",
+                path.display()
+            ),
+        )
+    }
+
+    pub(crate) fn try_acquire_with(
+        file: File,
+        path: &Path,
+        mode: Mode,
+        busy_message: impl Into<String>,
+    ) -> Result<Self> {
         let result = match mode {
             Mode::Shared => file.try_lock_shared(),
             Mode::Exclusive => file.try_lock(),
         };
         result.map_err(|error| match error {
-            TryLockError::WouldBlock => WombatError::conflict(format!(
-                "state at `{}` is in use by another Wombat process",
-                path.display()
-            )),
+            TryLockError::WouldBlock => WombatError::conflict(busy_message.into()),
             TryLockError::Error(error) => WombatError::io(path, error),
         })?;
         Ok(Self {

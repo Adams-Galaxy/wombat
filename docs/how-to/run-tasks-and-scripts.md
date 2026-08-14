@@ -76,6 +76,9 @@ Schedules:
 
 `--rerun-scripts` forces scheduled scripts without deleting their state, which is
 what you want when something failed halfway and you'd rather not reason about it.
+`--skip-scripts` takes the opposite path: Wombat does not resolve script
+runners, prepare scheduling state, or execute scripts at all. Build tasks still
+run. The two flags conflict, so contradictory intent fails at argument parsing.
 
 Scripts get a private persistent cache, a fresh work directory, and their frozen
 payload. Their output is forwarded live, attributed to the script, so a slow one
@@ -132,6 +135,10 @@ Afterwards, the execution journal records what actually happened:
 wombat inspect ladder
 wombat inspect scripts
 ```
+
+When requirements or scripts are explicitly skipped, the same journal records
+the skipped rung/action and its reason. Inspection therefore distinguishes an
+intentional fast path from work that silently disappeared.
 
 ## Remember they're trusted code
 

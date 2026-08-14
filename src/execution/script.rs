@@ -177,6 +177,15 @@ pub(crate) fn execute_at(
     rung: &RungId,
     options: &ScriptExecutionOptions<'_>,
 ) -> Result<Vec<ScriptOutcome>> {
+    if options.run_scripts {
+        check_runners(
+            &scripts
+                .iter()
+                .filter(|script| &script.at == rung)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?;
+    }
     let mut outcomes = Vec::new();
     for script in scripts.iter().filter(|script| &script.at == rung) {
         outcomes.push(execute(script, options)?);

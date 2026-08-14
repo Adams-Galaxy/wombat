@@ -1,6 +1,7 @@
 //! Artifact materialisation, template rendering, and deterministic product identity.
 
 use super::*;
+use std::fs::File;
 
 pub(super) fn materialise_product(
     source_root: &Path,
@@ -363,6 +364,7 @@ fn render_and_hash(
         "unless",
         Box::new(StrictConditionalHelper::new("unless", false)),
     );
+    renderer.register_helper("coalesce", Box::new(CoalesceHelper));
     let template = handlebars::Template::compile(template_source)
         .map_err(|error| template_compile_error(source_name, template_source, error))?;
     renderer.register_template(source_name, template);
@@ -492,6 +494,40 @@ impl handlebars::HelperDef for StrictConditionalHelper {
         template.map_or(Ok(()), |template| {
             handlebars::Renderable::render(template, renderer, context, render_context, output)
         })
+    }
+}
+
+/// Missing and null values fall through, while deliberate falsy values win.
+/// Without this distinction an empty string chosen by configuration would be
+/// silently replaced by a fallback intended only for absent data.
+struct CoalesceHelper;
+
+impl handlebars::HelperDef for CoalesceHelper {
+    fn call<'reg: 'rc, 'rc>(
+        &self,
+        helper: &handlebars::Helper<'rc>,
+        _renderer: &'reg handlebars::Handlebars<'reg>,
+        _context: &'rc handlebars::Context,
+        _render_context: &mut handlebars::RenderContext<'reg, 'rc>,
+        output: &mut dyn handlebars::Output,
+    ) -> handlebars::HelperResult {
+        let params = helper.params();
+        if params.is_empty() {
+            return Err(handlebars::RenderErrorReason::ParamNotFoundForIndex("coalesce", 0).into());
+        }
+        match params
+            .iter()
+            .find(|param| !param.is_value_missing() && !param.value().is_null())
+        {
+            Some(resolved) => {
+                use handlebars::JsonRender;
+                output.write(&resolved.value().render())?;
+                Ok(())
+            }
+            None => Err(handlebars::RenderError::strict_error(
+                params[params.len() - 1].relative_path(),
+            )),
+        }
     }
 }
 

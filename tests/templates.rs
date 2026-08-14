@@ -173,7 +173,7 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
 }
 
 #[test]
-fn template_fixture_matches_exact_manifest_v17_and_rendered_tree() {
+fn template_fixture_matches_exact_manifest_and_rendered_tree() {
     let root = fixture("templates");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
@@ -341,6 +341,39 @@ fn handlebars_supports_policy_helpers_lookup_logging_and_partials() {
             "source {source:?}"
         );
     }
+}
+
+#[test]
+fn coalesce_skips_missing_and_null_but_preserves_deliberate_falsy_values() {
+    let repository = basic_repository(
+        "local w = require('wombat')\nw.install('value.tmpl', { with = { nothing = w.null, no = false, zero = 0, empty = '', values = { 'a' }, object = { key = 'value' }, generic = { border = '#928374' } } })\n",
+        "value.tmpl",
+        "{{coalesce missing.path nothing generic.border}}|{{coalesce missing.path no generic.border}}|{{coalesce missing.path zero generic.border}}|{{coalesce missing.path empty generic.border}}|{{coalesce missing.path values generic.border}}|{{coalesce missing.path object generic.border}}\n",
+    );
+    repository.build().unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/.config/value")).unwrap(),
+        "#928374|false|0||[a]|[object]\n"
+    );
+}
+
+#[test]
+fn coalesce_rejects_no_params_and_an_exhausted_fallback_chain() {
+    let repository = basic_repository(
+        "local w = require('wombat')\nw.install('value.tmpl', { with = { nothing = w.null } })\n",
+        "value.tmpl",
+        "{{coalesce missing.path nothing also.missing}}\n",
+    );
+    let error = repository.build().unwrap_err().to_string();
+    assert!(error.contains("also"), "{error}");
+
+    let repository = basic_repository(
+        "local w = require('wombat')\nw.install('value.tmpl')\n",
+        "value.tmpl",
+        "{{coalesce}}\n",
+    );
+    let error = repository.build().unwrap_err().to_string();
+    assert!(error.contains("coalesce"), "{error}");
 }
 
 #[test]

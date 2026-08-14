@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Result, WombatError};
 
+const ARRAY_MARKER: &str = "__wombat_array";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FrozenValue {
@@ -63,37 +65,18 @@ impl FrozenValue {
             .collect::<mlua::Result<Vec<_>>>()
             .map_err(WombatError::from)?;
 
-        let result = if pairs.is_empty() {
+        let marked_array = table
+            .metatable()
+            .is_some_and(|metatable| metatable.raw_get::<bool>(ARRAY_MARKER).unwrap_or(false));
+        let result = if marked_array {
+            Self::freeze_array_pairs(pairs, active_tables)
+        } else if pairs.is_empty() {
             Ok(Self::empty_map())
         } else if pairs
             .iter()
             .all(|(key, _)| matches!(key, Value::Integer(value) if *value > 0))
         {
-            let mut indexed = pairs
-                .into_iter()
-                .map(|(key, value)| match key {
-                    Value::Integer(index) => Ok((index, value)),
-                    _ => unreachable!("array keys were checked above"),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            indexed.sort_by_key(|(index, _)| *index);
-
-            for (offset, (index, _)) in indexed.iter().enumerate() {
-                let expected = i64::try_from(offset + 1).map_err(|_| {
-                    WombatError::configuration("Lua array is too large to represent")
-                })?;
-                if *index != expected {
-                    return Err(WombatError::configuration(
-                        "sparse Lua arrays cannot cross the native boundary",
-                    ));
-                }
-            }
-
-            let values = indexed
-                .into_iter()
-                .map(|(_, value)| Self::freeze(value, active_tables))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Self::Array(values))
+            Self::freeze_array_pairs(pairs, active_tables)
         } else if pairs.iter().all(|(key, _)| matches!(key, Value::String(_))) {
             let mut values = BTreeMap::new();
             for (key, value) in pairs {
@@ -114,6 +97,38 @@ impl FrozenValue {
         result
     }
 
+    fn freeze_array_pairs(
+        pairs: Vec<(Value, Value)>,
+        active_tables: &mut HashSet<usize>,
+    ) -> Result<Self> {
+        let mut indexed = pairs
+            .into_iter()
+            .map(|(key, value)| match key {
+                Value::Integer(index) if index > 0 => Ok((index, value)),
+                _ => Err(WombatError::configuration(
+                    "Lua arrays must contain only contiguous positive integer keys",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        indexed.sort_by_key(|(index, _)| *index);
+
+        for (offset, (index, _)) in indexed.iter().enumerate() {
+            let expected = i64::try_from(offset + 1)
+                .map_err(|_| WombatError::configuration("Lua array is too large to represent"))?;
+            if *index != expected {
+                return Err(WombatError::configuration(
+                    "sparse Lua arrays cannot cross the native boundary",
+                ));
+            }
+        }
+
+        indexed
+            .into_iter()
+            .map(|(_, value)| Self::freeze(value, active_tables))
+            .collect::<Result<Vec<_>>>()
+            .map(Self::Array)
+    }
+
     pub fn to_lua(&self, lua: &Lua) -> mlua::Result<Value> {
         match self {
             Self::Null => Ok(Value::NULL),
@@ -126,6 +141,7 @@ impl FrozenValue {
                 for (offset, value) in values.iter().enumerate() {
                     table.raw_set(offset + 1, value.to_lua(lua)?)?;
                 }
+                mark_lua_array(lua, &table)?;
                 Ok(Value::Table(table))
             }
             Self::Map(values) => {
@@ -137,6 +153,13 @@ impl FrozenValue {
             }
         }
     }
+}
+
+pub(crate) fn mark_lua_array(lua: &Lua, table: &Table) -> mlua::Result<()> {
+    let metatable = lua.create_table()?;
+    metatable.raw_set(ARRAY_MARKER, true)?;
+    metatable.raw_set("__metatable", false)?;
+    table.set_metatable(Some(metatable))
 }
 
 #[cfg(test)]
@@ -215,5 +238,16 @@ mod tests {
         let second = frozen.to_lua(&lua).unwrap();
 
         assert_ne!(first.to_pointer(), second.to_pointer());
+    }
+
+    #[test]
+    fn thawed_empty_arrays_keep_their_shape_when_frozen_again() {
+        let lua = Lua::new();
+        let thawed = FrozenValue::Array(Vec::new()).to_lua(&lua).unwrap();
+
+        assert_eq!(
+            FrozenValue::from_lua(thawed).unwrap(),
+            FrozenValue::Array(Vec::new())
+        );
     }
 }

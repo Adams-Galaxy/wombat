@@ -9,9 +9,10 @@
 //! a table it will mutate later, which is what makes a recorded declaration
 //! trustworthy.
 //!
-//! Each API subsystem gets a narrow view of the evaluation state rather than
-//! unrestricted access, so it is clear which parts of a build any given
-//! declaration can affect.
+//! API subsystems share one construction state because their declarations
+//! jointly compile one coherent plan. Module boundaries describe ownership of
+//! the API surface; freezing, validation, and the passive construction phase
+//! are what prevent declarations from mutating execution behind the plan.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

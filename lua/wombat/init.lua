@@ -43,16 +43,35 @@ end
 wombat.host = native.host_context()
 wombat.target = native.target_context()
 wombat.paths = { repository = native.repository_path }
-wombat.data = {}
+wombat.null = native.null
 
-function wombat.data.toml(path)
-    if type(path) ~= "string" then error("w.data.toml() requires a string path", 2) end
-    return native.toml_data(path)
+function wombat.array(value)
+    if value ~= nil and type(value) ~= "table" then
+        error("w.array() requires a table when a value is provided", 2)
+    end
+    return native.array(value)
 end
 
-function wombat.data.json(path)
-    if type(path) ~= "string" then error("w.data.json() requires a string path", 2) end
-    return native.json_data(path)
+wombat.json = {}
+
+function wombat.json.decode(path)
+    if type(path) ~= "string" then error("w.json.decode() requires a string path", 2) end
+    return native.json_decode(path)
+end
+
+function wombat.json.encode(value)
+    return native.json_encode(value)
+end
+
+wombat.toml = {}
+
+function wombat.toml.decode(path)
+    if type(path) ~= "string" then error("w.toml.decode() requires a string path", 2) end
+    return native.toml_decode(path)
+end
+
+function wombat.toml.encode(value)
+    return native.toml_encode(value)
 end
 
 function wombat.exec(argv, options)

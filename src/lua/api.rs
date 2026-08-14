@@ -177,21 +177,56 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
         repository_root.to_string_lossy().to_string(),
     )?;
 
-    let toml_data_state = Rc::clone(&state);
+    let toml_decode_state = Rc::clone(&state);
     native.set(
-        "toml_data",
+        "toml_decode",
         lua.create_function(move |lua, path: String| {
-            let location = caller_location(lua, &toml_data_state);
-            read_toml_data(lua, &toml_data_state, &path, location).map_err(mlua::Error::external)
+            let location = caller_location(lua, &toml_decode_state);
+            read_toml_data(lua, &toml_decode_state, &path, location).map_err(mlua::Error::external)
         })?,
     )?;
 
-    let json_data_state = Rc::clone(&state);
+    let json_decode_state = Rc::clone(&state);
     native.set(
-        "json_data",
+        "json_decode",
         lua.create_function(move |lua, path: String| {
-            let location = caller_location(lua, &json_data_state);
-            read_json_data(lua, &json_data_state, &path, location).map_err(mlua::Error::external)
+            let location = caller_location(lua, &json_decode_state);
+            read_json_data(lua, &json_decode_state, &path, location).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    native.set(
+        "toml_encode",
+        lua.create_function(|_, value: Value| {
+            encode_toml_data(value).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    native.set(
+        "json_encode",
+        lua.create_function(|_, value: Value| {
+            encode_json_data(value).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    native.set("null", Value::NULL)?;
+    native.set(
+        "array",
+        lua.create_function(|lua, value: Option<Table>| {
+            let table = value.map_or_else(|| lua.create_table(), Ok)?;
+            match FrozenValue::from_lua(Value::Table(table.clone()))
+                .map_err(mlua::Error::external)?
+            {
+                FrozenValue::Array(_) => {}
+                FrozenValue::Map(values) if values.is_empty() => {}
+                _ => {
+                    return Err(mlua::Error::external(WombatError::configuration(
+                        "w.array() requires a contiguous positive-integer-keyed table",
+                    )));
+                }
+            }
+            crate::model::frozen::mark_lua_array(lua, &table)?;
+            Ok(table)
         })?,
     )?;
 
@@ -268,9 +303,10 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
     Ok(native)
 }
 
-/// Loads and tracks the source behind a `w.data.*` read. `FrozenValue`
-/// already deserializes generically, so every format shares this one safety
-/// and provenance path rather than each growing its own.
+/// Loads and tracks the source behind a `w.json.decode()`/`w.toml.decode()`
+/// read. `FrozenValue` already deserializes generically, so every format
+/// shares this one safety and provenance path rather than each growing its
+/// own.
 fn read_data_source(
     state: &Rc<RefCell<RuntimeState>>,
     declared: &str,
@@ -299,7 +335,7 @@ pub(super) fn read_toml_data(
     declared: &str,
     location: Location,
 ) -> Result<Value> {
-    let source = read_data_source(state, declared, "w.data.toml()", &location)?;
+    let source = read_data_source(state, declared, "w.toml.decode()", &location)?;
     let value: FrozenValue = toml::from_str(&source).map_err(|error| {
         WombatError::configuration(format!(
             "failed to parse TOML data `{declared}` at {}: {error}",
@@ -315,7 +351,7 @@ pub(super) fn read_json_data(
     declared: &str,
     location: Location,
 ) -> Result<Value> {
-    let source = read_data_source(state, declared, "w.data.json()", &location)?;
+    let source = read_data_source(state, declared, "w.json.decode()", &location)?;
     let value: FrozenValue = serde_json::from_str(&source).map_err(|error| {
         WombatError::configuration(format!(
             "failed to parse JSON data `{declared}` at {}: {error}",
@@ -323,6 +359,48 @@ pub(super) fn read_json_data(
         ))
     })?;
     Ok(value.to_lua(lua)?)
+}
+
+fn encode_toml_data(value: Value) -> Result<String> {
+    let frozen = FrozenValue::from_lua(value)?;
+    if !matches!(frozen, FrozenValue::Map(_)) {
+        return Err(WombatError::configuration(
+            "w.toml.encode() requires a string-keyed table at the document root",
+        ));
+    }
+    reject_toml_null(&frozen, "root")?;
+    toml::to_string_pretty(&frozen)
+        .map_err(|error| WombatError::configuration(format!("failed to encode TOML data: {error}")))
+}
+
+fn encode_json_data(value: Value) -> Result<String> {
+    let frozen = FrozenValue::from_lua(value)?;
+    serde_json::to_string_pretty(&frozen)
+        .map_err(|error| WombatError::configuration(format!("failed to encode JSON data: {error}")))
+}
+
+fn reject_toml_null(value: &FrozenValue, path: &str) -> Result<()> {
+    match value {
+        FrozenValue::Null => Err(WombatError::configuration(format!(
+            "w.toml.encode() cannot encode null at `{path}` because TOML has no null value"
+        ))),
+        FrozenValue::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                reject_toml_null(value, &format!("{path}[{}]", index + 1))?;
+            }
+            Ok(())
+        }
+        FrozenValue::Map(values) => {
+            for (key, value) in values {
+                reject_toml_null(value, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        FrozenValue::Boolean(_)
+        | FrozenValue::Integer(_)
+        | FrozenValue::Number(_)
+        | FrozenValue::String(_) => Ok(()),
+    }
 }
 
 pub(super) fn emit_lua_log(

@@ -216,6 +216,7 @@ pub struct PreparedApply {
     state_root: PathBuf,
     target_root: PathBuf,
     clean: bool,
+    requirements_manually_skipped: bool,
     run_scripts: bool,
     rerun_scripts: bool,
     allow_host_scripts: bool,
@@ -335,6 +336,8 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
         state_root,
         target_root: options.target_root.clone(),
         clean: options.clean,
+        requirements_manually_skipped: options.reconcile_requirements
+            && !options.check_requirements,
         run_scripts: options.run_scripts,
         rerun_scripts: options.rerun_scripts,
         allow_host_scripts: options.allow_host_scripts,

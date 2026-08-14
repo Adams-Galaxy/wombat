@@ -836,7 +836,17 @@ fn cli_namespace_boundary_keeps_project_options_out_of_wombat_parsing() {
     );
 
     for command in ["add", "diff", "apply"] {
-        let output = run_wombat(&[command, "--", "--theme", "light"], &repository.root);
+        let output = run_wombat(
+            &[
+                "--source",
+                repository.root.to_str().unwrap(),
+                command,
+                "--",
+                "--theme",
+                "light",
+            ],
+            &repository.root,
+        );
         assert!(
             !output.status.success(),
             "{command} unexpectedly accepted project inputs"

@@ -56,8 +56,13 @@ avoid the cost of a package check or a script run. `--skip-requirements`
 skips checking packages and commands against the host; unlike
 `--compile-only`, a cached product from a prior full build is still reused.
 `--skip-scripts` skips every `w.script` entry; `w.build.task` entries still
-run, since they produce artifacts the build depends on. Both default to off
-— nothing is skipped unless asked for.
+run, since they produce artifacts the build depends on. Skipped scripts do not
+resolve or validate runners, prepare scheduling state, or start processes.
+`--skip-scripts` conflicts with `--rerun-scripts` because a script cannot be
+both suppressed and forced. Both skip controls default to off — nothing is
+skipped unless asked for. Requirement skips are recorded as skipped gates and
+actions in the execution journal, so `inspect timeline` explains what was not
+checked rather than making the omission invisible.
 
 ### `plan construct | materialise | inspect | deploy`
 

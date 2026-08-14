@@ -119,7 +119,7 @@ enum Command {
         #[arg(long)]
         skip_requirements: bool,
         /// Skip `w.script` entries; `w.build.task` entries are unaffected.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rerun_scripts")]
         skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
@@ -207,7 +207,7 @@ enum Command {
         #[arg(long)]
         skip_requirements: bool,
         /// Skip `w.script` entries; `w.build.task` entries are unaffected.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rerun_scripts")]
         skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
@@ -233,7 +233,7 @@ enum Command {
         #[arg(long)]
         skip_requirements: bool,
         /// Skip `w.script` entries; `w.build.task` entries are unaffected.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rerun_scripts")]
         skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
@@ -350,7 +350,7 @@ enum PlanCommand {
         #[arg(long)]
         skip_requirements: bool,
         /// Skip `w.script` entries; `w.build.task` entries are unaffected.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rerun_scripts")]
         skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
@@ -382,7 +382,7 @@ enum PlanCommand {
         #[arg(long)]
         skip_requirements: bool,
         /// Skip `w.script` entries; `w.build.task` entries are unaffected.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rerun_scripts")]
         skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,

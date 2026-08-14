@@ -704,6 +704,20 @@ exit 9
         "skipping requirement checks must not disable reuse of the fresh product: {}",
         String::from_utf8_lossy(&second.stdout)
     );
+    let journal = wombat::ladder::read(&build_dir).unwrap();
+    assert_eq!(journal.skipped_requirement_gates, ["materialise.before"]);
+    assert!(journal.actions.iter().any(|action| {
+        action.identity == "requirements:check"
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+            && action.reason.contains("--skip-requirements")
+    }));
+    let timeline = run(&["inspect", "timeline"]);
+    assert!(timeline.status.success());
+    let timeline = String::from_utf8_lossy(&timeline.stdout);
+    assert!(
+        timeline.contains("requirements:check") && timeline.contains("skipped"),
+        "inspection must surface the skipped requirement action: {timeline}"
+    );
 
     let third = run(&["build"]);
     assert!(

@@ -13,7 +13,7 @@ fn construction_processes_toml_and_logs_are_tracked_without_raw_output() {
     fs::write(
         source.join("wombat.lua"),
         r#"local w = require('wombat')
-local data = w.data.toml('packages.toml')
+local data = w.toml.decode('packages.toml')
 local direct = w.exec({ 'sh', '-c', 'printf direct; printf err >&2' }, { env = { REMOVE_ME = false } })
 assert(direct:check().stdout == 'direct')
 local shell = w.shell('printf shell | tr a-z A-Z')

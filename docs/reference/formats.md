@@ -40,6 +40,8 @@ and never re-evaluates Lua.
 per-action status, timing, and failure detail. Kept separate from the manifest so
 products stay immutable; inspection combines the two. If no journal exists,
 inspection says execution state is unavailable rather than inventing it.
+Explicitly skipped requirement gates and script actions are recorded here with
+their reason; skip controls never rewrite the sealed manifest.
 
 **Target state** — Wombat's record of what it last deployed to a given target
 root, which is what makes three-way reconciliation possible. Private, locked

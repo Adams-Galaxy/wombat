@@ -12,18 +12,18 @@
 //! the identity payload is listed explicitly rather than derived from the whole
 //! manifest.
 //!
-//! The heavy lifting lives in the children — `materialisation` executes the
-//! plan, `publication` swaps the result into place, `validation` decides whether
-//! a product can be trusted, and `cache` avoids repeating work.
+//! The heavy lifting lives in the children: `workspace` owns safe locations and
+//! locks, `materialisation` executes the plan, `publication` swaps results,
+//! `product` opens stable verified views, `validation` decides what can be
+//! trusted, and `cache` avoids repeating derivations.
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
 
@@ -44,24 +44,28 @@ use crate::{Result, WombatError};
 
 pub(crate) mod cache;
 mod materialisation;
+mod product;
 mod publication;
 mod validation;
+mod workspace;
 
-use materialisation::{
-    executable_intent, materialise_product, revalidate_sources, write_json_atomic,
-};
+use materialisation::{executable_intent, materialise_product, revalidate_sources};
+pub use product::{OpenedBuild, VerifiedBuild, open_build, verify_build};
 use publication::{
     clear_directory_contents, ensure_plain_directory, ensure_plain_file,
     ensure_plain_file_or_missing, inspect_product, publish, recover_publication,
 };
 use validation::verify_product;
 pub(crate) use validation::{validate_artifact_metadata, validate_manifest};
+use workspace::{
+    acquire_build_lock, clean_transient_workspace, ensure_workspace_marker,
+    prepare_workspace_directory, resolve_maybe_missing, validate_build_location,
+};
 
 fn digest_string(bytes: impl AsRef<[u8]>) -> String {
     crate::storage::digest::prefixed_hex(bytes)
 }
 
-const WORKSPACE_FORMAT_VERSION: u32 = 1;
 const WOMBAT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TEMPLATE_RENDERER_NAME: &str = "handlebars";
 const TEMPLATE_CONTRACT_VERSION: u32 = 1;
@@ -268,36 +272,6 @@ pub struct PlanOutcome {
 /// no evaluated Lua state: callers can only materialise the private plan bundle.
 pub type MaterialiseOutcome = BuildOutcome;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct VerifiedBuild {
-    pub build_dir: PathBuf,
-    pub manifest: Manifest,
-}
-
-#[derive(Debug)]
-pub struct OpenedBuild {
-    pub requested_build_dir: PathBuf,
-    pub product_dir: PathBuf,
-    pub manifest: Manifest,
-    _lock: Option<File>,
-    _snapshot: Option<tempfile::TempDir>,
-}
-
-impl Drop for OpenedBuild {
-    fn drop(&mut self) {
-        if let Some(lock) = &self._lock {
-            let _ = File::unlock(lock);
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceMarker {
-    format_version: u32,
-    source_root: String,
-}
-
 #[derive(Serialize)]
 struct IdentityPayload<'a> {
     format_version: u32,
@@ -360,8 +334,13 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
         .write(true)
         .open(&lock_path)
         .map_err(|error| WombatError::io(&lock_path, error))?;
-    acquire_exclusive(&lock, &build_dir)?;
-    let result = (|| {
+    let _lock = acquire_build_lock(
+        lock,
+        &lock_path,
+        &build_dir,
+        crate::storage::locking::Mode::Exclusive,
+    )?;
+    (|| {
         let manifest = match verify_product(&build_dir) {
             Ok(manifest) => manifest,
             Err(_) => return Ok(None),
@@ -382,9 +361,29 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
             crate::execution::ladder::CoreRung::MaterialiseAfter,
             &plan.ladder,
         );
-        journal.configure(execution_mode, Vec::new());
+        let manual_requirement_skips = if !options.compile_only
+            && options.reconcile_requirements
+            && !options.check_requirements
+        {
+            materialise_requirement_gates(&plan)
+        } else {
+            Vec::new()
+        };
+        let mut journal_skips = manifest.skipped_requirement_gates.clone();
+        journal_skips.extend(manual_requirement_skips.iter().cloned());
+        journal_skips.sort();
+        journal_skips.dedup();
+        journal.configure(execution_mode, journal_skips);
         journal.build_id = Some(manifest.build_id.clone());
         journal.record_reuse("product");
+        if !manual_requirement_skips.is_empty() {
+            journal.record_action(
+                "requirements:check",
+                &crate::execution::ladder::CoreRung::MaterialiseBefore.into(),
+                crate::execution::ladder::ExecutionStatus::Skipped,
+                "requirement checking skipped by --skip-requirements",
+            );
+        }
         let mut authorization = None;
         if options.reconcile_requirements
             && options.check_requirements
@@ -414,10 +413,14 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
             );
             authorization = Some(outcome);
         }
-        let state_root = options
-            .script_state_root
-            .clone()
-            .map_or_else(crate::execution::script::materialise_state_root, Ok)?;
+        let state_root = if options.run_scripts {
+            options
+                .script_state_root
+                .clone()
+                .map_or_else(crate::execution::script::materialise_state_root, Ok)?
+        } else {
+            PathBuf::new()
+        };
         for rung in crate::execution::runner::ExecutionRange::through(
             &plan.ladder,
             crate::execution::ladder::CoreRung::MaterialiseAfter,
@@ -428,13 +431,6 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
                     &build_dir, &plan, &rung, approved,
                 )?;
             }
-            let scripts = plan
-                .scripts
-                .iter()
-                .filter(|script| script.at == rung)
-                .cloned()
-                .collect::<Vec<_>>();
-            crate::execution::script::check_runners(&scripts)?;
             let outcomes = crate::execution::script::execute_at(
                 &plan.scripts,
                 &rung,
@@ -480,18 +476,7 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
             reused.requirement_authorization = authorization;
         }
         Ok(Some(reused))
-    })();
-    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
-    match result {
-        Err(error) => {
-            let _ = unlock;
-            Err(error)
-        }
-        Ok(outcome) => {
-            unlock?;
-            Ok(outcome)
-        }
-    }
+    })()
 }
 
 fn reusable_stored_plan(
@@ -606,8 +591,13 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
         .write(true)
         .open(&lock_path)
         .map_err(|error| WombatError::io(&lock_path, error))?;
-    acquire_exclusive(&lock, &build_dir)?;
-    let result = (|| {
+    let _lock = acquire_build_lock(
+        lock,
+        &lock_path,
+        &build_dir,
+        crate::storage::locking::Mode::Exclusive,
+    )?;
+    (|| {
         ensure_workspace_marker(&build_dir, &source_root)?;
         recover_publication(&build_dir)?;
         if options.clean {
@@ -640,34 +630,44 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                 host.platform.compact()
             )));
         }
-        let skipped_requirement_gates = if options.compile_only {
-            plan.requirements
-                .iter()
-                .filter(|requirement| {
-                    plan.ladder.before_or_at(
-                        &requirement.when,
-                        crate::execution::ladder::CoreRung::MaterialiseAfter,
-                    )
-                })
-                .map(|requirement| requirement.when.id().to_string())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
+        let product_skipped_requirement_gates = if options.compile_only {
+            materialise_requirement_gates(&plan)
         } else {
             Vec::new()
         };
+        let manual_requirement_skips = if !options.compile_only
+            && options.reconcile_requirements
+            && !options.check_requirements
+        {
+            materialise_requirement_gates(&plan)
+        } else {
+            Vec::new()
+        };
+        let mut journal_skips = product_skipped_requirement_gates.clone();
+        journal_skips.extend(manual_requirement_skips.iter().cloned());
+        journal_skips.sort();
+        journal_skips.dedup();
         journal.configure(
             if options.compile_only {
                 crate::model::manifest::ExecutionMode::CompileOnly
             } else {
                 crate::model::manifest::ExecutionMode::Normal
             },
-            skipped_requirement_gates.clone(),
+            journal_skips,
         );
         crate::execution::ladder::write(&build_dir, &journal)?;
         let requirements_gate = crate::execution::ladder::RungId::from(
             crate::execution::ladder::CoreRung::MaterialiseBefore,
         );
+        if !manual_requirement_skips.is_empty() {
+            journal.record_action(
+                "requirements:check",
+                &requirements_gate,
+                crate::execution::ladder::ExecutionStatus::Skipped,
+                "requirement checking skipped by --skip-requirements",
+            );
+            crate::execution::ladder::write(&build_dir, &journal)?;
+        }
         let mut authorization = if !options.compile_only
             && options.reconcile_requirements
             && options.check_requirements
@@ -700,10 +700,14 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
         } else {
             crate::model::manifest::ExecutionMode::Normal
         };
-        let script_state_root = options
-            .script_state_root
-            .clone()
-            .map_or_else(crate::execution::script::materialise_state_root, Ok)?;
+        let script_state_root = if options.run_scripts {
+            options
+                .script_state_root
+                .clone()
+                .map_or_else(crate::execution::script::materialise_state_root, Ok)?
+        } else {
+            PathBuf::new()
+        };
         let mut desired = Some(desired);
         let mut staging = None;
         let mut materialised_manifest = None;
@@ -775,7 +779,6 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                         .iter()
                         .find(|script| script.identity == identity)
                         .expect("planned script exists");
-                    crate::execution::script::check_runners(std::slice::from_ref(script))?;
                     crate::execution::script::execute_at(
                         std::slice::from_ref(script),
                         &rung,
@@ -876,7 +879,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                         desired.take().expect("artifacts materialise once"),
                         &cache,
                         execution_mode,
-                        skipped_requirement_gates.clone(),
+                        product_skipped_requirement_gates.clone(),
                     )?;
                     staging = Some(next_staging);
                     materialised_manifest = Some(manifest);
@@ -928,34 +931,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
             outcome.requirement_authorization = authorization;
         }
         Ok(outcome)
-    })();
-
-    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
-    match result {
-        Err(error) => {
-            let _ = unlock;
-            Err(error)
-        }
-        Ok(outcome) => {
-            unlock?;
-            Ok(outcome)
-        }
-    }
-}
-
-fn clean_transient_workspace(build_dir: &Path) -> Result<()> {
-    let internal = build_dir.join(".wombat");
-    for name in ["cache", "tasks", "logs", "staging"] {
-        let path = internal.join(name);
-        if path.exists() {
-            clear_directory_contents(&path)?;
-        }
-    }
-    let journal = internal.join("execution-journal.json");
-    if journal.exists() {
-        fs::remove_file(&journal).map_err(|error| WombatError::io(&journal, error))?;
-    }
-    Ok(())
+    })()
 }
 
 fn validate_stored_plan_closure(
@@ -1089,6 +1065,21 @@ fn observed_host_facts_match(
         })
 }
 
+fn materialise_requirement_gates(plan: &crate::model::manifest::BuildPlan) -> Vec<String> {
+    plan.requirements
+        .iter()
+        .filter(|requirement| {
+            plan.ladder.before_or_at(
+                &requirement.when,
+                crate::execution::ladder::CoreRung::MaterialiseAfter,
+            )
+        })
+        .map(|requirement| requirement.when.id().to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn frozen_value_at_path<'a>(
     root: &'a crate::model::frozen::FrozenValue,
     path: &str,
@@ -1126,8 +1117,13 @@ pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
         .write(true)
         .open(&lock_path)
         .map_err(|error| WombatError::io(&lock_path, error))?;
-    acquire_exclusive(&lock, &build_dir)?;
-    let result = (|| {
+    let _lock = acquire_build_lock(
+        lock,
+        &lock_path,
+        &build_dir,
+        crate::storage::locking::Mode::Exclusive,
+    )?;
+    (|| {
         ensure_workspace_marker(&build_dir, &source_root)?;
         recover_publication(&build_dir)?;
         let host = options.host.map_or_else(HostContext::observe, Ok)?;
@@ -1156,18 +1152,7 @@ pub fn plan(options: BuildOptions) -> Result<PlanOutcome> {
             build_dir: build_dir.clone(),
             plan,
         })
-    })();
-    let unlock = File::unlock(&lock).map_err(|error| WombatError::io(&lock_path, error));
-    match result {
-        Err(error) => {
-            let _ = unlock;
-            Err(error)
-        }
-        Ok(outcome) => {
-            unlock?;
-            Ok(outcome)
-        }
-    }
+    })()
 }
 
 pub fn project_help(source_root: &Path, host: Option<HostContext>) -> Result<String> {
@@ -1199,158 +1184,6 @@ pub fn project_help_with_options(options: BuildOptions) -> Result<String> {
     }
 }
 
-/// Verify a published product against its manifest.
-///
-/// Checks format and construction versions, identity, and that the tree on disk
-/// is exactly what the manifest describes — no missing files, no extra ones, no
-/// symlinks, and matching modes. A product that fails this is not deployed.
-pub fn verify_build(build_dir: &Path) -> Result<VerifiedBuild> {
-    let build_dir =
-        fs::canonicalize(build_dir).map_err(|error| WombatError::io(build_dir, error))?;
-    let lock_path = build_dir.join(".wombat/lock");
-    let _lock = match fs::symlink_metadata(&lock_path) {
-        Ok(_) => {
-            ensure_plain_file(&lock_path)?;
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .map_err(|error| WombatError::io(&lock_path, error))?;
-            acquire_shared(&file, &build_dir)?;
-            Some(file)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(WombatError::io(&lock_path, error)),
-    };
-    let result = verify_product(&build_dir);
-    if let Some(lock) = &_lock {
-        File::unlock(lock).map_err(|error| WombatError::io(&lock_path, error))?;
-    }
-    let manifest = result?;
-    Ok(VerifiedBuild {
-        build_dir,
-        manifest,
-    })
-}
-
-/// Open a verified product, holding a shared lock for as long as the returned
-/// value lives.
-///
-/// The lock is what stops a concurrent build republishing the product out from
-/// under a deployment that is midway through reading it.
-pub fn open_build(build_dir: &Path) -> Result<OpenedBuild> {
-    let requested_build_dir =
-        fs::canonicalize(build_dir).map_err(|error| WombatError::io(build_dir, error))?;
-    let lock_path = requested_build_dir.join(".wombat/lock");
-    match fs::symlink_metadata(&lock_path) {
-        Ok(_) => {
-            ensure_plain_file(&lock_path)?;
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .map_err(|error| WombatError::io(&lock_path, error))?;
-            acquire_shared(&lock, &requested_build_dir)?;
-            let manifest = match verify_product(&requested_build_dir) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    let _ = File::unlock(&lock);
-                    return Err(error);
-                }
-            };
-            Ok(OpenedBuild {
-                requested_build_dir: requested_build_dir.clone(),
-                product_dir: requested_build_dir,
-                manifest,
-                _lock: Some(lock),
-                _snapshot: None,
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let before = verify_product(&requested_build_dir)?;
-            let snapshot = tempfile::tempdir().map_err(|error| {
-                WombatError::io(std::env::temp_dir().join("wombat-build-snapshot"), error)
-            })?;
-            copy_functional_product(&requested_build_dir, snapshot.path())?;
-            let manifest = verify_product(snapshot.path())?;
-            let after = verify_product(&requested_build_dir)?;
-            if before.build_id != manifest.build_id || after.build_id != manifest.build_id {
-                return Err(WombatError::configuration(format!(
-                    "relocated build product `{}` changed while it was being opened",
-                    requested_build_dir.display()
-                )));
-            }
-            Ok(OpenedBuild {
-                requested_build_dir,
-                product_dir: snapshot.path().to_path_buf(),
-                manifest,
-                _lock: None,
-                _snapshot: Some(snapshot),
-            })
-        }
-        Err(error) => Err(WombatError::io(&lock_path, error)),
-    }
-}
-
-fn copy_functional_product(source: &Path, destination: &Path) -> Result<()> {
-    let manifest = source.join("manifest.json");
-    ensure_plain_file(&manifest)?;
-    fs::copy(&manifest, destination.join("manifest.json"))
-        .map_err(|error| WombatError::io(&manifest, error))?;
-    copy_product_directory(&source.join("tree"), &destination.join("tree"))?;
-    let providers = source.join("providers");
-    if providers
-        .try_exists()
-        .map_err(|error| WombatError::io(&providers, error))?
-    {
-        copy_product_directory(&providers, &destination.join("providers"))?;
-    }
-    let scripts = source.join("scripts");
-    if scripts
-        .try_exists()
-        .map_err(|error| WombatError::io(&scripts, error))?
-    {
-        copy_product_directory(&scripts, &destination.join("scripts"))?;
-    }
-    Ok(())
-}
-
-fn copy_product_directory(source: &Path, destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source).map_err(|error| WombatError::io(source, error))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(WombatError::configuration(format!(
-            "build product directory `{}` must be a non-symlink directory",
-            source.display()
-        )));
-    }
-    fs::create_dir(destination).map_err(|error| WombatError::io(destination, error))?;
-    let mut entries = fs::read_dir(source)
-        .map_err(|error| WombatError::io(source, error))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .map_err(|error| WombatError::io(source, error))?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|error| WombatError::io(&source_path, error))?;
-        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            copy_product_directory(&source_path, &destination_path)?;
-        } else if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
-            fs::copy(&source_path, &destination_path)
-                .map_err(|error| WombatError::io(&source_path, error))?;
-            fs::set_permissions(&destination_path, metadata.permissions())
-                .map_err(|error| WombatError::io(&destination_path, error))?;
-        } else {
-            return Err(WombatError::configuration(format!(
-                "build product entry `{}` must be a regular file or directory",
-                source_path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn outcome(status: BuildStatus, build_dir: PathBuf, manifest: Manifest) -> BuildOutcome {
     BuildOutcome {
         status,
@@ -1360,214 +1193,4 @@ fn outcome(status: BuildStatus, build_dir: PathBuf, manifest: Manifest) -> Build
         manifest,
         requirement_authorization: None,
     }
-}
-
-fn acquire_exclusive(file: &File, build_dir: &Path) -> Result<()> {
-    file.try_lock().map_err(|error| match error {
-        TryLockError::WouldBlock => WombatError::configuration(format!(
-            "build directory `{}` is in use by another process",
-            build_dir.display()
-        )),
-        TryLockError::Error(error) => WombatError::io(build_dir.join(".wombat/lock"), error),
-    })
-}
-
-fn acquire_shared(file: &File, build_dir: &Path) -> Result<()> {
-    file.try_lock_shared().map_err(|error| match error {
-        TryLockError::WouldBlock => WombatError::configuration(format!(
-            "build directory `{}` is in use by another process",
-            build_dir.display()
-        )),
-        TryLockError::Error(error) => WombatError::io(build_dir.join(".wombat/lock"), error),
-    })
-}
-
-fn prepare_workspace_directory(build_dir: &Path) -> Result<()> {
-    match fs::symlink_metadata(build_dir) {
-        Ok(metadata) if !metadata.file_type().is_dir() => Err(WombatError::configuration(format!(
-            "build directory `{}` must be a directory",
-            build_dir.display()
-        ))),
-        Ok(_) => {
-            let entries = fs::read_dir(build_dir)
-                .map_err(|error| WombatError::io(build_dir, error))?
-                .collect::<std::io::Result<Vec<_>>>()
-                .map_err(|error| WombatError::io(build_dir, error))?;
-            let marker = build_dir.join(".wombat/workspace.json");
-            let only_internal = entries.len() == 1 && entries[0].file_name() == ".wombat";
-            if !entries.is_empty()
-                && !marker
-                    .try_exists()
-                    .map_err(|error| WombatError::io(&marker, error))?
-                && !only_internal
-            {
-                return Err(WombatError::configuration(format!(
-                    "refusing nonempty unmarked build directory `{}`",
-                    build_dir.display()
-                )));
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(build_dir).map_err(|error| WombatError::io(build_dir, error))
-        }
-        Err(error) => Err(WombatError::io(build_dir, error)),
-    }
-}
-
-fn ensure_workspace_marker(build_dir: &Path, source_root: &Path) -> Result<()> {
-    let marker_path = build_dir.join(".wombat/workspace.json");
-    let source = source_root.to_str().ok_or_else(|| {
-        WombatError::configuration("repository roots used for builds must be valid UTF-8")
-    })?;
-    if marker_path
-        .try_exists()
-        .map_err(|error| WombatError::io(&marker_path, error))?
-    {
-        ensure_plain_file(&marker_path)?;
-        let contents = fs::read_to_string(&marker_path)
-            .map_err(|error| WombatError::io(&marker_path, error))?;
-        let marker: WorkspaceMarker = serde_json::from_str(&contents)?;
-        if marker.format_version != WORKSPACE_FORMAT_VERSION {
-            return Err(WombatError::configuration(format!(
-                "unsupported build workspace format version {} in `{}`",
-                marker.format_version,
-                marker_path.display()
-            )));
-        }
-        if marker.source_root != source {
-            return Err(WombatError::configuration(format!(
-                "build directory `{}` belongs to source `{}`, not `{source}`",
-                build_dir.display(),
-                marker.source_root
-            )));
-        }
-        return Ok(());
-    }
-    let internal = build_dir.join(".wombat");
-    if internal
-        .try_exists()
-        .map_err(|error| WombatError::io(&internal, error))?
-    {
-        let unexpected = fs::read_dir(&internal)
-            .map_err(|error| WombatError::io(&internal, error))?
-            .filter_map(|entry| match entry {
-                Ok(entry) if entry.file_name() == "lock" => None,
-                other => Some(other),
-            })
-            .next()
-            .transpose()
-            .map_err(|error| WombatError::io(&internal, error))?;
-        if unexpected.is_some() {
-            return Err(WombatError::configuration(format!(
-                "refusing nonempty unmarked build directory `{}`",
-                build_dir.display()
-            )));
-        }
-    }
-    let marker = WorkspaceMarker {
-        format_version: WORKSPACE_FORMAT_VERSION,
-        source_root: source.to_string(),
-    };
-    write_json_atomic(&marker_path, &marker)
-}
-
-fn validate_build_location(source_root: &Path, build_dir: &Path) -> Result<()> {
-    if build_dir.parent().is_none() {
-        return Err(WombatError::configuration(
-            "the filesystem root cannot be a build directory",
-        ));
-    }
-    if source_root == build_dir || source_root.starts_with(build_dir) {
-        return Err(WombatError::configuration(format!(
-            "build directory `{}` must not be the repository or its ancestor",
-            build_dir.display()
-        )));
-    }
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from)
-        && let Ok(home) = fs::canonicalize(home)
-        && home == build_dir
-    {
-        return Err(WombatError::configuration(
-            "the user home cannot be a build directory",
-        ));
-    }
-    if let Ok(relative) = build_dir.strip_prefix(source_root)
-        && let Some(Component::Normal(first)) = relative.components().next()
-        && [
-            "modules",
-            "lua",
-            "tasks",
-            "providers",
-            "src",
-            "home",
-            "dot_config",
-            "dot_local",
-        ]
-        .iter()
-        .any(|reserved| first == *reserved)
-    {
-        return Err(WombatError::configuration(format!(
-            "build directory `{}` must not be inside repository control or artifact roots",
-            build_dir.display()
-        )));
-    }
-    Ok(())
-}
-
-fn resolve_maybe_missing(path: &Path) -> Result<PathBuf> {
-    let normalized = normalize_absolute(path)?;
-    let mut existing = normalized.as_path();
-    let mut missing = Vec::new();
-    while !existing
-        .try_exists()
-        .map_err(|error| WombatError::io(existing, error))?
-    {
-        let name = existing.file_name().ok_or_else(|| {
-            WombatError::configuration(format!(
-                "cannot resolve build directory `{}`",
-                path.display()
-            ))
-        })?;
-        missing.push(name.to_os_string());
-        existing = existing.parent().ok_or_else(|| {
-            WombatError::configuration(format!(
-                "cannot resolve build directory `{}`",
-                path.display()
-            ))
-        })?;
-    }
-    let mut resolved =
-        fs::canonicalize(existing).map_err(|error| WombatError::io(existing, error))?;
-    for name in missing.iter().rev() {
-        resolved.push(name);
-    }
-    Ok(resolved)
-}
-
-fn normalize_absolute(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() {
-        return Err(WombatError::configuration(format!(
-            "build directory `{}` did not resolve to an absolute path",
-            path.display()
-        )));
-    }
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    return Err(WombatError::configuration(format!(
-                        "build directory `{}` escapes the filesystem root",
-                        path.display()
-                    )));
-                }
-            }
-        }
-    }
-    Ok(normalized)
 }

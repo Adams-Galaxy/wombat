@@ -3,7 +3,7 @@ local w = require("wombat")
 local prepare = w.rung("prepare")
 local verify = w.rung("verify")
 
-local example = w.data.toml("example.toml")
+local example = w.toml.decode("example.toml")
 local shell = w.exec({ "sh", "-c", 'printf %s "$WOMBAT_EXAMPLE_MODE"' }, {
     env = { WOMBAT_EXAMPLE_MODE = "canonical" },
 }):check()

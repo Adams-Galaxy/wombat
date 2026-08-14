@@ -48,8 +48,8 @@ Everything Wombat persists carries a format version. When the shape or meaning
 changes, the version is bumped and old files are rejected with a clear message:
 
 ```text
-unsupported manifest format version 15; expected 17; rebuild this product with
-the current Wombat
+unsupported manifest format version <old>; expected <current>;
+rebuild this product with the current Wombat
 ```
 
 There is deliberately no migration code. Wombat is pre-1.0 and the formats are

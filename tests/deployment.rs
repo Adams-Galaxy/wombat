@@ -1134,6 +1134,40 @@ fn target_state_and_lock_use_private_permissions() {
     );
 }
 
+#[test]
+fn skipped_deploy_requirements_are_recorded_without_provider_work() {
+    let repository = Repository::new("requirements = 'skipped'\n");
+    let destination = repository._temporary.path().join("provider-destination");
+    fs::write(
+        repository.root.join("wombat.lua"),
+        format!(
+            "local w=require('wombat')\nw.providers({{'git'}})\nw.need.package('plugin', {{ with={{ repository='https://example.invalid/plugin.git', to={:?} }}, when=w.rungs.deploy.before }})\nw.use('app')\n",
+            destination.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    repository.build();
+
+    apply(
+        &repository
+            .options()
+            .with_provider_reconciliation(true)
+            .with_check_requirements(false),
+        ConflictPolicy::Fail,
+    )
+    .unwrap();
+
+    assert!(!destination.exists());
+    let journal =
+        wombat::ladder::read_at(&repository.state_dir().join("execution-journal.json")).unwrap();
+    assert_eq!(journal.skipped_requirement_gates, ["deploy.before"]);
+    assert!(journal.actions.iter().any(|action| {
+        action.identity == "requirements:check"
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+            && action.reason.contains("--skip-requirements")
+    }));
+}
+
 fn copy_directory(source: &Path, destination: &Path) {
     fs::create_dir(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {

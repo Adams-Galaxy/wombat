@@ -306,7 +306,7 @@ fn verifier_rejects_missing_extra_and_manifest_tampering() {
 }
 
 #[test]
-fn verifier_rejects_legacy_unknown_v17_fields_and_internally_inconsistent_provenance() {
+fn verifier_rejects_old_versions_unknown_fields_and_inconsistent_provenance() {
     let repository = Repository::new();
     repository.build().unwrap();
 

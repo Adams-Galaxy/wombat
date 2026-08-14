@@ -1,9 +1,9 @@
-//! Process-wide serialization for host package-manager observations and mutation.
+//! Cross-process serialization for host package-manager observations and mutation.
 
 use super::*;
 
 pub(super) struct EnvironmentLock {
-    file: File,
+    _guard: crate::storage::locking::Guard,
 }
 
 impl EnvironmentLock {
@@ -38,24 +38,18 @@ impl EnvironmentLock {
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|error| WombatError::io(&path, error))?;
         }
-        let result = if exclusive {
-            file.try_lock()
+        let mode = if exclusive {
+            crate::storage::locking::Mode::Exclusive
         } else {
-            file.try_lock_shared()
+            crate::storage::locking::Mode::Shared
         };
-        result.map_err(|error| match error {
-            TryLockError::WouldBlock => WombatError::configuration(
-                "another Wombat check or bootstrap owns the local environment lock",
-            ),
-            TryLockError::Error(error) => WombatError::io(&path, error),
-        })?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for EnvironmentLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let guard = crate::storage::locking::Guard::try_acquire_with(
+            file,
+            &path,
+            mode,
+            "another Wombat check or bootstrap owns the local environment lock",
+        )?;
+        Ok(Self { _guard: guard })
     }
 }
 

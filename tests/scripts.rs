@@ -160,6 +160,163 @@ fn skip_scripts_leaves_build_tasks_running_while_skipping_declared_scripts() {
 }
 
 #[test]
+fn skip_scripts_does_not_resolve_runners_or_prepare_script_state() {
+    let temporary = tempdir().unwrap();
+    let root = temporary.path().join("source");
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::write(
+        root.join("wombat.lua"),
+        "local w=require('wombat')\nw.script('never.py', {}, { schedule='always' })\nw.script('never-deploy.py', {}, { schedule='always', at=w.rungs.deploy.before })\n",
+    )
+    .unwrap();
+    fs::write(root.join("scripts/never.py"), "raise SystemExit('ran')\n").unwrap();
+    fs::write(
+        root.join("scripts/never-deploy.py"),
+        "raise SystemExit('ran')\n",
+    )
+    .unwrap();
+    let state = temporary.path().join("state");
+    let config = temporary.path().join("config/wombat");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!(
+            "format_version = 2\nrepository = {:?}\n[runners.python]\ncommand = '/definitely/missing/wombat-python'\n",
+            root.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let build_dir = temporary.path().join("build");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args([
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "--skip-scripts",
+            "-B",
+        ])
+        .arg(&build_dir)
+        .env("HOME", temporary.path())
+        .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !state.exists(),
+        "skipped scripts must not create scheduling state"
+    );
+    let journal = wombat::ladder::read(&build_dir).unwrap();
+    assert!(journal.actions.iter().any(|action| {
+        action.identity.contains("never.py")
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+    }));
+
+    let target = temporary.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let deployed = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args([
+            "--source",
+            root.to_str().unwrap(),
+            "plan",
+            "deploy",
+            "--skip-scripts",
+            "--target-root",
+        ])
+        .arg(&target)
+        .args(["-B"])
+        .arg(&build_dir)
+        .env("HOME", temporary.path())
+        .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(
+        deployed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deployed.stderr)
+    );
+
+    let reused = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args([
+            "--source",
+            root.to_str().unwrap(),
+            "build",
+            "--skip-scripts",
+            "-B",
+        ])
+        .arg(&build_dir)
+        .env("HOME", temporary.path())
+        .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+
+    let staged_build = temporary.path().join("staged-build");
+    for arguments in [
+        vec!["plan", "construct", "-B", staged_build.to_str().unwrap()],
+        vec![
+            "plan",
+            "materialise",
+            "--skip-scripts",
+            "-B",
+            staged_build.to_str().unwrap(),
+        ],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+            .arg("--source")
+            .arg(&root)
+            .args(arguments)
+            .env("HOME", temporary.path())
+            .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+            .env("XDG_STATE_HOME", &state)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let apply_build = temporary.path().join("apply-build");
+    let apply_target = temporary.path().join("apply-target");
+    fs::create_dir(&apply_target).unwrap();
+    let applied = std::process::Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .arg("--source")
+        .arg(&root)
+        .args(["apply", "--skip-scripts", "--target-root"])
+        .arg(&apply_target)
+        .args(["-B"])
+        .arg(&apply_build)
+        .env("HOME", temporary.path())
+        .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(
+        !state.join("wombat/scripts").exists(),
+        "all skip paths must leave script scheduling state untouched"
+    );
+}
+
+#[test]
 fn compile_only_scope_policy_skips_target_and_requires_host_authorization() {
     let lua = "local w=require('wombat')\nw.target('linux/x86_64')\nw.script('mark.sh')\n";
     let (temporary, root) = repository(lua, "exit 0\n");

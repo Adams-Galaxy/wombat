@@ -437,7 +437,7 @@ reference a custom rung declared in another module.
 
 ## Data, processes, and logging
 
-### `w.data.toml(path)` · `w.data.json(path)`
+### `w.json.decode(path)` · `w.toml.decode(path)`
 
 Reads a data file from the repository and returns it as frozen Lua data. Both
 share one path: a repository-relative safety check, then the file's digest
@@ -445,8 +445,43 @@ joins the source catalogue and build identity, so editing it produces a new
 build.
 
 ```lua
-local packages = w.data.toml("data/packages.toml")
-local manifest = w.data.json("data/manifest.json")
+local manifest = w.json.decode("data/manifest.json")
+local packages = w.toml.decode("data/packages.toml")
+```
+
+### `w.json.encode(value)` · `w.toml.encode(map)`
+
+The other direction returns a JSON or TOML string. Unlike `decode`, encoding
+never touches the repository — pair it with `w.generate` to write the result as
+an artifact.
+
+JSON accepts every frozen value at the root: strings, finite numbers, booleans,
+`w.null`, arrays, and maps. TOML requires a string-keyed map at the root and
+rejects `w.null` anywhere because TOML has no null value.
+
+```lua
+w.generate("settings.json", { content = w.json.encode({ theme = "dark" }) })
+```
+
+### `w.array(values?)` · `w.null`
+
+Lua's empty `{}` is intentionally a map. Use `w.array()` for an empty array, or
+`w.array({ value1, value2 })` to mark a contiguous integer-keyed table as an
+array. Sparse or mixed-key arrays fail immediately. Arrays decoded from JSON or
+TOML retain the same protected marker, including when nested, so decoding and
+encoding does not turn an empty array into an empty object.
+
+`w.null` is the explicit null value. It survives JSON decode/encode and frozen
+configuration boundaries; it is distinct from Lua `nil`, which means absence.
+
+```lua
+local document = {
+    enabled = false,
+    plugins = w.array(),
+    inherited = w.null,
+}
+
+w.generate("settings.json", { content = w.json.encode(document) })
 ```
 
 ### `w.exec(argv, options?)` · `w.shell(command, options?)`

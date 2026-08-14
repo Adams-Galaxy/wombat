@@ -143,7 +143,7 @@ fn root_selection_order_preserves_outputs_but_changes_exact_source_identity() {
 }
 
 #[test]
-fn path_fixture_matches_the_exact_manifest_v17() {
+fn path_fixture_matches_the_exact_manifest_and_tree() {
     let root = fixture("paths");
     let temporary = tempfile::tempdir().unwrap();
     let expected = fs::read_to_string(root.join("expected-manifest.json")).unwrap();
@@ -157,7 +157,7 @@ fn path_fixture_matches_the_exact_manifest_v17() {
 }
 
 #[test]
-fn directory_fixture_matches_manifest_v17_and_materialised_tree() {
+fn directory_fixture_matches_the_exact_manifest_and_materialised_tree() {
     let root = fixture("directories");
     let temporary = tempfile::tempdir().unwrap();
     let build_dir = temporary.path().join("build");
@@ -369,6 +369,31 @@ fn cli_build_failures_use_stderr_and_exit_one() {
         String::from_utf8_lossy(&output.stderr)
             .contains("does not exist beneath its declaration base")
     );
+}
+
+#[test]
+fn cli_rejects_skipping_and_forcing_scripts_together() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for arguments in [
+        vec!["build", "--skip-scripts", "--rerun-scripts"],
+        vec!["apply", "--skip-scripts", "--rerun-scripts"],
+        vec![
+            "setup",
+            "owner/repository",
+            "--skip-scripts",
+            "--rerun-scripts",
+        ],
+        vec!["plan", "materialise", "--skip-scripts", "--rerun-scripts"],
+        vec!["plan", "deploy", "--skip-scripts", "--rerun-scripts"],
+    ] {
+        let output = run_wombat(&arguments, repository);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("cannot be used with"),
+            "{arguments:?}: {error}"
+        );
+    }
 }
 
 #[test]

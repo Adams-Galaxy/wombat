@@ -45,6 +45,7 @@ fn execute_inner(
         state_root,
         target_root,
         clean,
+        requirements_manually_skipped,
         run_scripts,
         rerun_scripts,
         allow_host_scripts,
@@ -66,10 +67,37 @@ fn execute_inner(
             )
         });
     journal.build_id = Some(opened.manifest.build_id.clone());
-    journal.configure(
-        opened.manifest.execution_mode,
-        opened.manifest.skipped_requirement_gates.clone(),
-    );
+    let manual_requirement_skips = if requirements_manually_skipped {
+        opened
+            .manifest
+            .requirements
+            .iter()
+            .filter(|requirement| {
+                opened
+                    .manifest
+                    .ladder
+                    .at_or_after(&requirement.when, CoreRung::DeployBefore)
+            })
+            .map(|requirement| requirement.when.id().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut journal_skips = opened.manifest.skipped_requirement_gates.clone();
+    journal_skips.extend(manual_requirement_skips.iter().cloned());
+    journal_skips.sort();
+    journal_skips.dedup();
+    journal.configure(opened.manifest.execution_mode, journal_skips);
+    if !manual_requirement_skips.is_empty() {
+        journal.record_action(
+            "requirements:check",
+            &CoreRung::DeployBefore.into(),
+            ExecutionStatus::Skipped,
+            "requirement checking skipped by --skip-requirements",
+        );
+    }
     let deploy_apply: crate::execution::ladder::RungId = CoreRung::DeployApply.into();
     let conflicts = plan
         .conflicts()
@@ -109,15 +137,6 @@ fn execute_inner(
         // silently treating unfinished work as never attempted.
         journal.set_id(&rung, ExecutionStatus::Running);
         crate::execution::ladder::write_at(&journal_path, &journal)?;
-        crate::execution::script::check_runners(
-            &opened
-                .manifest
-                .scripts
-                .iter()
-                .filter(|script| script.at == rung)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )?;
         for outcome in crate::execution::script::execute_at(
             &opened.manifest.scripts,
             &rung,
@@ -159,15 +178,6 @@ fn execute_inner(
         )?;
     }
 
-    crate::execution::script::check_runners(
-        &opened
-            .manifest
-            .scripts
-            .iter()
-            .filter(|script| script.at == deploy_apply)
-            .cloned()
-            .collect::<Vec<_>>(),
-    )?;
     for outcome in crate::execution::script::execute_at(
         &opened.manifest.scripts,
         &deploy_apply,
@@ -339,15 +349,6 @@ fn execute_inner(
         }
         journal.set_id(&rung, ExecutionStatus::Running);
         crate::execution::ladder::write_at(&journal_path, &journal)?;
-        crate::execution::script::check_runners(
-            &opened
-                .manifest
-                .scripts
-                .iter()
-                .filter(|script| script.at == rung)
-                .cloned()
-                .collect::<Vec<_>>(),
-        )?;
         for outcome in crate::execution::script::execute_at(
             &opened.manifest.scripts,
             &rung,
