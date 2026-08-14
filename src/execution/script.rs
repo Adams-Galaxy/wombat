@@ -65,6 +65,7 @@ pub(crate) struct ScriptExecutionOptions<'a> {
     pub execution_mode: ExecutionMode,
     pub allow_host_scripts: bool,
     pub rerun: bool,
+    pub run_scripts: bool,
     pub target_root: Option<&'a Path>,
 }
 
@@ -184,6 +185,14 @@ pub(crate) fn execute_at(
 }
 
 fn execute(script: &Script, options: &ScriptExecutionOptions<'_>) -> Result<ScriptOutcome> {
+    if !options.run_scripts {
+        return Ok(outcome(
+            script,
+            ScriptOutcomeStatus::ManualSkip,
+            "script execution skipped by --skip-scripts",
+        ));
+    }
+
     if options.execution_mode == ExecutionMode::CompileOnly {
         match script.scope {
             ScriptScope::Target => {

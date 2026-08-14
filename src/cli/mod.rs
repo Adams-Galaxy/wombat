@@ -115,6 +115,12 @@ enum Command {
         clean: bool,
         #[arg(long)]
         yes: bool,
+        /// Skip requirement checking (packages, commands) for this run.
+        #[arg(long)]
+        skip_requirements: bool,
+        /// Skip `w.script` entries; `w.build.task` entries are unaffected.
+        #[arg(long)]
+        skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
         #[arg(long)]
@@ -197,6 +203,12 @@ enum Command {
         clean: bool,
         #[arg(long)]
         yes: bool,
+        /// Skip requirement checking (packages, commands) for this run.
+        #[arg(long)]
+        skip_requirements: bool,
+        /// Skip `w.script` entries; `w.build.task` entries are unaffected.
+        #[arg(long)]
+        skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
         #[arg(long)]
@@ -217,6 +229,12 @@ enum Command {
         clean: bool,
         #[arg(long)]
         yes: bool,
+        /// Skip requirement checking (packages, commands) for this run.
+        #[arg(long)]
+        skip_requirements: bool,
+        /// Skip `w.script` entries; `w.build.task` entries are unaffected.
+        #[arg(long)]
+        skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
         #[arg(long)]
@@ -306,6 +324,7 @@ enum InspectArg {
     Artifacts,
     Sources,
     Observations,
+    Timeline,
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +346,12 @@ enum PlanCommand {
         clean: bool,
         #[arg(long)]
         yes: bool,
+        /// Skip requirement checking (packages, commands) for this run.
+        #[arg(long)]
+        skip_requirements: bool,
+        /// Skip `w.script` entries; `w.build.task` entries are unaffected.
+        #[arg(long)]
+        skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
         #[arg(long)]
@@ -353,6 +378,12 @@ enum PlanCommand {
         allow_plan_mismatch: bool,
         #[arg(long)]
         allow_compile_only: bool,
+        /// Skip requirement checking (packages, commands) for this run.
+        #[arg(long)]
+        skip_requirements: bool,
+        /// Skip `w.script` entries; `w.build.task` entries are unaffected.
+        #[arg(long)]
+        skip_scripts: bool,
         #[arg(long)]
         rerun_scripts: bool,
         #[arg(long)]
@@ -376,6 +407,7 @@ impl From<InspectArg> for wombat::InspectSection {
             InspectArg::Artifacts => Self::Artifacts,
             InspectArg::Sources => Self::Sources,
             InspectArg::Observations => Self::Observations,
+            InspectArg::Timeline => Self::Timeline,
         }
     }
 }

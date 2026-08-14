@@ -30,17 +30,19 @@ is what gets rendered, and it's recorded in the manifest — which means
 
 ## The template language
 
-Rendering uses a versioned contract called `handlebars-v1`, deliberately smaller
-than full Handlebars.
+Rendering uses a versioned contract called `handlebars-v1`, backed by full
+Handlebars: interpolation, `if`/`unless`/`each`/`with` (including `else`
+blocks), comments, raw blocks, whitespace control, the built-in comparison and
+logic helpers (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `and`, `or`, `not`, `len`),
+`lookup`, `log`, subexpressions, and inline partials/decorators.
 
-You get: interpolation, `if`/`unless`, `each`/`with`, comments, raw blocks, and
-whitespace control. Missing values are an error rather than an empty string, maps
-iterate deterministically, and nothing is HTML-escaped — these are config files,
-not web pages.
-
-You don't get: custom helpers, `lookup`, logging, subexpressions, partials, or
-decorators. Comparisons and transformations belong in Lua, where they're
-inspectable, rather than hidden in a template.
+Two things stay deliberately stricter than stock Handlebars, on every
+construct that resolves a value — plain interpolation, `if`/`unless`
+conditions, `each`/`with` targets, helper arguments: missing values are a hard
+render error rather than silently empty or falsy, and nothing is HTML-escaped
+(these are config files, not web pages). Dotted paths reach directly into
+nested context (`{{theme.tmux.border.color}}`), so you can pass a whole table
+and let the template consume whatever part of it it needs.
 
 ```handlebars
 {{#if shell}}
@@ -50,6 +52,10 @@ shell = "{{shell}}"
 {{#each colors}}
 {{@key}} = "{{this}}"
 {{/each}}
+
+{{#if (eq shell "zsh")}}
+default_shell = "{{shell}}"
+{{/if}}
 ```
 
 ## Whitespace

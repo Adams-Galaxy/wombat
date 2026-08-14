@@ -27,6 +27,8 @@ pub(crate) fn run() -> ExitCode {
             compile_only,
             clean,
             yes,
+            skip_requirements,
+            skip_scripts,
             rerun_scripts,
             allow_host_scripts,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
@@ -47,7 +49,7 @@ pub(crate) fn run() -> ExitCode {
                     configured_build_options(source_root, build_dir, project_arguments)?,
                     requested_log_level,
                     log_adjustment,
-                ).with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
+                ).with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_check_requirements(!skip_requirements).with_run_scripts(!skip_scripts).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
                 .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
             }
         }),
@@ -74,6 +76,8 @@ pub(crate) fn run() -> ExitCode {
                 compile_only,
                 clean,
                 yes,
+                skip_requirements,
+                skip_scripts,
                 rerun_scripts,
                 allow_host_scripts,
             } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
@@ -81,7 +85,7 @@ pub(crate) fn run() -> ExitCode {
                     source_root,
                     build_dir,
                     std::iter::empty::<OsString>(),
-                )?.with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
+                )?.with_compile_only(compile_only).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_check_requirements(!skip_requirements).with_run_scripts(!skip_scripts).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts))
                 .map(|outcome| print_build_outcome(&outcome, stdout, stderr))
             }),
             PlanCommand::Inspect { section, build_dir } => {
@@ -106,6 +110,8 @@ pub(crate) fn run() -> ExitCode {
                 yes,
                 allow_plan_mismatch,
                 allow_compile_only,
+                skip_requirements,
+                skip_scripts,
                 rerun_scripts,
                 allow_host_scripts,
             } => resolve_deployment_options(cli.source.as_deref(), build_dir, target_root)
@@ -113,10 +119,9 @@ pub(crate) fn run() -> ExitCode {
                     let opened = wombat::open_build(&options.build_dir)?;
                     let materialisation = wombat::ladder::read(&options.build_dir)?;
                     if materialisation.plan_id != opened.manifest.plan_id
-                        || !materialisation.rungs.iter().any(|(rung, status)| {
-                            rung.id()
-                                == wombat::ladder::CoreRung::MaterialiseAfter.id()
-                                && *status == wombat::ladder::ExecutionStatus::Succeeded
+                        || !materialisation.rungs.iter().any(|record| {
+                            record.id.id() == wombat::ladder::CoreRung::MaterialiseAfter.id()
+                                && record.status == wombat::ladder::ExecutionStatus::Succeeded
                         })
                     {
                         return Err(wombat::WombatError::configuration(
@@ -139,7 +144,8 @@ pub(crate) fn run() -> ExitCode {
                     apply_options(
                         &options
                             .with_yes(yes)
-                            .with_provider_reconciliation(true)
+                            .with_provider_reconciliation(true).with_check_requirements(!skip_requirements)
+                            .with_run_scripts(!skip_scripts)
                             .with_rerun_scripts(rerun_scripts)
                             .with_allow_host_scripts(allow_host_scripts),
                         effective_policy(conflict),
@@ -283,6 +289,8 @@ pub(crate) fn run() -> ExitCode {
             project_arguments,
             clean,
             yes,
+            skip_requirements,
+            skip_scripts,
             rerun_scripts,
             allow_host_scripts,
         } => wombat::config::resolve_source(cli.source.as_deref()).and_then(|source_root| {
@@ -292,13 +300,14 @@ pub(crate) fn run() -> ExitCode {
                 configured_build_options(source_root, build_dir, project_arguments)?,
                 requested_log_level,
                 log_adjustment,
-            ).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts)
+            ).with_yes(yes).with_clean(clean).with_provider_reconciliation(true).with_check_requirements(!skip_requirements).with_run_scripts(!skip_scripts).with_rerun_scripts(rerun_scripts).with_allow_host_scripts(allow_host_scripts)
                 .with_requirement_boundary(wombat::ladder::CoreRung::DeployAfter))?;
             print_build_outcome(&outcome, stdout, stderr);
             let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
                 .with_target_root_explicit(target_root_explicit)
                 .with_yes(yes)
-                .with_provider_reconciliation(true)
+                .with_provider_reconciliation(true).with_check_requirements(!skip_requirements)
+                .with_run_scripts(!skip_scripts)
                 .with_clean(clean)
                 .with_rerun_scripts(rerun_scripts)
                 .with_allow_host_scripts(allow_host_scripts)
@@ -313,6 +322,8 @@ pub(crate) fn run() -> ExitCode {
             conflict,
             clean,
             yes,
+            skip_requirements,
+            skip_scripts,
             rerun_scripts,
             allow_host_scripts,
             project_arguments,
@@ -342,7 +353,8 @@ pub(crate) fn run() -> ExitCode {
                 )
                 .with_clean(clean)
                 .with_yes(yes)
-                .with_provider_reconciliation(true)
+                .with_provider_reconciliation(true).with_check_requirements(!skip_requirements)
+                .with_run_scripts(!skip_scripts)
                 .with_rerun_scripts(rerun_scripts)
                 .with_allow_host_scripts(allow_host_scripts)
                 .with_requirement_boundary(wombat::ladder::CoreRung::DeployAfter),
@@ -351,7 +363,8 @@ pub(crate) fn run() -> ExitCode {
             let options = wombat::DeploymentOptions::new(&outcome.build_dir, target_root)
                 .with_target_root_explicit(target_root_explicit)
                 .with_yes(yes)
-                .with_provider_reconciliation(true)
+                .with_provider_reconciliation(true).with_check_requirements(!skip_requirements)
+                .with_run_scripts(!skip_scripts)
                 .with_clean(clean)
                 .with_rerun_scripts(rerun_scripts)
                 .with_allow_host_scripts(allow_host_scripts)

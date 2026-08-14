@@ -102,6 +102,63 @@ printf x >> "$cache/marker"
     assert_eq!(marker_contents(&state), "xx");
 }
 
+/// `--skip-scripts` is meant to save the cost of running `w.script` entries on
+/// a quick edit-and-rebuild loop; `w.build.task` entries produce artifacts the
+/// build depends on and must run regardless.
+#[test]
+fn skip_scripts_leaves_build_tasks_running_while_skipping_declared_scripts() {
+    let temporary = tempdir().unwrap();
+    let root = temporary.path().join("source");
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::create_dir_all(root.join("tasks")).unwrap();
+    fs::write(
+        root.join("wombat.lua"),
+        "local w=require('wombat')\nw.build.task('mark_task.sh')\nw.script('mark_script.sh', {}, { schedule='always' })\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tasks/mark_task.sh"),
+        "for value in \"$@\"; do case \"$value\" in --output-dir=*) output=${value#*=};; esac; done\nprintf 'task\\n' > \"$output/task-marker\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("scripts/mark_script.sh"),
+        "for arg in \"$@\"; do case \"$arg\" in --cache-dir=*) cache=${arg#*=};; esac; done\nprintf x >> \"$cache/marker\"\n",
+    )
+    .unwrap();
+    let state = temporary.path().join("state");
+
+    let skipped = build(
+        BuildOptions::new(&root, "build")
+            .with_script_state_root(&state)
+            .with_run_scripts(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(skipped.build_dir.join("tree/task-marker")).unwrap(),
+        "task\n",
+        "w.build.task entries must still run when scripts are skipped"
+    );
+    assert_eq!(
+        marker_contents(&state),
+        "",
+        "--skip-scripts must prevent w.script entries from running"
+    );
+    let journal = wombat::ladder::read(&skipped.build_dir).unwrap();
+    assert!(journal.actions.iter().any(|action| {
+        action.identity.contains("mark_script.sh")
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+            && action.reason.contains("--skip-scripts")
+    }));
+
+    build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
+    assert_eq!(
+        marker_contents(&state),
+        "x",
+        "scripts must run normally once the flag is dropped"
+    );
+}
+
 #[test]
 fn compile_only_scope_policy_skips_target_and_requires_host_authorization() {
     let lua = "local w=require('wombat')\nw.target('linux/x86_64')\nw.script('mark.sh')\n";

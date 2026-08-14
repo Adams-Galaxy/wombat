@@ -437,14 +437,16 @@ reference a custom rung declared in another module.
 
 ## Data, processes, and logging
 
-### `w.data.toml(path)`
+### `w.data.toml(path)` · `w.data.json(path)`
 
-Reads a TOML file from the repository and returns it as frozen Lua data. The
-file's digest joins the source catalogue and build identity, so editing it
-produces a new build.
+Reads a data file from the repository and returns it as frozen Lua data. Both
+share one path: a repository-relative safety check, then the file's digest
+joins the source catalogue and build identity, so editing it produces a new
+build.
 
 ```lua
 local packages = w.data.toml("data/packages.toml")
+local manifest = w.data.json("data/manifest.json")
 ```
 
 ### `w.exec(argv, options?)` · `w.shell(command, options?)`

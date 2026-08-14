@@ -50,6 +50,11 @@ function wombat.data.toml(path)
     return native.toml_data(path)
 end
 
+function wombat.data.json(path)
+    if type(path) ~= "string" then error("w.data.json() requires a string path", 2) end
+    return native.json_data(path)
+end
+
 function wombat.exec(argv, options)
     if type(argv) ~= "table" then error("w.exec() requires an argv array", 2) end
     if options ~= nil and type(options) ~= "table" then error("w.exec() options must be a table", 2) end

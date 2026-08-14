@@ -28,22 +28,26 @@ fn materialisation_records_the_fixed_core_ladder() {
     .unwrap();
     let built = build(BuildOptions::new(&source, "build")).unwrap();
     let journal = ladder::read(&built.build_dir).unwrap();
-    assert_eq!(journal.format_version, 3);
+    assert_eq!(journal.format_version, 4);
     assert_eq!(journal.plan_id, built.manifest.plan_id);
     assert_eq!(journal.rungs.len(), 8);
+    let materialise_after = &journal.rungs[4];
     assert_eq!(
-        journal.rungs[4],
-        (
-            ladder::CoreRung::MaterialiseAfter.into(),
-            ladder::ExecutionStatus::Succeeded
-        )
+        materialise_after.id,
+        ladder::RungId::from(ladder::CoreRung::MaterialiseAfter)
+    );
+    assert_eq!(materialise_after.status, ladder::ExecutionStatus::Succeeded);
+    assert!(
+        materialise_after.duration_ms.is_some(),
+        "a succeeded rung should record how long it took"
     );
     assert_eq!(
         journal.rungs[5],
-        (
-            ladder::CoreRung::DeployBefore.into(),
-            ladder::ExecutionStatus::Pending
-        )
+        ladder::RungRecord {
+            id: ladder::CoreRung::DeployBefore.into(),
+            status: ladder::ExecutionStatus::Pending,
+            duration_ms: None,
+        }
     );
 }
 
@@ -66,9 +70,9 @@ fn reopening_a_running_journal_marks_it_interrupted() {
         reopened
             .rungs
             .iter()
-            .find(|(rung, _)| *rung == ladder::CoreRung::MaterialiseTasks)
+            .find(|record| record.id == ladder::CoreRung::MaterialiseTasks)
             .unwrap()
-            .1,
+            .status,
         ladder::ExecutionStatus::Interrupted
     );
 }
@@ -348,4 +352,23 @@ fn journal_records_mode_skipped_gates_build_identity_and_failure_field() {
             .unwrap()
             .contains("task failed")
     );
+}
+
+#[test]
+fn timeline_section_reports_rung_and_action_durations() {
+    let temporary = tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir_all(source.join("src")).unwrap();
+    fs::write(source.join("src/dot_config"), "value\n").unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w = require('wombat')\nw.install('.config', { to = '.config/test' })\n",
+    )
+    .unwrap();
+    let built = build(BuildOptions::new(&source, "build")).unwrap();
+    let timeline = wombat::inspect(&built.build_dir, wombat::InspectSection::Timeline).unwrap();
+    assert!(timeline.contains("Rungs, slowest first"));
+    assert!(timeline.contains("materialise.after"));
+    assert!(timeline.contains("Actions, slowest first"));
+    assert!(timeline.contains("Total measured rung time:"));
 }

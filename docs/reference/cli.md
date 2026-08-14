@@ -50,19 +50,30 @@ provider reconciliation. `--clean` reconstructs from scratch. `--yes` confirms
 package work non-interactively. `--rerun-scripts` forces scheduled scripts.
 `--allow-host-scripts` authorises compile-only scripts scoped to the host.
 
+`--skip-requirements` and `--skip-scripts` trade safety for speed on the
+common edit-and-rebuild loop, where a fresh cached product still needs to
+avoid the cost of a package check or a script run. `--skip-requirements`
+skips checking packages and commands against the host; unlike
+`--compile-only`, a cached product from a prior full build is still reused.
+`--skip-scripts` skips every `w.script` entry; `w.build.task` entries still
+run, since they produce artifacts the build depends on. Both default to off
+— nothing is skipped unless asked for.
+
 ### `plan construct | materialise | inspect | deploy`
 
 The three stages, separately, plus inspection of a stored plan.
 
 `construct` evaluates Lua once and persists an executable plan. `materialise`
 executes that exact plan without evaluating Lua again, and takes the same
-`--compile-only`, `--clean`, `--yes`, `--rerun-scripts`, and
-`--allow-host-scripts` options as `build`.
+`--compile-only`, `--clean`, `--yes`, `--skip-requirements`,
+`--skip-scripts`, `--rerun-scripts`, and `--allow-host-scripts` options as
+`build`.
 
 `deploy` deploys a completed product without reconstructing it. Alongside
-`--target-root`, `--conflict`, `--yes`, `--rerun-scripts`, and
-`--allow-host-scripts`, it takes two acknowledgements that `apply` never needs
-because `apply` builds the product itself:
+`--target-root`, `--conflict`, `--yes`, `--skip-requirements`,
+`--skip-scripts`, `--rerun-scripts`, and `--allow-host-scripts`, it takes two
+acknowledgements that `apply` never needs because `apply` builds the product
+itself:
 
 - `--allow-plan-mismatch` deploys a materialised product even though a newer
   plan has since been constructed. Wombat warns because the product is no longer
@@ -81,7 +92,9 @@ Construct, materialise, then deploy. The usual day-to-day command.
 `--target-root` chooses the deployment root, defaulting to your home.
 `--conflict <ask|fail|skip|overwrite>` decides conflicts in advance; see
 [ownership and deployment](../concepts/ownership-and-deployment.md). Also takes
-`--clean`, `--yes`, `--rerun-scripts`, and `--allow-host-scripts`.
+`--clean`, `--yes`, `--skip-requirements`, `--skip-scripts`,
+`--rerun-scripts`, and `--allow-host-scripts` — see `build` above for what the
+skip flags do.
 
 ### `setup <REPOSITORY>`
 
@@ -114,7 +127,12 @@ Read a verified product without evaluating Lua.
 
 `inspect` sections are `overview`, `inputs`, `target`, `modules`,
 `dependencies`, `providers`, `requirements`, `ladder`, `scripts`, `tasks`,
-`artifacts`, `sources`, `observations`.
+`artifacts`, `sources`, `observations`, `timeline`.
+
+`timeline` is the build log: every rung and action the execution journal
+recorded, slowest first, with how long each took. It's the first place to look
+when a build or apply that used to be fast suddenly isn't — a regression shows
+up as "this got slower" instead of requiring an external profiler.
 
 `explain` takes an artifact target, logical path, or anchored source path and
 traces it to its owner, declaration, source origin, production mode, target

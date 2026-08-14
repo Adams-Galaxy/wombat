@@ -639,6 +639,7 @@ pub enum ScriptOutcomeStatus {
     Ran,
     ScheduledSkip,
     CompileOnlySkip,
+    ManualSkip,
     Refused,
 }
 

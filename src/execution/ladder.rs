@@ -1,15 +1,21 @@
 //! Typed core/custom execution ladders and their durable journal vocabulary.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use tempfile::NamedTempFile;
 
 use crate::model::manifest::ExecutionMode;
 use crate::{Result, WombatError};
 
-pub const EXECUTION_JOURNAL_FORMAT_VERSION: u32 = 3;
+pub const EXECUTION_JOURNAL_FORMAT_VERSION: u32 = 4;
+
+fn elapsed_ms(instant: Instant) -> u64 {
+    u64::try_from(instant.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -332,8 +338,27 @@ pub struct ExecutionJournal {
     pub reuse_decisions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
-    pub rungs: Vec<(RungId, ExecutionStatus)>,
+    pub rungs: Vec<RungRecord>,
     pub actions: Vec<ActionJournal>,
+    // Wall-clock starts for whatever is currently `Running`, kept only for
+    // this process's lifetime so `set_id`/`record_action` can compute a
+    // duration on the matching terminal call without every caller threading
+    // an `Instant` through. Never persisted: a reopened journal has none, so
+    // an entry left `Running` across a crash simply has no duration, which is
+    // correct — nobody knows how long it actually ran.
+    #[serde(skip)]
+    rung_started: BTreeMap<RungId, Instant>,
+    #[serde(skip)]
+    action_started: BTreeMap<String, Instant>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RungRecord {
+    pub id: RungId,
+    pub status: ExecutionStatus,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -343,6 +368,8 @@ pub struct ActionJournal {
     pub rung: RungId,
     pub status: ExecutionStatus,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
 }
 
 impl ExecutionJournal {
@@ -367,9 +394,15 @@ impl ExecutionJournal {
             rungs: ladder
                 .leaf_ids()
                 .cloned()
-                .map(|rung| (rung, ExecutionStatus::Pending))
+                .map(|id| RungRecord {
+                    id,
+                    status: ExecutionStatus::Pending,
+                    duration_ms: None,
+                })
                 .collect(),
             actions: Vec::new(),
+            rung_started: BTreeMap::new(),
+            action_started: BTreeMap::new(),
         }
     }
 
@@ -386,9 +419,9 @@ impl ExecutionJournal {
         if self.plan_id != plan_id || self.requested_boundary != requested_boundary {
             return Self::new_for_ladder(plan_id.to_string(), requested_boundary, ladder);
         }
-        for (_, status) in &mut self.rungs {
-            if *status == ExecutionStatus::Running {
-                *status = ExecutionStatus::Interrupted;
+        for record in &mut self.rungs {
+            if record.status == ExecutionStatus::Running {
+                record.status = ExecutionStatus::Interrupted;
             }
         }
         self
@@ -425,12 +458,17 @@ impl ExecutionJournal {
     }
 
     pub fn set_id(&mut self, rung: &RungId, status: ExecutionStatus) {
-        if let Some((_, current)) = self
-            .rungs
-            .iter_mut()
-            .find(|(candidate, _)| candidate == rung)
-        {
-            *current = status;
+        let duration_ms = if status == ExecutionStatus::Running {
+            self.rung_started.insert(rung.clone(), Instant::now());
+            None
+        } else {
+            self.rung_started.remove(rung).map(elapsed_ms)
+        };
+        if let Some(record) = self.rungs.iter_mut().find(|record| record.id == *rung) {
+            record.status = status;
+            if duration_ms.is_some() {
+                record.duration_ms = duration_ms;
+            }
         }
     }
 
@@ -442,11 +480,18 @@ impl ExecutionJournal {
         reason: impl Into<String>,
     ) {
         let identity = identity.into();
+        let duration_ms = if status == ExecutionStatus::Running {
+            self.action_started.insert(identity.clone(), Instant::now());
+            None
+        } else {
+            self.action_started.remove(&identity).map(elapsed_ms)
+        };
         let action = ActionJournal {
             identity: identity.clone(),
             rung: rung.clone(),
             status,
             reason: reason.into(),
+            duration_ms,
         };
         if let Some(current) = self
             .actions

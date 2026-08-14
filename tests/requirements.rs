@@ -540,3 +540,267 @@ fn inspection_exposes_provider_and_requirement_semantics_without_lua() {
     assert!(explanation.contains("attempts:"));
     assert!(explanation.contains("command:rg"));
 }
+
+/// `brew info` cold-starts Ruby on every invocation, so checking N brew
+/// packages one at a time is the dominant cost of an otherwise-instant no-op
+/// `check`/`apply`. Three packages should still cost exactly one `brew info`
+/// call, not three.
+#[cfg(target_os = "macos")]
+#[test]
+fn brew_package_checks_are_batched_into_one_info_call() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let bin = temporary.path().join("bin");
+    let log = temporary.path().join("brew-calls.log");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w = require('wombat')\nw.providers({'brew'})\nw.need.package('alpha', { provider = 'brew' })\nw.need.package('beta', { provider = 'brew' })\nw.need.package('gamma', { provider = 'brew' })\n",
+    )
+    .unwrap();
+    let brew = bin.join("brew");
+    fs::write(
+        &brew,
+        r#"#!/bin/sh
+echo "$@" >> "$BREW_CALL_LOG"
+if [ "$1" = "info" ]; then
+  printf '{"formulae":[{"name":"alpha","installed":[{"version":"1.0.0"}]},{"name":"beta","installed":[{"version":"1.0.0"}]},{"name":"gamma","installed":[{"version":"1.0.0"}]}],"casks":[]}'
+  exit 0
+fi
+exit 9
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+    let build_dir = temporary.path().join("build");
+    wombat::build(wombat::BuildOptions::new(&source, &build_dir).with_host(macos_host())).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args([
+            "--source",
+            source.to_str().unwrap(),
+            "check",
+            "-B",
+            build_dir.to_str().unwrap(),
+        ])
+        .env("PATH", &bin)
+        .env("BREW_CALL_LOG", &log)
+        .env("XDG_STATE_HOME", temporary.path().join("state"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("satisfied"), "{stdout}");
+    assert!(
+        stdout.contains("ms)"),
+        "check output should report how long each requirement took: {stdout}"
+    );
+
+    let calls = fs::read_to_string(&log).unwrap();
+    let info_calls = calls
+        .lines()
+        .filter(|line| line.starts_with("info"))
+        .count();
+    assert_eq!(
+        info_calls, 1,
+        "three brew packages should cost one `brew info` call, not one per package: {calls}"
+    );
+    assert!(calls.contains("alpha") && calls.contains("beta") && calls.contains("gamma"));
+}
+
+/// `--skip-requirements` exists for the common edit-and-rebuild loop, where
+/// paying for a package check on every invocation is wasted work. It must
+/// skip the check without disabling reuse of an already-fresh product —
+/// wiring it straight to `with_provider_reconciliation` would have disabled
+/// [`try_reuse_product`]'s fast path too, making the flag slower than doing
+/// nothing on the second run.
+#[test]
+fn skip_requirements_avoids_the_package_check_and_still_reuses_a_fresh_product() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let bin = temporary.path().join("bin");
+    let log = temporary.path().join("brew-calls.log");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w = require('wombat')\nw.providers({'brew'})\nw.need.package('alpha', { provider = 'brew' })\n",
+    )
+    .unwrap();
+    let brew = bin.join("brew");
+    fs::write(
+        &brew,
+        r#"#!/bin/sh
+echo "$@" >> "$BREW_CALL_LOG"
+if [ "$1" = "info" ]; then
+  printf '{"formulae":[{"name":"alpha","installed":[{"version":"1.0.0"}]}],"casks":[]}'
+  exit 0
+fi
+exit 9
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+    let build_dir = temporary.path().join("build");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wombat"))
+            .arg("--source")
+            .arg(&source)
+            .args(args)
+            .arg("-B")
+            .arg(&build_dir)
+            .env("PATH", &bin)
+            .env("BREW_CALL_LOG", &log)
+            .env("XDG_STATE_HOME", temporary.path().join("state"))
+            .output()
+            .unwrap()
+    };
+    let info_call_count = |calls: &str| {
+        calls
+            .lines()
+            .filter(|line| line.starts_with("info"))
+            .count()
+    };
+
+    let first = run(&["build", "--skip-requirements"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        info_call_count(&fs::read_to_string(&log).unwrap_or_default()),
+        0,
+        "--skip-requirements must not invoke the package manager"
+    );
+
+    let second = run(&["build", "--skip-requirements"]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let after_second = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        info_call_count(&after_second),
+        0,
+        "a repeated --skip-requirements build must still not check packages"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stdout).contains("reused"),
+        "skipping requirement checks must not disable reuse of the fresh product: {}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+
+    let third = run(&["build"]);
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    assert_eq!(
+        info_call_count(&fs::read_to_string(&log).unwrap()),
+        1,
+        "a normal build must still check requirements once the flag is dropped"
+    );
+}
+
+/// `prepare_product_deploy_at_authorized` re-verifies its rung's requirements
+/// against the live environment at every deploy rung boundary crossed. When
+/// authorization already found nothing pending for the whole plan, that
+/// re-verification is pure redundant provider-check cost — one `apply` used
+/// to pay for a brew check at every one of `deploy.before`/`deploy.apply`/
+/// `deploy.after`, not just once at authorization time.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_satisfied_deploy_scoped_package_is_checked_once_not_per_rung() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let bin = temporary.path().join("bin");
+    let home = temporary.path().join("home");
+    let log = temporary.path().join("brew-calls.log");
+    fs::create_dir_all(source.join("src")).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&home).unwrap();
+    fs::write(source.join("src/dot_marker"), "deployed\n").unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'brew'})\nw.need.package('hello', { provider='brew', publishes={commands={'hello'}}, when=w.rungs.deploy.before })\nw.install('.marker')\n",
+    )
+    .unwrap();
+    let brew = bin.join("brew");
+    fs::write(
+        &brew,
+        r#"#!/bin/sh
+echo "$@" >> "$BREW_CALL_LOG"
+if [ "$1" = "info" ]; then
+  printf '{"formulae":[{"name":"hello","installed":[{"version":"1.0.0"}]}],"casks":[]}'
+  exit 0
+fi
+exit 9
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+    let hello = bin.join("hello");
+    fs::write(&hello, "#!/bin/sh\nprintf 'hello\\n'\n").unwrap();
+    fs::set_permissions(&hello, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let build_dir = source.join("build");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args([
+            "--source",
+            source.to_str().unwrap(),
+            "apply",
+            "-B",
+            build_dir.to_str().unwrap(),
+            "--target-root",
+            home.to_str().unwrap(),
+            "--conflict",
+            "fail",
+            "--yes",
+        ])
+        .env("PATH", &path)
+        .env("BREW_CALL_LOG", &log)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", temporary.path().join("state"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(".marker")).unwrap(),
+        "deployed\n"
+    );
+
+    let calls = fs::read_to_string(&log).unwrap();
+    let info_calls = calls
+        .lines()
+        .filter(|line| line.starts_with("info"))
+        .count();
+    assert_eq!(
+        info_calls, 1,
+        "a package satisfied for the whole plan should cost one `brew info` call \
+         across build and deploy, not one per rung boundary crossed: {calls}"
+    );
+}

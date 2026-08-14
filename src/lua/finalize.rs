@@ -629,7 +629,14 @@ pub(super) fn parse_lua_line(message: &str) -> Option<u32> {
 pub(super) fn clean_lua_reason(raw: &str) -> String {
     let first = raw.split("\nstack traceback:").next().unwrap_or(raw);
     let bytes = first.as_bytes();
-    for start in 0..bytes.len() {
+    // A genuine Lua `chunkname:line:` auto-prefix is always the first thing
+    // in the string, and a chunkname is a bare path with no whitespace in
+    // it — so bound the search to before the first whitespace. Without that
+    // bound, a hand-composed message that merely mentions a location further
+    // in (`"...at wombat.lua:2: reason"`) gets mistaken for Lua's own prefix
+    // and everything before it is discarded.
+    let prefix_end = first.find(char::is_whitespace).unwrap_or(bytes.len());
+    for start in 0..prefix_end {
         if bytes[start] != b':' {
             continue;
         }
@@ -810,7 +817,27 @@ pub(super) fn digest_bytes(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{helper_module_path, is_path_ancestor, validate_module_name};
+    use super::{clean_lua_reason, helper_module_path, is_path_ancestor, validate_module_name};
+
+    #[test]
+    fn strips_a_leading_lua_chunk_prefix_but_not_a_composed_location_mention() {
+        assert_eq!(
+            clean_lua_reason("wombat.lua:5: w.exec() requires an argv array"),
+            "w.exec() requires an argv array"
+        );
+        assert_eq!(
+            clean_lua_reason(
+                "modules/dot_config/broken.lua:2: attempt to perform arithmetic on a string value\nstack traceback:\n\t..."
+            ),
+            "attempt to perform arithmetic on a string value"
+        );
+        assert_eq!(
+            clean_lua_reason(
+                "failed to parse JSON data `broken.json` at wombat.lua:2: key must be a string at line 1 column 3"
+            ),
+            "failed to parse JSON data `broken.json` at wombat.lua:2: key must be a string at line 1 column 3"
+        );
+    }
 
     #[test]
     fn validates_initial_module_names() {

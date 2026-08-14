@@ -616,6 +616,7 @@ pub(super) fn provider_item(
         provider: binding.provider.clone(),
         status,
         detail: detail.to_string(),
+        duration_ms: 0,
     }
 }
 
@@ -710,7 +711,7 @@ pub(super) fn brew_flag(kind: &str) -> &'static str {
 }
 
 pub(super) fn brew_operation(binding: &ProviderBinding) -> Result<&'static str> {
-    match check_brew(binding, None)?.status {
+    match check_brew(binding, None, &BrewSnapshot::fetch(&[])?)?.status {
         CheckStatus::Satisfied | CheckStatus::Outdated => Ok("upgrade"),
         CheckStatus::Missing => Ok("install"),
         CheckStatus::Unavailable => Err(WombatError::configuration(
@@ -719,16 +720,8 @@ pub(super) fn brew_operation(binding: &ProviderBinding) -> Result<&'static str> 
     }
 }
 
-pub(super) fn installed_brew_versions(json: &serde_json::Value, kind: &str) -> Result<Vec<String>> {
-    let entry = json
-        .get(if kind == "cask" { "casks" } else { "formulae" })
-        .and_then(serde_json::Value::as_array)
-        .and_then(|values| values.first())
-        .ok_or_else(|| {
-            WombatError::configuration("Homebrew returned no matching package record")
-        })?;
-    let installed = entry.get("installed");
-    let versions = match installed {
+pub(super) fn installed_brew_versions(entry: &serde_json::Value) -> Vec<String> {
+    match entry.get("installed") {
         Some(serde_json::Value::Array(values)) => values
             .iter()
             .filter_map(|value| {
@@ -740,8 +733,7 @@ pub(super) fn installed_brew_versions(json: &serde_json::Value, kind: &str) -> R
             .collect(),
         Some(serde_json::Value::String(value)) => vec![value.clone()],
         _ => Vec::new(),
-    };
-    Ok(versions)
+    }
 }
 
 pub(super) fn brew_environment() -> BTreeMap<String, String> {

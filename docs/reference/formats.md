@@ -11,7 +11,7 @@ telling you to rebuild. There are no migrations — see
 | --- | --- | --- |
 | Manifest | 18 | `<build>/manifest.json` |
 | Build plan | 9 | `<build>/.wombat/plan/plan.json` |
-| Execution journal | 3 | `<build>/.wombat/execution-journal.json`, and per target |
+| Execution journal | 4 | `<build>/.wombat/execution-journal.json`, and per target |
 | Target state | 3 | `$XDG_STATE_HOME/wombat/targets/<target>/state.json` |
 | Script state | 1 | `$XDG_STATE_HOME/wombat/scripts/materialise/<project>/…/state.json` |
 | Workspace marker | 1 | `<build>/.wombat/workspace.json` |

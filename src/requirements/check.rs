@@ -4,11 +4,33 @@ use super::providers::*;
 use super::*;
 
 pub(super) fn check_context(context: &RequirementContext<'_>) -> Result<CheckOutcome> {
-    let items = context
-        .requirements
-        .iter()
-        .map(|requirement| check_requirement(context, requirement))
-        .collect::<Result<Vec<_>>>()?;
+    // Each check is a blocking subprocess (brew, dpkg, git...), so the
+    // dominant cost is wall-clock wait, not CPU — running them concurrently
+    // turns N sequential spawns into roughly the slowest one.
+    let brew = BrewSnapshot::fetch(context.requirements)?;
+    let items = std::thread::scope(|scope| {
+        context
+            .requirements
+            .iter()
+            .map(|requirement| {
+                // `WombatError` is not `Send` (it can wrap an `mlua::Error`,
+                // which holds a non-Send `Arc<dyn Error>`), so cross the
+                // thread boundary as a string and rebuild it after joining.
+                scope.spawn(|| {
+                    check_requirement(context, requirement, &brew)
+                        .map_err(|error| error.to_string())
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    .map_err(WombatError::configuration)
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
     Ok(CheckOutcome {
         build_id: context.id.to_string(),
         items,
@@ -18,6 +40,18 @@ pub(super) fn check_context(context: &RequirementContext<'_>) -> Result<CheckOut
 pub(super) fn check_requirement(
     context: &RequirementContext<'_>,
     requirement: &Requirement,
+    brew: &BrewSnapshot,
+) -> Result<CheckItem> {
+    let started = std::time::Instant::now();
+    let mut item = check_requirement_uncounted(context, requirement, brew)?;
+    item.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(item)
+}
+
+fn check_requirement_uncounted(
+    context: &RequirementContext<'_>,
+    requirement: &Requirement,
+    brew: &BrewSnapshot,
 ) -> Result<CheckItem> {
     let selected = selected_candidate(requirement)?;
     let label = requirement_label(requirement);
@@ -32,6 +66,7 @@ pub(super) fn check_requirement(
                         provider: requirement.binding.provider.clone(),
                         status: CheckStatus::Satisfied,
                         detail: format!("{} at {}", path.display(), observed),
+                        duration_ms: 0,
                     });
                 }
                 return Ok(CheckItem {
@@ -39,6 +74,7 @@ pub(super) fn check_requirement(
                     provider: requirement.binding.provider.clone(),
                     status: CheckStatus::Outdated,
                     detail: format!("observed {observed}; needs at least {minimum}"),
+                    duration_ms: 0,
                 });
             }
             return Ok(CheckItem {
@@ -46,13 +82,14 @@ pub(super) fn check_requirement(
                 provider: requirement.binding.provider.clone(),
                 status: CheckStatus::Satisfied,
                 detail: path.display().to_string(),
+                duration_ms: 0,
             });
         }
     }
     let provider = provider_for(context.providers, &requirement.binding.provider)?;
     let mut result = match &provider.origin {
         ProviderOrigin::Builtin { .. } => match provider.name.as_str() {
-            "brew" => check_brew(&requirement.binding, selected.minimum())?,
+            "brew" => check_brew(&requirement.binding, selected.minimum(), brew)?,
             "apt" => check_apt(&requirement.binding, selected.minimum())?,
             "git" => check_git(&requirement.binding)?,
             name => {
@@ -78,30 +115,138 @@ pub(super) fn check_requirement(
     Ok(result)
 }
 
-pub(super) fn check_brew(binding: &ProviderBinding, minimum: Option<&str>) -> Result<CheckItem> {
+/// Batched Homebrew metadata for every `brew`-bound requirement in one check
+/// pass. `brew info` cold-starts Ruby on every invocation, so querying every
+/// requested formula and cask together turns N slow spawns into at most two.
+pub(super) struct BrewSnapshot {
+    brew: Option<PathBuf>,
+    formulae: BTreeMap<String, serde_json::Value>,
+    casks: BTreeMap<String, serde_json::Value>,
+}
+
+impl BrewSnapshot {
+    pub(super) fn fetch(requirements: &[Requirement]) -> Result<Self> {
+        let Some(brew) = which("brew") else {
+            return Ok(Self {
+                brew: None,
+                formulae: BTreeMap::new(),
+                casks: BTreeMap::new(),
+            });
+        };
+        let mut formula_names = BTreeSet::new();
+        let mut cask_names = BTreeSet::new();
+        for requirement in requirements {
+            if requirement.binding.provider != "brew" {
+                continue;
+            }
+            // A command requirement never consults its provider once `which`
+            // finds it on PATH — fetching brew metadata for it anyway would
+            // reintroduce exactly the cold-start cost this snapshot exists to
+            // avoid, for a check that was never going to touch brew.
+            if requirement.kind == RequirementKind::Command
+                && selected_candidate(requirement)
+                    .is_ok_and(|selected| which(selected.name()).is_some())
+            {
+                continue;
+            }
+            let Ok((kind, name)) = brew_identity(&requirement.binding) else {
+                continue;
+            };
+            if kind == "cask" {
+                cask_names.insert(name.to_string());
+            } else {
+                formula_names.insert(name.to_string());
+            }
+        }
+        Ok(Self {
+            formulae: Self::fetch_records(&brew, "--formula", "formulae", "name", &formula_names)?,
+            casks: Self::fetch_records(&brew, "--cask", "casks", "token", &cask_names)?,
+            brew: Some(brew),
+        })
+    }
+
+    /// One `brew info` call for every name of a kind. A single unresolvable
+    /// name fails the whole call with no stdout, so a failure here leaves the
+    /// snapshot empty for that kind rather than erroring — the per-item
+    /// fallback in `check_brew` then re-queries individually and reports
+    /// exactly which name is at fault.
+    fn fetch_records(
+        brew: &Path,
+        flag: &str,
+        array_key: &str,
+        name_field: &str,
+        names: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, serde_json::Value>> {
+        if names.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mut args = vec!["info", "--json=v2", flag];
+        args.extend(names.iter().map(String::as_str));
+        let output = run_bounded(brew, &args, &brew_environment())?;
+        if !output.success {
+            return Ok(BTreeMap::new());
+        }
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let mut records = BTreeMap::new();
+        if let Some(array) = json.get(array_key).and_then(serde_json::Value::as_array) {
+            for entry in array {
+                if let Some(name) = entry.get(name_field).and_then(serde_json::Value::as_str) {
+                    records.insert(name.to_string(), entry.clone());
+                }
+            }
+        }
+        Ok(records)
+    }
+}
+
+pub(super) fn check_brew(
+    binding: &ProviderBinding,
+    minimum: Option<&str>,
+    snapshot: &BrewSnapshot,
+) -> Result<CheckItem> {
     let (kind, name) = brew_identity(binding)?;
-    let brew = which("brew");
-    let Some(brew) = brew else {
+    let Some(brew) = &snapshot.brew else {
         return Ok(provider_item(
             binding,
             CheckStatus::Unavailable,
             "Homebrew is not available on PATH",
         ));
     };
-    let output = run_bounded(
-        &brew,
-        &["info", "--json=v2", brew_flag(kind), name],
-        &BTreeMap::new(),
-    )?;
-    if !output.success {
-        return Ok(provider_item(
-            binding,
-            CheckStatus::Unavailable,
-            &format!("brew info failed: {}", output_detail(&output)),
-        ));
-    }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let installed = installed_brew_versions(&json, kind)?;
+    let cached = if kind == "cask" {
+        snapshot.casks.get(name)
+    } else {
+        snapshot.formulae.get(name)
+    };
+    let entry = match cached {
+        Some(entry) => entry.clone(),
+        None => {
+            let output = run_bounded(
+                brew,
+                &["info", "--json=v2", brew_flag(kind), name],
+                &brew_environment(),
+            )?;
+            if !output.success {
+                return Ok(provider_item(
+                    binding,
+                    CheckStatus::Unavailable,
+                    &format!("brew info failed: {}", output_detail(&output)),
+                ));
+            }
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+            let array_key = if kind == "cask" { "casks" } else { "formulae" };
+            let Some(entry) = json
+                .get(array_key)
+                .and_then(serde_json::Value::as_array)
+                .and_then(|values| values.first())
+            else {
+                return Err(WombatError::configuration(
+                    "Homebrew returned no matching package record",
+                ));
+            };
+            entry.clone()
+        }
+    };
+    let installed = installed_brew_versions(&entry);
     let Some(observed) = installed.last() else {
         return Ok(provider_item(
             binding,

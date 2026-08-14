@@ -55,8 +55,10 @@ pub struct DeploymentOptions {
     pub host: Option<HostContext>,
     pub yes: bool,
     pub reconcile_requirements: bool,
+    pub check_requirements: bool,
     pub requirement_authorization: Option<crate::requirements::RequirementAuthorization>,
     pub clean: bool,
+    pub run_scripts: bool,
     pub rerun_scripts: bool,
     pub allow_host_scripts: bool,
 }
@@ -72,8 +74,10 @@ impl DeploymentOptions {
             host: None,
             yes: false,
             reconcile_requirements: false,
+            check_requirements: true,
             requirement_authorization: None,
             clean: false,
+            run_scripts: true,
             rerun_scripts: false,
             allow_host_scripts: false,
         }
@@ -109,6 +113,15 @@ impl DeploymentOptions {
         self
     }
 
+    /// Opts out of checking requirements (packages, commands) against the host.
+    ///
+    /// On by default; pass `false` for a quick deploy that shouldn't pay for a
+    /// package check on every run.
+    pub fn with_check_requirements(mut self, check: bool) -> Self {
+        self.check_requirements = check;
+        self
+    }
+
     #[doc(hidden)]
     pub fn with_requirement_authorization(
         mut self,
@@ -120,6 +133,15 @@ impl DeploymentOptions {
 
     pub fn with_clean(mut self, clean: bool) -> Self {
         self.clean = clean;
+        self
+    }
+
+    /// Opts out of running `w.script` entries entirely.
+    ///
+    /// `w.build.task` entries are unaffected. On by default; pass `false` to
+    /// skip scripts for a quick edit-apply loop.
+    pub fn with_run_scripts(mut self, run: bool) -> Self {
+        self.run_scripts = run;
         self
     }
 
@@ -194,6 +216,7 @@ pub struct PreparedApply {
     state_root: PathBuf,
     target_root: PathBuf,
     clean: bool,
+    run_scripts: bool,
     rerun_scripts: bool,
     allow_host_scripts: bool,
 }
@@ -281,6 +304,7 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
     let requirement_authorization = if options.requirement_authorization.is_some() {
         options.requirement_authorization.clone()
     } else if options.reconcile_requirements
+        && options.check_requirements
         && opened.manifest.execution_mode == crate::model::manifest::ExecutionMode::Normal
         && opened.manifest.requirements.iter().any(|requirement| {
             opened
@@ -311,6 +335,7 @@ pub fn prepare_apply(options: &DeploymentOptions) -> Result<PreparedApply> {
         state_root,
         target_root: options.target_root.clone(),
         clean: options.clean,
+        run_scripts: options.run_scripts,
         rerun_scripts: options.rerun_scripts,
         allow_host_scripts: options.allow_host_scripts,
     })

@@ -18,9 +18,8 @@ pub(super) fn execute(
             .unwrap_or_else(|_| {
                 ExecutionJournal::new_for_ladder(plan_id, CoreRung::DeployAfter, &prepared_ladder)
             });
-        let failed_rung = if journal.rungs.iter().any(|(rung, status)| {
-            rung == &crate::execution::ladder::RungId::from(CoreRung::DeployApply)
-                && *status == ExecutionStatus::Succeeded
+        let failed_rung = if journal.rungs.iter().any(|record| {
+            record.id == CoreRung::DeployApply && record.status == ExecutionStatus::Succeeded
         }) {
             CoreRung::DeployAfter
         } else {
@@ -46,6 +45,7 @@ fn execute_inner(
         state_root,
         target_root,
         clean,
+        run_scripts,
         rerun_scripts,
         allow_host_scripts,
     } = prepared;
@@ -131,6 +131,7 @@ fn execute_inner(
                 execution_mode: opened.manifest.execution_mode,
                 allow_host_scripts,
                 rerun: rerun_scripts,
+                run_scripts,
                 target_root: Some(&target_root),
             },
         )? {
@@ -180,6 +181,7 @@ fn execute_inner(
             execution_mode: opened.manifest.execution_mode,
             allow_host_scripts,
             rerun: rerun_scripts,
+            run_scripts,
             target_root: Some(&target_root),
         },
     )? {
@@ -359,6 +361,7 @@ fn execute_inner(
                 execution_mode: opened.manifest.execution_mode,
                 allow_host_scripts,
                 rerun: rerun_scripts,
+                run_scripts,
                 target_root: Some(&target_root),
             },
         )? {

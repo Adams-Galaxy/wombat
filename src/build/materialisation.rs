@@ -358,11 +358,6 @@ fn render_and_hash(
     renderer.set_strict_mode(true);
     renderer.set_recursive_lookup(false);
     renderer.register_escape_fn(handlebars::no_escape);
-    for helper in [
-        "lookup", "log", "eq", "ne", "gt", "gte", "lt", "lte", "and", "or", "not", "len",
-    ] {
-        renderer.unregister_helper(helper);
-    }
     renderer.register_helper("if", Box::new(StrictConditionalHelper::new("if", true)));
     renderer.register_helper(
         "unless",
@@ -370,7 +365,6 @@ fn render_and_hash(
     );
     let template = handlebars::Template::compile(template_source)
         .map_err(|error| template_compile_error(source_name, template_source, error))?;
-    validate_handlebars_contract(source_name, &template)?;
     renderer.register_template(source_name, template);
     let rendered = renderer
         .render(source_name, context)
@@ -510,94 +504,6 @@ fn handlebars_truthy(value: &serde_json::Value) -> bool {
         serde_json::Value::Array(value) => !value.is_empty(),
         serde_json::Value::Object(value) => !value.is_empty(),
     }
-}
-
-fn validate_handlebars_contract(source_name: &str, template: &handlebars::Template) -> Result<()> {
-    use handlebars::template::TemplateElement;
-
-    for (index, element) in template.elements.iter().enumerate() {
-        let location = template
-            .mapping
-            .get(index)
-            .map_or(String::new(), |mapping| {
-                format!(" at line {}, column {}", mapping.0, mapping.1)
-            });
-        match element {
-            TemplateElement::RawString(_) | TemplateElement::Comment(_) => {}
-            TemplateElement::Expression(helper) | TemplateElement::HtmlExpression(helper) => {
-                if !helper.params.is_empty() || !helper.hash.is_empty() {
-                    return Err(unsupported_handlebars_feature(
-                        source_name,
-                        &location,
-                        "inline helpers",
-                    ));
-                }
-            }
-            TemplateElement::HelperBlock(helper) => {
-                let name = helper.name.as_name().unwrap_or("<dynamic>");
-                if !matches!(name, "if" | "unless" | "each" | "with" | "raw") {
-                    return Err(unsupported_handlebars_feature(
-                        source_name,
-                        &location,
-                        &format!("helper `{name}`"),
-                    ));
-                }
-                if !helper.hash.is_empty()
-                    || helper
-                        .params
-                        .iter()
-                        .any(handlebars_parameter_has_subexpression)
-                {
-                    return Err(unsupported_handlebars_feature(
-                        source_name,
-                        &location,
-                        "helper hash arguments and subexpressions",
-                    ));
-                }
-                if matches!(name, "each" | "with") && helper.inverse.is_some() {
-                    return Err(unsupported_handlebars_feature(
-                        source_name,
-                        &location,
-                        "else blocks on `each` or `with`",
-                    ));
-                }
-                if let Some(body) = &helper.template {
-                    validate_handlebars_contract(source_name, body)?;
-                }
-                if let Some(inverse) = &helper.inverse {
-                    validate_handlebars_contract(source_name, inverse)?;
-                }
-            }
-            TemplateElement::DecoratorExpression(_)
-            | TemplateElement::DecoratorBlock(_)
-            | TemplateElement::PartialExpression(_)
-            | TemplateElement::PartialBlock(_) => {
-                return Err(unsupported_handlebars_feature(
-                    source_name,
-                    &location,
-                    "decorators and partials",
-                ));
-            }
-            _ => {
-                return Err(unsupported_handlebars_feature(
-                    source_name,
-                    &location,
-                    "this template construct",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn handlebars_parameter_has_subexpression(parameter: &handlebars::template::Parameter) -> bool {
-    matches!(parameter, handlebars::template::Parameter::Subexpression(_))
-}
-
-fn unsupported_handlebars_feature(source_name: &str, location: &str, feature: &str) -> WombatError {
-    WombatError::configuration(format!(
-        "template `{source_name}` uses unsupported Handlebars {feature}{location}; resolve policy and transformations in Lua"
-    ))
 }
 
 fn copy_and_hash(

@@ -316,27 +316,29 @@ fn template_syntax_and_unsupported_context_fail_before_publication() {
 }
 
 #[test]
-fn handlebars_contract_rejects_policy_helpers_lookup_logging_and_partials() {
-    for source in [
-        "{{eq 1 1}}\n",
-        "{{#if (eq 1 1)}}yes{{/if}}\n",
-        "{{lookup values 0}}\n",
-        "{{log value}}\n",
-        "{{#each values}}value{{else}}empty{{/each}}\n",
-        "{{#with value}}value{{else}}empty{{/with}}\n",
-        "{{#*inline \"part\"}}content{{/inline}}{{> part}}\n",
+fn handlebars_supports_policy_helpers_lookup_logging_and_partials() {
+    for (source, expected) in [
+        ("{{eq 1 1}}\n", "true\n"),
+        ("{{#if (eq 1 1)}}yes{{/if}}\n", "yes\n"),
+        ("{{lookup values 0}}\n", "x\n"),
+        ("{{log value}}\n", "\n"),
+        ("{{#each values}}value{{else}}empty{{/each}}\n", "value\n"),
+        ("{{#with value}}value{{else}}empty{{/with}}\n", "value\n"),
+        (
+            "{{#*inline \"part\"}}content{{/inline}}{{> part}}\n",
+            "content\n",
+        ),
     ] {
         let repository = basic_repository(
             "local w = require('wombat')\nw.install('value.tmpl', { with = { value = 'x', values = { 'x' } } })\n",
             "value.tmpl",
             source,
         );
-        let error = repository.build().unwrap_err().to_string();
-        assert!(
-            error.contains("failed to render template")
-                || error.contains("failed to compile template")
-                || error.contains("uses unsupported Handlebars"),
-            "source {source:?}: {error}"
+        repository.build().unwrap();
+        assert_eq!(
+            fs::read_to_string(repository.root.join("build/tree/.config/value")).unwrap(),
+            expected,
+            "source {source:?}"
         );
     }
 }

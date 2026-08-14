@@ -110,6 +110,7 @@ pub struct CheckItem {
     pub provider: String,
     pub status: CheckStatus,
     pub detail: String,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,11 +136,12 @@ impl CheckOutcome {
         let mut output = format!("requirements for {}\n", self.build_id);
         for item in &self.items {
             output.push_str(&format!(
-                "  {:<11} {} via {} — {}\n",
+                "  {:<11} {} via {} — {} ({}ms)\n",
                 item.status.as_str(),
                 item.requirement,
                 item.provider,
-                item.detail
+                item.detail,
+                item.duration_ms
             ));
         }
         output
@@ -332,7 +334,6 @@ pub(crate) fn prepare_product_deploy_at_authorized(
 ) -> Result<BootstrapOutcome> {
     let opened = open_build(build_dir)?;
     ensure_compatible_host(&opened.manifest)?;
-    let _environment_lock = EnvironmentLock::exclusive()?;
     let mut manifest = opened.manifest.clone();
     manifest.requirements.retain(|requirement| {
         opened.manifest.ladder.at_or_after(
@@ -341,6 +342,24 @@ pub(crate) fn prepare_product_deploy_at_authorized(
         ) && opened.manifest.ladder.position(&requirement.when)
             <= opened.manifest.ladder.position(rung)
     });
+    // An empty `approved` means authorization found nothing pending for the
+    // *whole* plan and never paused for a confirm prompt, so there was no gap
+    // for the environment to drift in — a subset of an already-fully-checked
+    // plan is still fully satisfied. Skipping the re-check here is what turns
+    // "one check_context per rung crossed" back into "one, at authorization
+    // time," since each rung boundary otherwise re-pays a full provider check.
+    if authorization.approved.is_empty() {
+        return Ok(BootstrapOutcome {
+            build_id: opened.manifest.build_id.clone(),
+            completed: Vec::new(),
+            already_satisfied: manifest
+                .requirements
+                .iter()
+                .map(requirement_label)
+                .collect(),
+        });
+    }
+    let _environment_lock = EnvironmentLock::exclusive()?;
     let context = RequirementContext::target_manifest(&manifest, &opened.product_dir);
     let current = check_context(&context)?;
     if current.operational_failure() {
@@ -433,11 +452,26 @@ pub(crate) fn prepare_target_plan_at_authorized(
     authorization: &mut RequirementAuthorization,
 ) -> Result<BootstrapOutcome> {
     ensure_compatible_platform(&plan.target.platform)?;
-    let _environment_lock = EnvironmentLock::exclusive()?;
     let mut eligible = plan.clone();
     eligible.requirements.retain(|requirement| {
         plan.ladder.position(&requirement.when) <= plan.ladder.position(rung)
     });
+    // See the matching comment in `prepare_product_deploy_at_authorized`: an
+    // empty `approved` means the whole plan was already verified satisfied
+    // with no confirm-prompt gap, so re-checking a subset of it per rung
+    // crossed is pure redundant provider-check cost.
+    if authorization.approved.is_empty() {
+        return Ok(BootstrapOutcome {
+            build_id: plan.plan_id.clone(),
+            completed: Vec::new(),
+            already_satisfied: eligible
+                .requirements
+                .iter()
+                .map(requirement_label)
+                .collect(),
+        });
+    }
+    let _environment_lock = EnvironmentLock::exclusive()?;
     let context = RequirementContext::target_plan(&eligible, build_dir);
     let current = check_context(&context)?;
     if current.operational_failure() {
@@ -595,7 +629,7 @@ fn reconcile_context_inner(
                 }
             )));
         }
-        let post = check_requirement(context, requirement)?;
+        let post = check_requirement(context, requirement, &BrewSnapshot::fetch(&[])?)?;
         if post.status != CheckStatus::Satisfied {
             return Err(WombatError::configuration(format!(
                 "{operation_name} reconciled `{}` but post-check reported {}: {}; completed: {}",

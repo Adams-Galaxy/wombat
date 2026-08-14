@@ -177,12 +177,21 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
         repository_root.to_string_lossy().to_string(),
     )?;
 
-    let data_state = Rc::clone(&state);
+    let toml_data_state = Rc::clone(&state);
     native.set(
         "toml_data",
         lua.create_function(move |lua, path: String| {
-            let location = caller_location(lua, &data_state);
-            read_toml_data(lua, &data_state, &path, location).map_err(mlua::Error::external)
+            let location = caller_location(lua, &toml_data_state);
+            read_toml_data(lua, &toml_data_state, &path, location).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let json_data_state = Rc::clone(&state);
+    native.set(
+        "json_data",
+        lua.create_function(move |lua, path: String| {
+            let location = caller_location(lua, &json_data_state);
+            read_json_data(lua, &json_data_state, &path, location).map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -259,12 +268,15 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
     Ok(native)
 }
 
-pub(super) fn read_toml_data(
-    lua: &Lua,
+/// Loads and tracks the source behind a `w.data.*` read. `FrozenValue`
+/// already deserializes generically, so every format shares this one safety
+/// and provenance path rather than each growing its own.
+fn read_data_source(
     state: &Rc<RefCell<RuntimeState>>,
     declared: &str,
-    location: Location,
-) -> Result<Value> {
+    caller: &str,
+    location: &Location,
+) -> Result<String> {
     if declared.is_empty()
         || Path::new(declared).is_absolute()
         || declared
@@ -272,44 +284,45 @@ pub(super) fn read_toml_data(
             .any(|component| component.is_empty() || component == "." || component == "..")
     {
         return Err(WombatError::configuration(format!(
-            "w.data.toml() requires a safe repository-relative path at {}",
+            "{caller} requires a safe repository-relative path at {}",
             location.display()
         )));
     }
     let path = state.borrow().root.join(declared);
     validate_source_components(&state.borrow().root, &path)?;
-    let source = load_tracked_source(state, &path)?;
-    let value: toml::Value = toml::from_str(&source).map_err(|error| {
+    load_tracked_source(state, &path)
+}
+
+pub(super) fn read_toml_data(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    declared: &str,
+    location: Location,
+) -> Result<Value> {
+    let source = read_data_source(state, declared, "w.data.toml()", &location)?;
+    let value: FrozenValue = toml::from_str(&source).map_err(|error| {
         WombatError::configuration(format!(
             "failed to parse TOML data `{declared}` at {}: {error}",
             location.display()
         ))
     })?;
-    toml_to_lua(lua, value)
+    Ok(value.to_lua(lua)?)
 }
 
-pub(super) fn toml_to_lua(lua: &Lua, value: toml::Value) -> Result<Value> {
-    match value {
-        toml::Value::String(value) => Ok(Value::String(lua.create_string(value)?)),
-        toml::Value::Datetime(value) => Ok(Value::String(lua.create_string(value.to_string())?)),
-        toml::Value::Integer(value) => Ok(Value::Integer(value)),
-        toml::Value::Float(value) => Ok(Value::Number(value)),
-        toml::Value::Boolean(value) => Ok(Value::Boolean(value)),
-        toml::Value::Array(values) => {
-            let table = lua.create_table_with_capacity(values.len(), 0)?;
-            for (index, value) in values.into_iter().enumerate() {
-                table.set(index + 1, toml_to_lua(lua, value)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-        toml::Value::Table(values) => {
-            let table = lua.create_table_with_capacity(0, values.len())?;
-            for (key, value) in values {
-                table.set(key, toml_to_lua(lua, value)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-    }
+pub(super) fn read_json_data(
+    lua: &Lua,
+    state: &Rc<RefCell<RuntimeState>>,
+    declared: &str,
+    location: Location,
+) -> Result<Value> {
+    let source = read_data_source(state, declared, "w.data.json()", &location)?;
+    let value: FrozenValue = serde_json::from_str(&source).map_err(|error| {
+        WombatError::configuration(format!(
+            "failed to parse JSON data `{declared}` at {}: {error}",
+            location.display()
+        ))
+    })?;
+    Ok(value.to_lua(lua)?)
 }
 
 pub(super) fn emit_lua_log(

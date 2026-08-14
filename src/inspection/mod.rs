@@ -41,6 +41,7 @@ pub enum InspectSection {
     Artifacts,
     Sources,
     Observations,
+    Timeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -601,7 +602,56 @@ fn render_section(
         InspectSection::Observations => {
             render_observations(&manifest.observations, &manifest.process_observations)
         }
+        InspectSection::Timeline => render_timeline(journal),
     }
+}
+
+/// A ninja-log-style view of one build: every rung and action this run
+/// touched, slowest first, so a regression shows up as "this got slower"
+/// instead of requiring an external profiler to find.
+fn render_timeline(journal: Option<&crate::execution::ladder::ExecutionJournal>) -> String {
+    let Some(journal) = journal else {
+        return "Timeline\n  no execution journal for this product\n".to_string();
+    };
+    let mut rungs = journal.rungs.iter().collect::<Vec<_>>();
+    rungs.sort_by_key(|record| std::cmp::Reverse(record.duration_ms.unwrap_or(0)));
+    let mut output = render_list(
+        "Rungs, slowest first",
+        rungs.into_iter().map(|record| {
+            format!(
+                "{}\n  status: {:?}\n  duration: {}",
+                record.id,
+                record.status,
+                duration_label(record.duration_ms),
+            )
+        }),
+    );
+    let mut actions = journal.actions.iter().collect::<Vec<_>>();
+    actions.sort_by_key(|action| std::cmp::Reverse(action.duration_ms.unwrap_or(0)));
+    output.push_str(&render_list(
+        "Actions, slowest first",
+        actions.into_iter().map(|action| {
+            format!(
+                "{}\n  rung: {}\n  status: {:?}\n  duration: {}\n  reason: {}",
+                action.identity,
+                action.rung,
+                action.status,
+                duration_label(action.duration_ms),
+                action.reason,
+            )
+        }),
+    ));
+    let total = journal
+        .rungs
+        .iter()
+        .filter_map(|record| record.duration_ms)
+        .sum::<u64>();
+    output.push_str(&format!("Total measured rung time: {total}ms\n"));
+    output
+}
+
+fn duration_label(duration_ms: Option<u64>) -> String {
+    duration_ms.map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms"))
 }
 
 fn render_requirement(requirement: &crate::model::manifest::Requirement) -> String {

@@ -78,7 +78,9 @@ pub struct BuildOptions {
     pub yes: bool,
     pub clean: bool,
     pub reconcile_requirements: bool,
+    pub check_requirements: bool,
     pub requirement_boundary: crate::execution::ladder::CoreRung,
+    pub run_scripts: bool,
     pub rerun_scripts: bool,
     pub allow_host_scripts: bool,
     pub script_state_root: Option<PathBuf>,
@@ -99,7 +101,9 @@ impl BuildOptions {
             yes: false,
             clean: false,
             reconcile_requirements: false,
+            check_requirements: true,
             requirement_boundary: crate::execution::ladder::CoreRung::MaterialiseAfter,
+            run_scripts: true,
             rerun_scripts: false,
             allow_host_scripts: false,
             script_state_root: None,
@@ -155,12 +159,34 @@ impl BuildOptions {
         self
     }
 
+    /// Opts out of checking requirements (packages, commands) against the host.
+    ///
+    /// Unlike [`with_provider_reconciliation`](Self::with_provider_reconciliation),
+    /// this leaves reuse eligibility untouched — a fresh cached product is still
+    /// served without ever consulting a package manager. On by default; pass
+    /// `false` for a quick edit-compile-apply loop that shouldn't pay for a
+    /// package check on every run.
+    pub fn with_check_requirements(mut self, check: bool) -> Self {
+        self.check_requirements = check;
+        self
+    }
+
     #[doc(hidden)]
     pub fn with_requirement_boundary(
         mut self,
         boundary: crate::execution::ladder::CoreRung,
     ) -> Self {
         self.requirement_boundary = boundary;
+        self
+    }
+
+    /// Opts out of running `w.script` entries entirely.
+    ///
+    /// `w.build.task` entries are unaffected — they produce artifacts and stay
+    /// part of the build regardless. On by default; pass `false` to skip
+    /// scripts for a quick edit-compile-apply loop.
+    pub fn with_run_scripts(mut self, run: bool) -> Self {
+        self.run_scripts = run;
         self
     }
 
@@ -351,20 +377,6 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
         if manifest.execution_mode != execution_mode {
             return Ok(None);
         }
-        let mut authorization = None;
-        if options.reconcile_requirements && !options.compile_only && !plan.requirements.is_empty()
-        {
-            authorization = Some(crate::requirements::authorize_target_plan_until(
-                &build_dir,
-                &plan,
-                options.requirement_boundary,
-                options.yes,
-            )?);
-        }
-        let state_root = options
-            .script_state_root
-            .clone()
-            .map_or_else(crate::execution::script::materialise_state_root, Ok)?;
         let mut journal = crate::execution::ladder::ExecutionJournal::new_for_ladder(
             plan.plan_id.clone(),
             crate::execution::ladder::CoreRung::MaterialiseAfter,
@@ -373,6 +385,39 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
         journal.configure(execution_mode, Vec::new());
         journal.build_id = Some(manifest.build_id.clone());
         journal.record_reuse("product");
+        let mut authorization = None;
+        if options.reconcile_requirements
+            && options.check_requirements
+            && !options.compile_only
+            && !plan.requirements.is_empty()
+        {
+            let requirements_gate = crate::execution::ladder::RungId::from(
+                crate::execution::ladder::CoreRung::MaterialiseBefore,
+            );
+            journal.record_action(
+                "requirements:check",
+                &requirements_gate,
+                crate::execution::ladder::ExecutionStatus::Running,
+                "checking requirement status",
+            );
+            let outcome = crate::requirements::authorize_target_plan_until(
+                &build_dir,
+                &plan,
+                options.requirement_boundary,
+                options.yes,
+            )?;
+            journal.record_action(
+                "requirements:check",
+                &requirements_gate,
+                crate::execution::ladder::ExecutionStatus::Succeeded,
+                "requirement status checked",
+            );
+            authorization = Some(outcome);
+        }
+        let state_root = options
+            .script_state_root
+            .clone()
+            .map_or_else(crate::execution::script::materialise_state_root, Ok)?;
         for rung in crate::execution::runner::ExecutionRange::through(
             &plan.ladder,
             crate::execution::ladder::CoreRung::MaterialiseAfter,
@@ -403,6 +448,7 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
                     execution_mode,
                     allow_host_scripts: options.allow_host_scripts,
                     rerun: options.rerun_scripts,
+                    run_scripts: options.run_scripts,
                     target_root: None,
                 },
             )?;
@@ -619,16 +665,33 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
             skipped_requirement_gates.clone(),
         );
         crate::execution::ladder::write(&build_dir, &journal)?;
+        let requirements_gate = crate::execution::ladder::RungId::from(
+            crate::execution::ladder::CoreRung::MaterialiseBefore,
+        );
         let mut authorization = if !options.compile_only
             && options.reconcile_requirements
+            && options.check_requirements
             && !plan.requirements.is_empty()
         {
-            Some(crate::requirements::authorize_target_plan_until(
+            journal.record_action(
+                "requirements:check",
+                &requirements_gate,
+                crate::execution::ladder::ExecutionStatus::Running,
+                "checking requirement status",
+            );
+            let outcome = crate::requirements::authorize_target_plan_until(
                 &build_dir,
                 &plan,
                 options.requirement_boundary,
                 options.yes,
-            )?)
+            )?;
+            journal.record_action(
+                "requirements:check",
+                &requirements_gate,
+                crate::execution::ladder::ExecutionStatus::Succeeded,
+                "requirement status checked",
+            );
+            Some(outcome)
         } else {
             None
         };
@@ -728,6 +791,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                             execution_mode,
                             allow_host_scripts: options.allow_host_scripts,
                             rerun: options.rerun_scripts,
+                            run_scripts: options.run_scripts,
                             target_root: None,
                         },
                     )
@@ -740,6 +804,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                                 }
                                 crate::model::manifest::ScriptOutcomeStatus::ScheduledSkip
                                 | crate::model::manifest::ScriptOutcomeStatus::CompileOnlySkip
+                                | crate::model::manifest::ScriptOutcomeStatus::ManualSkip
                                 | crate::model::manifest::ScriptOutcomeStatus::Refused => {
                                     crate::execution::ladder::ExecutionStatus::Skipped
                                 }
@@ -845,8 +910,8 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                 _ => {}
             }
             if !matches!(
-                journal.rungs.iter().find(|(id, _)| id == &rung),
-                Some((_, crate::execution::ladder::ExecutionStatus::Reused))
+                journal.rungs.iter().find(|record| record.id == rung),
+                Some(record) if record.status == crate::execution::ladder::ExecutionStatus::Reused
             ) {
                 journal.set_id(&rung, crate::execution::ladder::ExecutionStatus::Succeeded);
             }
