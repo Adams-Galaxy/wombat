@@ -27,8 +27,8 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 18;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 9;
+pub const MANIFEST_FORMAT_VERSION: u32 = 19;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 10;
 
 /// Bump whenever construction can produce different output for unchanged
 /// configuration. Products built under a different value are rejected and
@@ -99,6 +99,7 @@ pub struct Manifest {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub template_helpers: Vec<TemplateHelperPack>,
     pub project_identity: String,
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
@@ -140,6 +141,7 @@ pub struct BuildPlan {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub template_helpers: Vec<TemplateHelperPack>,
     pub project_identity: String,
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
@@ -786,6 +788,25 @@ pub struct RendererIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TemplateHelperExport {
+    pub export: String,
+    pub name: String,
+    pub defined_at: SourceLocation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateHelperPack {
+    pub contract_version: u32,
+    pub module: String,
+    pub prefix: String,
+    pub exports: Vec<TemplateHelperExport>,
+    pub sources: Vec<SourceFile>,
+    pub declared_at: SourceTrace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileContent {
     pub digest: String,
     pub size: u64,
@@ -805,6 +826,7 @@ pub(crate) struct EvaluatedManifest {
     pub process_observations: Vec<ProcessObservation>,
     pub modules: Vec<ManifestModule>,
     pub dependencies: Vec<Dependency>,
+    pub template_helpers: Vec<TemplateHelperPack>,
     pub project_identity: String,
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,

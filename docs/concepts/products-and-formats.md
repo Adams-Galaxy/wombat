@@ -23,8 +23,8 @@ what it is.
 
 Every product has a `build_id`: a SHA-256 over its complete configuration
 content — sources and their digests, resolved inputs, the target, consulted host
-observations, modules, dependencies, the ladder, requirements, tasks, scripts,
-and artifacts.
+observations, modules, dependencies, template helper packs, the ladder,
+requirements, tasks, scripts, and artifacts.
 
 Two properties follow, and both are deliberate.
 
@@ -90,6 +90,11 @@ Caches never enter the product, so a product built with a warm cache is
 byte-identical to one built cold. `--clean` reconstructs from scratch while
 preserving script scheduling state; `--rerun-scripts` forces scheduled scripts
 without deleting their state.
+
+Lua template helper sources are executable plan payloads, not product payloads.
+Their exact transitive source closure is copied beneath `.wombat/plan`, verified
+before materialisation, and recorded by digest in both plan and product. The
+rendered product remains relocatable without carrying executable helper code.
 
 For the exact current version numbers, see
 [the formats reference](../reference/formats.md).

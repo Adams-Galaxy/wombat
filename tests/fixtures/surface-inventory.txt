@@ -69,6 +69,8 @@ w.rungs table
 w.script function
 w.shell function
 w.target table
+w.template table
+w.template.helpers function
 w.toml table
 w.toml.decode function
 w.toml.encode function

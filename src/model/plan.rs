@@ -99,6 +99,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         process_observations: desired.process_observations.clone(),
         modules: desired.modules.clone(),
         dependencies: desired.dependencies.clone(),
+        template_helpers: desired.template_helpers.clone(),
         project_identity: desired.project_identity.clone(),
         ladder: desired.ladder.clone(),
         providers: desired.providers.clone(),
@@ -140,6 +141,11 @@ pub(crate) fn publish(
         staging.path(),
         &plan.scripts,
         crate::execution::script::PayloadKind::Plan,
+    )?;
+    crate::lua::template_helpers::publish_payloads(
+        source_root,
+        staging.path(),
+        &plan.template_helpers,
     )?;
     sync_directory(staging.path())?;
 
@@ -189,6 +195,10 @@ pub fn read(build_dir: &Path) -> Result<BuildPlan> {
         &plan.scripts,
         crate::execution::script::PayloadKind::Plan,
     )?;
+    crate::lua::template_helpers::verify_payloads(
+        &build_dir.join(".wombat/plan"),
+        &plan.template_helpers,
+    )?;
     Ok(plan)
 }
 
@@ -233,6 +243,7 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
     plan.ladder.validate()?;
     validate_sha_identity(&plan.project_identity, "plan project identity")?;
     validate_actions(&plan.ladder, &plan.tasks, &plan.scripts)?;
+    crate::lua::template_helpers::validate_catalog(&plan.template_helpers)?;
     for requirement in &plan.requirements {
         if !plan.ladder.contains(&requirement.when) || plan.ladder.is_container(&requirement.when) {
             return Err(WombatError::configuration(format!(
@@ -246,6 +257,33 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
         .iter()
         .map(|source| source.path.as_str())
         .collect::<std::collections::BTreeSet<_>>();
+    for pack in &plan.template_helpers {
+        for location in std::iter::once(&pack.declared_at.primary).chain(&pack.declared_at.callers)
+        {
+            if !source_paths.contains(location.source.as_str()) {
+                return Err(WombatError::configuration(format!(
+                    "plan template helper `{}` declaration references uncatalogued source `{}`",
+                    pack.module, location.source
+                )));
+            }
+        }
+        for source in &pack.sources {
+            if !source_paths.contains(source.path.as_str()) {
+                return Err(WombatError::configuration(format!(
+                    "plan template helper `{}` references uncatalogued source `{}`",
+                    pack.module, source.path
+                )));
+            }
+        }
+        for export in &pack.exports {
+            if !source_paths.contains(export.defined_at.source.as_str()) {
+                return Err(WombatError::configuration(format!(
+                    "plan template helper `{}` definition references uncatalogued source `{}`",
+                    export.name, export.defined_at.source
+                )));
+            }
+        }
+    }
     crate::build::validate_artifact_metadata(
         plan.artifact_policy,
         &plan.artifact_notices,
@@ -317,6 +355,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         process_observations: &'a [crate::model::manifest::ProcessObservation],
         modules: &'a [crate::model::manifest::ManifestModule],
         dependencies: &'a [crate::model::manifest::Dependency],
+        template_helpers: &'a [crate::model::manifest::TemplateHelperPack],
         ladder: &'a crate::execution::ladder::ExecutionLadder,
         providers: &'a [Provider],
         requirements: &'a [crate::model::manifest::Requirement],
@@ -338,6 +377,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         process_observations: &plan.process_observations,
         modules: &plan.modules,
         dependencies: &plan.dependencies,
+        template_helpers: &plan.template_helpers,
         ladder: &plan.ladder,
         providers: &plan.providers,
         requirements: &plan.requirements,

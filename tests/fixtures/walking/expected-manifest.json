@@ -1,10 +1,10 @@
 {
-  "format_version": 18,
+  "format_version": 19,
   "construction_version": 1,
   "wombat_version": "0.1.0",
   "project": null,
-  "build_id": "sha256:88585c821368f7e843107d99ebfbc8d49ef031de73383e7776e80335e59e5996",
-  "plan_id": "sha256:4b296bfb06118db8d0010dfb4ad2b4ff1ffc22ff47fb3548ca5a5b396aa8c876",
+  "build_id": "sha256:22542ed16e25438d0b8247533dd510bfd32a2050c528769eaca9342ddc0cd1b9",
+  "plan_id": "sha256:bff04d92b63d25c0d5d6904135ea5c134cbb421ac39a02121c3fd244aa7eb745",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -57,6 +57,8 @@
       }
     }
   ],
+  "template_helpers": [],
+  "project_identity": "sha256:0123af96350b193c77c4eeb2ddf648ccd1761b7bee6c2c8d9acbfd72fb4952a3",
   "ladder": {
     "name": "default",
     "roots": [

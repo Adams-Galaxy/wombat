@@ -63,7 +63,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 18);
+    assert_eq!(outcome.manifest.format_version, 19);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -94,7 +94,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 18);
+    assert_eq!(outcome.manifest.format_version, 19);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -624,6 +624,7 @@ exit 9
 /// [`try_reuse_product`]'s fast path too, making the flag slower than doing
 /// nothing on the second run.
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn skip_requirements_avoids_the_package_check_and_still_reuses_a_fresh_product() {
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
@@ -631,28 +632,42 @@ fn skip_requirements_avoids_the_package_check_and_still_reuses_a_fresh_product()
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source");
     let bin = temporary.path().join("bin");
-    let log = temporary.path().join("brew-calls.log");
+    let log = temporary.path().join("provider-calls.log");
     fs::create_dir(&source).unwrap();
     fs::create_dir(&bin).unwrap();
-    fs::write(
-        source.join("wombat.lua"),
-        "local w = require('wombat')\nw.providers({'brew'})\nw.need.package('alpha', { provider = 'brew' })\n",
-    )
-    .unwrap();
-    let brew = bin.join("brew");
-    fs::write(
-        &brew,
-        r#"#!/bin/sh
-echo "$@" >> "$BREW_CALL_LOG"
+    let (provider, executable, script) = if cfg!(target_os = "macos") {
+        (
+            "brew",
+            "brew",
+            r#"#!/bin/sh
+echo "$@" >> "$PROVIDER_CALL_LOG"
 if [ "$1" = "info" ]; then
   printf '{"formulae":[{"name":"alpha","installed":[{"version":"1.0.0"}]}],"casks":[]}'
   exit 0
 fi
 exit 9
 "#,
+        )
+    } else {
+        (
+            "apt",
+            "dpkg-query",
+            r#"#!/bin/sh
+echo "$@" >> "$PROVIDER_CALL_LOG"
+printf 'install ok installed\t1.0.0'
+"#,
+        )
+    };
+    fs::write(
+        source.join("wombat.lua"),
+        format!(
+            "local w = require('wombat')\nw.providers({{'{provider}'}})\nw.need.package('alpha', {{ provider = '{provider}' }})\n"
+        ),
     )
     .unwrap();
-    fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+    let checker = bin.join(executable);
+    fs::write(&checker, script).unwrap();
+    fs::set_permissions(&checker, fs::Permissions::from_mode(0o755)).unwrap();
     let build_dir = temporary.path().join("build");
 
     let run = |args: &[&str]| {
@@ -663,17 +678,12 @@ exit 9
             .arg("-B")
             .arg(&build_dir)
             .env("PATH", &bin)
-            .env("BREW_CALL_LOG", &log)
+            .env("PROVIDER_CALL_LOG", &log)
             .env("XDG_STATE_HOME", temporary.path().join("state"))
             .output()
             .unwrap()
     };
-    let info_call_count = |calls: &str| {
-        calls
-            .lines()
-            .filter(|line| line.starts_with("info"))
-            .count()
-    };
+    let check_call_count = |calls: &str| calls.lines().count();
 
     let first = run(&["build", "--skip-requirements"]);
     assert!(
@@ -682,7 +692,7 @@ exit 9
         String::from_utf8_lossy(&first.stderr)
     );
     assert_eq!(
-        info_call_count(&fs::read_to_string(&log).unwrap_or_default()),
+        check_call_count(&fs::read_to_string(&log).unwrap_or_default()),
         0,
         "--skip-requirements must not invoke the package manager"
     );
@@ -695,7 +705,7 @@ exit 9
     );
     let after_second = fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(
-        info_call_count(&after_second),
+        check_call_count(&after_second),
         0,
         "a repeated --skip-requirements build must still not check packages"
     );
@@ -726,7 +736,7 @@ exit 9
         String::from_utf8_lossy(&third.stderr)
     );
     assert_eq!(
-        info_call_count(&fs::read_to_string(&log).unwrap()),
+        check_call_count(&fs::read_to_string(&log).unwrap()),
         1,
         "a normal build must still check requirements once the flag is dropped"
     );

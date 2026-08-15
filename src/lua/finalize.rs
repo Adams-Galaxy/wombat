@@ -228,6 +228,7 @@ pub(super) fn visit_dependency<'a>(
 
 pub(super) fn build_manifest(
     state: &RuntimeState,
+    template_helpers: Vec<TemplateHelperPack>,
     preparations: Vec<ProviderPreparation>,
 ) -> Result<EvaluatedManifest> {
     let modules = state
@@ -295,6 +296,7 @@ pub(super) fn build_manifest(
         process_observations: state.process_observations.clone(),
         modules,
         dependencies,
+        template_helpers,
         project_identity,
         ladder,
         providers: state.providers.clone(),

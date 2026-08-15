@@ -86,7 +86,7 @@ itself:
 - `--allow-compile-only` deploys a product built with `--compile-only`, whose
   requirement gates were skipped rather than reconciled.
 
-`inspect` reads a stored plan; sections are `overview`, `providers`,
+`inspect` reads a stored plan; sections are `overview`, `helpers`, `providers`,
 `requirements`, `ladder`, `scripts`, `tasks`, `artifacts`, `sources`,
 `observations`.
 
@@ -131,7 +131,7 @@ while modifications and conflicts show their focused patch.
 Read a verified product without evaluating Lua.
 
 `inspect` sections are `overview`, `inputs`, `target`, `modules`,
-`dependencies`, `providers`, `requirements`, `ladder`, `scripts`, `tasks`,
+`dependencies`, `helpers`, `providers`, `requirements`, `ladder`, `scripts`, `tasks`,
 `artifacts`, `sources`, `observations`, `timeline`.
 
 `timeline` is the build log: every rung and action the execution journal
@@ -141,7 +141,7 @@ up as "this got slower" instead of requiring an external profiler.
 
 `explain` takes an artifact target, logical path, or anchored source path and
 traces it to its owner, declaration, source origin, production mode, target
-inference, and frozen template context. A source excerpt appears only when your
+inference, frozen template context, and global helper registry. A source excerpt appears only when your
 repository file still matches the digest the product recorded.
 
 `compare` with one path compares `build` to it; with two, compares them

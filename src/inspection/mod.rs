@@ -33,6 +33,7 @@ pub enum InspectSection {
     Target,
     Modules,
     Dependencies,
+    Helpers,
     Providers,
     Requirements,
     Ladder,
@@ -47,6 +48,7 @@ pub enum InspectSection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanInspectSection {
     Overview,
+    Helpers,
     Providers,
     Requirements,
     Ladder,
@@ -71,7 +73,7 @@ pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
 pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
     match section {
         PlanInspectSection::Overview => format!(
-            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  providers: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
+            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  helpers: {}\n  providers: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
             plan.plan_id,
             plan.format_version,
             plan.wombat_version,
@@ -79,12 +81,14 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
             plan.target.platform.arch.as_str(),
             plan.sources.len(),
             plan.modules.len(),
+            plan.template_helpers.len(),
             plan.providers.len(),
             plan.requirements.len(),
             plan.tasks.len(),
             plan.artifact_selections.len(),
             plan.artifacts.len(),
         ),
+        PlanInspectSection::Helpers => render_helpers(&plan.template_helpers),
         PlanInspectSection::Providers => {
             let mut output = render_list("Providers", plan.providers.iter().map(render_provider));
             output.push_str(&render_list(
@@ -209,6 +213,27 @@ fn render_scripts(scripts: &[crate::model::manifest::Script]) -> String {
                 script.runner.family_name(),
                 script.payloads.len(),
                 script.declared_at
+            )
+        }),
+    )
+}
+
+fn render_helpers(helpers: &[crate::model::manifest::TemplateHelperPack]) -> String {
+    render_list(
+        "Template helper packs",
+        helpers.iter().map(|pack| {
+            format!(
+                "{}\n  contract: v{}\n  prefix: {}\n  exports: {}\n  sources: {}\n  declared at: {}",
+                pack.module,
+                pack.contract_version,
+                if pack.prefix.is_empty() { "<none>" } else { &pack.prefix },
+                pack.exports
+                    .iter()
+                    .map(|export| format!("{} ({})", export.name, export.defined_at))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                pack.sources.len(),
+                pack.declared_at
             )
         }),
     )
@@ -415,7 +440,7 @@ fn render_section(
 ) -> String {
     match section {
         InspectSection::Overview => format!(
-            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
+            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  helpers: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
             manifest.build_id,
             manifest.format_version,
             manifest.plan_id,
@@ -426,6 +451,7 @@ fn render_section(
             manifest.inputs.len(),
             manifest.modules.len(),
             manifest.dependencies.len(),
+            manifest.template_helpers.len(),
             manifest.providers.len(),
             manifest.preparations.len(),
             manifest.requirements.len(),
@@ -488,6 +514,7 @@ fn render_section(
                 )
             }),
         ),
+        InspectSection::Helpers => render_helpers(&manifest.template_helpers),
         InspectSection::Providers => {
             let mut output = render_list(
                 "Providers",
@@ -766,11 +793,21 @@ fn render_explanation(
     } = &artifact.production
     {
         output.push_str(&format!(
-            "  renderer: {}-v{}\n  template source: {}\n  template context: {}\n",
+            "  renderer: {}-v{}\n  template source: {}\n  template context: {}\n  template helpers: {}\n",
             renderer.name,
             renderer.contract_version,
             source_digest,
-            json(context)
+            json(context),
+            if manifest.template_helpers.is_empty() {
+                "none".to_string()
+            } else {
+                manifest
+                    .template_helpers
+                    .iter()
+                    .map(|pack| pack.module.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         ));
     }
     let relationships = manifest

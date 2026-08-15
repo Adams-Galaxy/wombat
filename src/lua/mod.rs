@@ -39,6 +39,7 @@ use crate::model::manifest::{
     RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome, Script,
     ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
     SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskTargetRoot,
+    TemplateHelperPack,
 };
 use crate::model::path::{
     infer_target, infer_target_root, parse_explicit_target, parse_explicit_target_root,
@@ -62,6 +63,7 @@ mod finalize;
 mod loading;
 mod modules;
 mod requirements;
+pub(crate) mod template_helpers;
 
 use actions::*;
 use api::*;
@@ -160,6 +162,7 @@ struct RuntimeState {
     sources: BTreeMap<String, TrackedSource>,
     modules: BTreeMap<String, ModuleRecord>,
     dependencies: BTreeSet<Dependency>,
+    template_helper_declarations: Vec<template_helpers::Declaration>,
     providers: Vec<Provider>,
     requirements: Vec<Requirement>,
     task_interpreters: BTreeMap<String, TaskRunner>,
@@ -286,6 +289,7 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
         sources: BTreeMap::new(),
         modules: BTreeMap::new(),
         dependencies: BTreeSet::new(),
+        template_helper_declarations: Vec::new(),
         providers: Vec::new(),
         requirements: Vec::new(),
         task_interpreters: options.task_interpreters,
@@ -364,10 +368,12 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     evaluate_selected_modules(&lua, &state)?;
     validate_dependency_cycles(&state.borrow())?;
     validate_artifact_conflicts(&state.borrow().artifacts)?;
+    let template_helpers = template_helpers::finalize(&state)?;
     let preparations = plan_provider_preparations(&state)?;
 
     Ok(EvaluationOutcome::Manifest(Box::new(build_manifest(
         &state.borrow(),
+        template_helpers,
         preparations,
     )?)))
 }

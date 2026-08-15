@@ -355,6 +355,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         process_observations: Vec::new(),
         modules: Vec::new(),
         dependencies: Vec::new(),
+        template_helpers: Vec::new(),
         project_identity: format!("sha256:{}", "0".repeat(64)),
         ladder: crate::execution::ladder::ExecutionLadder::default(),
         providers: Vec::new(),

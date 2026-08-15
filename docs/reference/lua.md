@@ -134,6 +134,53 @@ defaults to an empty table when `with` is omitted.
 w.install.template("input", { to = ".config/output", with = context })
 ```
 
+## Template helpers
+
+### `w.template.helpers(module, options?)`
+
+Registers a source-backed Lua helper pack globally for every template in the
+plan. `module` resolves beneath `lua/` using ordinary `?.lua` and `?/init.lua`
+forms. The module must return a non-empty plain table of Lua functions:
+
+```lua
+-- lua/theme/colors.lua
+return {
+    alpha = function(color, amount, options)
+        return color .. options.suffix
+    end,
+}
+```
+
+```lua
+w.template.helpers("theme.colors")
+w.template.helpers("theme.colors", { prefix = "color_" })
+```
+
+The optional `prefix` is concatenated exactly, so the second declaration above
+exports `color_alpha`. Identical declarations are harmless. Conflicting names,
+including attempts to replace built-in Handlebars helpers or `coalesce`, are
+errors.
+
+Helpers are value functions, usable in interpolation and subexpressions but not
+as blocks. Positional template arguments become positional Lua arguments. A
+final string-keyed options table always carries Handlebars hash arguments:
+
+```handlebars
+{{alpha theme.background 0.6 suffix="cc"}}
+{{#if (is_dark theme.background)}}dark{{else}}light{{/if}}
+```
+
+Return exactly one frozen value: null, boolean, finite number, string, array, or
+map. Return `w.null`, not `nil`, for explicit null; use `w.array()` when an empty
+array must retain its shape.
+
+Helper packs execute in a separate deterministic materialisation-time Lua
+state. They have table, string, UTF-8, deterministic math, and a minimal
+`require("wombat")` containing `w.array` and `w.null`; they do not have files,
+processes, environment, network, clock, randomness, dynamic loaders, or an
+unsafe escape hatch. Load companion modules with top-level `require()` so
+construction can freeze the exact dependency closure.
+
 ### `w.hidden(source)`
 
 Selects a source entry whose real name begins with a dot. Dotted entries are

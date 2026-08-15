@@ -48,6 +48,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     manifest.ladder.validate()?;
     validate_sha256(&manifest.project_identity, "manifest project identity")?;
     crate::model::plan::validate_actions(&manifest.ladder, &manifest.tasks, &manifest.scripts)?;
+    crate::lua::template_helpers::validate_catalog(&manifest.template_helpers)?;
     validate_sha256(&manifest.plan_id, "manifest build plan identity")?;
     if !manifest
         .sources
@@ -231,6 +232,37 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             &source_paths,
             "manifest dependency declaration",
         )?;
+    }
+    for pack in &manifest.template_helpers {
+        validate_source_trace(
+            &pack.declared_at,
+            &source_paths,
+            "manifest template helper declaration",
+        )?;
+        for source in &pack.sources {
+            if !source_paths.contains(source.path.as_str()) {
+                return Err(WombatError::configuration(format!(
+                    "manifest template helper `{}` references uncatalogued source `{}`",
+                    pack.module, source.path
+                )));
+            }
+        }
+        for export in &pack.exports {
+            validate_relative_path(
+                &export.defined_at.source,
+                "manifest template helper definition source",
+            )?;
+            if !source_paths.contains(export.defined_at.source.as_str())
+                || export.defined_at.line == Some(0)
+                || export.defined_at.column == Some(0)
+                || (export.defined_at.column.is_some() && export.defined_at.line.is_none())
+            {
+                return Err(WombatError::configuration(format!(
+                    "manifest template helper `{}` has invalid definition provenance",
+                    export.name
+                )));
+            }
+        }
     }
     validate_provider_scope(
         &manifest.providers,

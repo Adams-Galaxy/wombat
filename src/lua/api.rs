@@ -230,6 +230,11 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
         })?,
     )?;
 
+    native.set(
+        "declare_template_helpers",
+        super::template_helpers::register_native(lua, Rc::clone(&state))?,
+    )?;
+
     let log_state = Rc::clone(&state);
     native.set(
         "log",

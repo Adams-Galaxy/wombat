@@ -1,7 +1,10 @@
 use std::fs;
 use std::process::Command;
 
-use wombat::{BuildOptions, InspectSection, build, compare, explain, inspect};
+use wombat::{
+    BuildOptions, InspectSection, PlanInspectSection, build, compare, explain, inspect,
+    inspect_plan, plan,
+};
 
 struct Fixture {
     _temporary: tempfile::TempDir,
@@ -45,6 +48,7 @@ fn every_product_section_reads_the_verified_manifest() {
         (InspectSection::Target, "Target"),
         (InspectSection::Modules, "module"),
         (InspectSection::Dependencies, "<root> -> app"),
+        (InspectSection::Helpers, "Template helper packs\n  none"),
         (InspectSection::Artifacts, ".config/app.toml"),
         (InspectSection::Sources, "modules/app.lua"),
     ];
@@ -52,6 +56,50 @@ fn every_product_section_reads_the_verified_manifest() {
         let output = inspect(&fixture.build, section).unwrap();
         assert!(output.contains(expected), "{section:?}: {output}");
     }
+}
+
+#[test]
+fn helper_registry_is_inspectable_explainable_and_comparable() {
+    let left = Fixture::new("value = 1\n");
+    fs::create_dir_all(left.source.join("lua")).unwrap();
+    fs::write(
+        left.source.join("wombat.lua"),
+        "local w=require('wombat')\nw.template.helpers('format')\nw.use('app')\n",
+    )
+    .unwrap();
+    fs::write(
+        left.source.join("lua/format.lua"),
+        "return {tag=function(value, options) return '<' .. value .. '>' end}\n",
+    )
+    .unwrap();
+    fs::write(
+        left.source.join("modules/app.lua"),
+        "local w=require('wombat')\nw.module.from('.config')\nw.install('app.toml', {with={value='x'}})\n",
+    )
+    .unwrap();
+    fs::write(
+        left.source.join("src/dot_config/app.toml"),
+        "{{tag value}}\n",
+    )
+    .unwrap();
+    let planned = plan(BuildOptions::new(&left.source, &left.build)).unwrap();
+    wombat::materialise(BuildOptions::new(&left.source, &left.build)).unwrap();
+
+    let helpers = inspect(&left.build, InspectSection::Helpers).unwrap();
+    assert!(helpers.contains("format"), "{helpers}");
+    assert!(helpers.contains("tag (lua/format.lua:1)"), "{helpers}");
+    let plan_helpers = inspect_plan(&planned.plan, PlanInspectSection::Helpers);
+    assert!(plan_helpers.contains("format"), "{plan_helpers}");
+    let explanation = explain(&left.build, ".config/app.toml", None, None).unwrap();
+    assert!(
+        explanation.contains("template helpers: format"),
+        "{explanation}"
+    );
+
+    let right = Fixture::new("value = 1\n");
+    let comparison = compare(&right.build, &left.build).unwrap();
+    assert!(comparison.contains("Template helpers"), "{comparison}");
+    assert!(comparison.contains("Add format:"), "{comparison}");
 }
 
 #[test]

@@ -69,6 +69,16 @@ pub(super) fn render_comparison(left: &Manifest, right: &Manifest) -> String {
     );
     compare_map(
         &mut output,
+        "Template helpers",
+        keyed(&left.template_helpers, |pack| {
+            format!("{}:{}", pack.module, pack.prefix)
+        }),
+        keyed(&right.template_helpers, |pack| {
+            format!("{}:{}", pack.module, pack.prefix)
+        }),
+    );
+    compare_map(
+        &mut output,
         "Providers",
         keyed(&left.providers, |provider| provider.name.clone()),
         keyed(&right.providers, |provider| provider.name.clone()),

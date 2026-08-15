@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use wombat::manifest::Production;
 use wombat::{
@@ -170,6 +170,537 @@ fn renders_realistic_starship_and_wezterm_templates_with_frozen_context() {
         )
     }));
     verify_build(&repository.root.join("build")).unwrap();
+}
+
+#[test]
+fn lua_helper_packs_render_inline_subexpressions_hashes_and_dependencies() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w = require('wombat')\nw.template.helpers('theme.colors')\nw.use('app')\n",
+    );
+    repository.write(
+        "lua/theme/base.lua",
+        "return { join = function(left, right) return left .. right end }\n",
+    );
+    repository.write(
+        "lua/theme/colors.lua",
+        "local base = require('theme.base')\nreturn {\n  alpha = function(color, amount, options) return base.join(color, ':' .. amount .. options.suffix) end,\n  is_dark = function(color, options) return color == '#101010' end,\n}\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w = require('wombat')\nw.module.from('.')\nw.install('theme.tmpl', { with = { color = '#101010' } })\n",
+    );
+    repository.write(
+        "src/theme.tmpl",
+        "value={{alpha color 0.6 suffix='!'}}\n{{#if (is_dark color)}}dark{{else}}light{{/if}}\n",
+    );
+
+    let outcome = repository.build().unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/theme")).unwrap(),
+        "value=#101010:0.6!\ndark\n"
+    );
+    assert_eq!(outcome.manifest.template_helpers.len(), 1);
+    let pack = &outcome.manifest.template_helpers[0];
+    assert_eq!(pack.module, "theme.colors");
+    assert_eq!(
+        pack.sources
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect::<Vec<_>>(),
+        ["lua/theme/base.lua", "lua/theme/colors.lua"]
+    );
+    assert_eq!(
+        pack.exports
+            .iter()
+            .map(|export| export.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "is_dark"]
+    );
+    verify_build(&repository.root.join("build")).unwrap();
+}
+
+#[test]
+fn helper_registration_deduplicates_and_applies_exact_prefixes_from_modules() {
+    let repository = Repository::new();
+    repository.write("wombat.lua", "local w=require('wombat')\nw.use('app')\n");
+    repository.write(
+        "lua/format.lua",
+        "return { tag = function(value, options) return '<' .. value .. '>' end }\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.template.helpers('format', {prefix='fmt_'})\nw.template.helpers('format')\nw.template.helpers('format')\nw.module.from('.')\nw.install('value.tmpl', {with={value='x'}})\n",
+    );
+    repository.write("src/value.tmpl", "{{tag value}} {{fmt_tag value}}\n");
+
+    let outcome = repository.build().unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/value")).unwrap(),
+        "<x> <x>\n"
+    );
+    assert_eq!(outcome.manifest.template_helpers.len(), 2);
+    assert_eq!(outcome.manifest.template_helpers[0].prefix, "");
+    assert_eq!(outcome.manifest.template_helpers[1].prefix, "fmt_");
+}
+
+#[test]
+fn helper_results_preserve_frozen_shapes_and_explicit_null() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('values')\nw.use('app')\n",
+    );
+    repository.write(
+        "lua/values.lua",
+        "local w=require('wombat')\nreturn {\n empty_array=function(options) return w.array() end,\n explicit_null=function(options) return w.null end,\n mapped=function(options) return {answer=42} end,\n empty_string=function(options) return '' end,\n deliberate_false=function(options) return false end,\n}\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('values.tmpl')\n",
+    );
+    repository.write(
+        "src/values.tmpl",
+        "array={{len (empty_array)}}\nmap={{lookup (mapped) 'answer'}}\nnull={{#if (explicit_null)}}bad{{else}}ok{{/if}}\nempty=[{{empty_string}}]\nfalse={{#if (deliberate_false)}}bad{{else}}ok{{/if}}\n",
+    );
+
+    repository.build().unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/values")).unwrap(),
+        "array=0\nmap=42\nnull=ok\nempty=[]\nfalse=ok\n"
+    );
+}
+
+#[test]
+fn helper_registration_rejects_invalid_exports_and_collisions() {
+    for (source, expected) in [
+        ("return {}\n", "must export at least one function"),
+        (
+            "return setmetatable({ok=function() return true end}, {})\n",
+            "plain table",
+        ),
+        ("return {value=1}\n", "must be a function"),
+        (
+            "return {['if']=function() return true end}\n",
+            "cannot replace a built-in",
+        ),
+        (
+            "return {['bad.name']=function() return true end}\n",
+            "invalid template helper name",
+        ),
+    ] {
+        let repository = Repository::new();
+        repository.write(
+            "wombat.lua",
+            "local w=require('wombat')\nw.template.helpers('bad')\n",
+        );
+        repository.write("lua/bad.lua", source);
+        let error = repository.build().unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('one')\nw.template.helpers('two')\n",
+    );
+    repository.write("lua/one.lua", "return {same=function() return 1 end}\n");
+    repository.write("lua/two.lua", "return {same=function() return 2 end}\n");
+    let error = repository.build().unwrap_err().to_string();
+    assert!(
+        error.contains("exported by both `one` and `two`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn helper_registration_rejects_unknown_options_and_unsafe_names() {
+    for (declaration, expected) in [
+        (
+            "w.template.helpers('format', {unknown=true})",
+            "does not support option `unknown`",
+        ),
+        (
+            "w.template.helpers('../format')",
+            "invalid repository Lua module name",
+        ),
+        (
+            "w.template.helpers('format', {prefix='bad.'})",
+            "unsupported characters",
+        ),
+    ] {
+        let repository = Repository::new();
+        repository.write(
+            "wombat.lua",
+            &format!("local w=require('wombat')\n{declaration}\n"),
+        );
+        let error = repository.build().unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn helper_calls_reject_invalid_returns_blocks_and_dynamic_dependencies() {
+    for (function, template, expected) in [
+        ("function(options) end", "{{bad}}", "returned 0"),
+        (
+            "function(options) return nil end",
+            "{{bad}}",
+            "return w.null",
+        ),
+        ("function(options) return 1, 2 end", "{{bad}}", "returned 2"),
+        (
+            "function(options) return function() end end",
+            "{{bad}}",
+            "invalid value",
+        ),
+        (
+            "function(options) local value={} value.self=value return value end",
+            "{{bad}}",
+            "cyclic",
+        ),
+        (
+            "function(options) return {[2]='sparse'} end",
+            "{{bad}}",
+            "sparse Lua arrays",
+        ),
+        (
+            "function(options) return {[1]='array', key='map'} end",
+            "{{bad}}",
+            "contiguous arrays or string-keyed maps",
+        ),
+        (
+            "function(options) return math.huge end",
+            "{{bad}}",
+            "finite",
+        ),
+        (
+            "function(options) return true end",
+            "{{#bad}}x{{/bad}}",
+            "value-only",
+        ),
+        (
+            "function(options) return require('late').value end",
+            "{{bad}}",
+            "was not captured during construction",
+        ),
+    ] {
+        let repository = Repository::new();
+        repository.write(
+            "wombat.lua",
+            "local w=require('wombat')\nw.template.helpers('bad')\nw.use('app')\n",
+        );
+        repository.write("lua/bad.lua", &format!("return {{bad={function}}}\n"));
+        repository.write("lua/late.lua", "return {value='late'}\n");
+        repository.write(
+            "modules/app.lua",
+            "local w=require('wombat')\nw.module.from('.')\nw.install('bad.tmpl')\n",
+        );
+        repository.write("src/bad.tmpl", template);
+        let error = repository.build().unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let missing = Repository::new();
+    missing.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('bad')\nw.use('app')\n",
+    );
+    missing.write(
+        "lua/bad.lua",
+        "return {bad=function(value, options) error('helper executed') end}\n",
+    );
+    missing.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('bad.tmpl')\n",
+    );
+    missing.write("src/bad.tmpl", "{{bad missing}}\n");
+    let error = missing.build().unwrap_err().to_string();
+    assert!(error.contains("missing"), "{error}");
+    assert!(!error.contains("helper executed"), "{error}");
+}
+
+#[test]
+fn helper_sandbox_and_instruction_limit_fail_with_source_context() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('ambient')\n",
+    );
+    repository.write(
+        "lua/ambient.lua",
+        "local value=os.getenv('HOME')\nreturn {value=function(options) return value end}\n",
+    );
+    let error = repository.build().unwrap_err().render(false);
+    assert!(
+        error.contains("failed to load template helper pack `ambient`"),
+        "{error}"
+    );
+    assert!(error.contains("lua/ambient.lua:1"), "{error}");
+
+    let dependency = Repository::new();
+    dependency.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('parent')\n",
+    );
+    dependency.write(
+        "lua/parent.lua",
+        "local child=require('child')\nreturn {value=function(options) return child end}\n",
+    );
+    dependency.write("lua/child.lua", "error('dependency failed')\n");
+    let error = dependency.build().unwrap_err().render(false);
+    assert!(error.contains("lua/child.lua:1"), "{error}");
+
+    let looping = Repository::new();
+    looping.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('loop')\nw.use('app')\n",
+    );
+    looping.write(
+        "lua/loop.lua",
+        "return {spin=function(options) while true do end end}\n",
+    );
+    looping.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('loop.tmpl')\n",
+    );
+    looping.write("src/loop.tmpl", "{{spin}}\n");
+    let error = looping.build().unwrap_err().render(false);
+    assert!(error.contains("instruction limit"), "{error}");
+    assert!(error.contains("src/loop.tmpl:1"), "{error}");
+    assert!(
+        error.contains("helper defined at lua/loop.lua:1"),
+        "{error}"
+    );
+
+    let allocating = Repository::new();
+    allocating.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('allocate')\nw.use('app')\n",
+    );
+    allocating.write(
+        "lua/allocate.lua",
+        "return {grow=function(options) local values={} while true do values[#values + 1]=string.rep('x', 1024 * 1024) end end}\n",
+    );
+    allocating.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('allocate.tmpl')\n",
+    );
+    allocating.write("src/allocate.tmpl", "{{grow}}\n");
+    let error = allocating.build().unwrap_err().render(false);
+    assert!(error.contains("memory"), "{error}");
+    assert!(error.contains("src/allocate.tmpl:1"), "{error}");
+    assert!(
+        error.contains("helper defined at lua/allocate.lua:1"),
+        "{error}"
+    );
+}
+
+#[test]
+fn frozen_helper_payloads_are_verified_before_materialisation() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('simple')\nw.use('app')\n",
+    );
+    repository.write(
+        "lua/simple.lua",
+        "return {value=function(options) return 'ok' end}\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('simple.tmpl')\n",
+    );
+    repository.write("src/simple.tmpl", "{{value}}\n");
+
+    let options = wombat::BuildOptions::new(&repository.root, "build").with_host(fixture_host());
+    wombat::plan(options.clone()).unwrap();
+    fs::write(
+        repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/lua/simple.lua"),
+        "tampered",
+    )
+    .unwrap();
+    let error = wombat::materialise(options.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("failed verification"), "{error}");
+
+    wombat::plan(options.clone().with_clean(true)).unwrap();
+    fs::remove_file(
+        repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/lua/simple.lua"),
+    )
+    .unwrap();
+    let error = wombat::materialise(options.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is missing"), "{error}");
+
+    wombat::plan(options.clone().with_clean(true)).unwrap();
+    repository.write(
+        "lua/simple.lua",
+        "return {value=function(options) return 'changed' end}\n",
+    );
+    let error = wombat::materialise(options.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("stored plan is stale"), "{error}");
+
+    #[cfg(unix)]
+    {
+        repository.write(
+            "lua/simple.lua",
+            "return {value=function(options) return 'ok' end}\n",
+        );
+        wombat::plan(options.clone().with_clean(true)).unwrap();
+        let payload = repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/lua/simple.lua");
+        fs::remove_file(&payload).unwrap();
+        std::os::unix::fs::symlink(repository.root.join("lua/simple.lua"), &payload).unwrap();
+        let error = wombat::materialise(options).unwrap_err().to_string();
+        assert!(error.contains("must not be a symbolic link"), "{error}");
+    }
+}
+
+#[test]
+fn helper_registry_changes_invalidate_plan_product_and_template_cache_identity() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('changing')\nw.use('app')\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('changing.tmpl')\n",
+    );
+    repository.write("src/changing.tmpl", "{{value}}\n");
+    repository.write(
+        "lua/changing.lua",
+        "return {value=function(options) return 'one' end}\n",
+    );
+    let first = repository.build().unwrap();
+    let cache = repository
+        .root
+        .join("build/.wombat/cache/derivations/templates");
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+
+    repository.write(
+        "lua/changing.lua",
+        "return {value=function(options) return 'two' end}\n",
+    );
+    let second = repository.build().unwrap();
+    assert_ne!(first.manifest.plan_id, second.manifest.plan_id);
+    assert_ne!(first.build_id, second.build_id);
+    assert_eq!(fs::read_dir(cache).unwrap().count(), 2);
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/changing")).unwrap(),
+        "two\n"
+    );
+}
+
+#[test]
+fn helper_payload_verifier_rejects_unexpected_files() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('simple')\n",
+    );
+    repository.write(
+        "lua/simple.lua",
+        "return {value=function(options) return 'ok' end}\n",
+    );
+    let options = wombat::BuildOptions::new(&repository.root, "build").with_host(fixture_host());
+    wombat::plan(options.clone()).unwrap();
+    fs::write(
+        repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/unexpected.lua"),
+        "unexpected",
+    )
+    .unwrap();
+    let error = wombat::materialise(options).unwrap_err().to_string();
+    assert!(
+        error.contains("unexpected template helper payload"),
+        "{error}"
+    );
+
+    fs::remove_file(
+        repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/unexpected.lua"),
+    )
+    .unwrap();
+    fs::create_dir(
+        repository
+            .root
+            .join("build/.wombat/plan/payloads/helpers/unexpected"),
+    )
+    .unwrap();
+    let error = wombat::materialise(
+        wombat::BuildOptions::new(&repository.root, "build").with_host(fixture_host()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unexpected template helper payload directory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn frozen_helper_payloads_relocate_with_the_stored_plan() {
+    let repository = Repository::new();
+    repository.write(
+        "wombat.lua",
+        "local w=require('wombat')\nw.template.helpers('simple')\nw.use('app')\n",
+    );
+    repository.write(
+        "lua/simple.lua",
+        "return {value=function(options) return 'relocated' end}\n",
+    );
+    repository.write(
+        "modules/app.lua",
+        "local w=require('wombat')\nw.module.from('.')\nw.install('simple.tmpl')\n",
+    );
+    repository.write("src/simple.tmpl", "{{value}}\n");
+
+    let original = repository.root.join("build");
+    wombat::plan(wombat::BuildOptions::new(&repository.root, &original).with_host(fixture_host()))
+        .unwrap();
+    let relocated = repository.root.join("relocated-build");
+    copy_tree(&original, &relocated);
+
+    wombat::materialise(
+        wombat::BuildOptions::new(&repository.root, &relocated).with_host(fixture_host()),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(relocated.join("tree/simple")).unwrap(),
+        "relocated\n"
+    );
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    let metadata = fs::symlink_metadata(source).unwrap();
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).unwrap();
+        let mut entries = fs::read_dir(source)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            copy_tree(&entry.path(), &destination.join(entry.file_name()));
+        }
+    } else {
+        fs::copy(source, destination).unwrap();
+        fs::set_permissions(destination, metadata.permissions()).unwrap();
+    }
 }
 
 #[test]

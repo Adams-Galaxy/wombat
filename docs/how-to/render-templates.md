@@ -92,14 +92,73 @@ w.install.file("literal.tmpl")                                    -- deploy the 
 w.install.template("input", { to = ".config/output", with = ctx }) -- render a file not named .tmpl
 ```
 
-Template directories, implicit runtime context, includes, and callbacks aren't
-supported.
+Template directories, implicit runtime context, and external partial includes
+aren't supported.
+
+## Add a reusable Lua helper
+
+Projection logic that repeats across many templates can live in a deterministic
+Lua helper pack. Keep the base palette small and derive presentation variants at
+the point of use:
+
+```lua
+-- lua/theme/colors.lua
+local function parse(color)
+    local red, green, blue = color:match("^#(%x%x)(%x%x)(%x%x)$")
+    assert(red, "expected #RRGGBB")
+    return tonumber(red, 16), tonumber(green, 16), tonumber(blue, 16)
+end
+
+local function hex(value)
+    return string.format("%02x", math.floor(value + 0.5))
+end
+
+return {
+    alpha = function(color, amount, options)
+        assert(amount >= 0 and amount <= 1, "alpha must be between 0 and 1")
+        return color .. hex(amount * 255) .. (options.suffix or "")
+    end,
+
+    mix = function(left, right, amount, options)
+        local lr, lg, lb = parse(left)
+        local rr, rg, rb = parse(right)
+        local function channel(a, b) return hex(a + (b - a) * amount) end
+        return "#" .. channel(lr, rr) .. channel(lg, rg) .. channel(lb, rb)
+    end,
+
+    is_dark = function(color, options)
+        local red, green, blue = parse(color)
+        return red + green + blue < 384
+    end,
+}
+```
+
+Register it once from root configuration or a selected module:
+
+```lua
+w.template.helpers("theme.colors", { prefix = "color_" })
+```
+
+Then use its exports as ordinary Handlebars value helpers:
+
+```handlebars
+background = '{{color_alpha theme.background 0.6 suffix="cc"}}'
+border = "{{color_mix theme.background theme.surface 0.5}}"
+mode = "{{#if (color_is_dark theme.background)}}dark{{else}}light{{/if}}"
+```
+
+The helper source and every dependency loaded by top-level `require()` are
+frozen into the plan and participate in identity and template-cache keys. A
+fresh constrained Lua state is created lazily only when an uncached template
+actually calls a custom helper. There is no built-in color policy: these names
+and transformations belong to the repository.
 
 ## When a template isn't enough
 
-If you need real logic or an external tool to produce the content, that's a task,
-not a template — see [run tasks and scripts](run-tasks-and-scripts.md). If Lua
-can compute the bytes directly, publish them:
+If you need filesystem or process access, nondeterministic behavior, or an
+external tool to produce the content, that's a task, not a helper — see
+[run tasks and scripts](run-tasks-and-scripts.md). If configuration-time Lua can
+compute the bytes directly, publish them:
 
 ```lua
 w.generate("starship.toml", {

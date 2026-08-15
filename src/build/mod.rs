@@ -284,6 +284,7 @@ struct IdentityPayload<'a> {
     process_observations: &'a [crate::model::manifest::ProcessObservation],
     modules: &'a [crate::model::manifest::ManifestModule],
     dependencies: &'a [crate::model::manifest::Dependency],
+    template_helpers: &'a [crate::model::manifest::TemplateHelperPack],
     ladder: &'a crate::execution::ladder::ExecutionLadder,
     providers: &'a [crate::model::manifest::Provider],
     requirements: &'a [crate::model::manifest::Requirement],
@@ -876,6 +877,7 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                     let manifest = materialise_product(
                         &source_root,
                         next_staging.path(),
+                        &build_dir.join(".wombat/plan/payloads/helpers"),
                         desired.take().expect("artifacts materialise once"),
                         &cache,
                         execution_mode,

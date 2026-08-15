@@ -316,6 +316,7 @@ enum InspectArg {
     Target,
     Modules,
     Dependencies,
+    Helpers,
     Providers,
     Requirements,
     Ladder,
@@ -399,6 +400,7 @@ impl From<InspectArg> for wombat::InspectSection {
             InspectArg::Target => Self::Target,
             InspectArg::Modules => Self::Modules,
             InspectArg::Dependencies => Self::Dependencies,
+            InspectArg::Helpers => Self::Helpers,
             InspectArg::Providers => Self::Providers,
             InspectArg::Requirements => Self::Requirements,
             InspectArg::Ladder => Self::Ladder,
@@ -415,6 +417,7 @@ impl From<InspectArg> for wombat::InspectSection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PlanInspectArg {
     Overview,
+    Helpers,
     Providers,
     Requirements,
     Ladder,
@@ -429,6 +432,7 @@ impl From<PlanInspectArg> for wombat::PlanInspectSection {
     fn from(value: PlanInspectArg) -> Self {
         match value {
             PlanInspectArg::Overview => Self::Overview,
+            PlanInspectArg::Helpers => Self::Helpers,
             PlanInspectArg::Providers => Self::Providers,
             PlanInspectArg::Requirements => Self::Requirements,
             PlanInspectArg::Ladder => Self::Ladder,

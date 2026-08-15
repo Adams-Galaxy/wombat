@@ -3,21 +3,34 @@
 use super::*;
 use std::fs::File;
 
+struct MaterialisationOptions<'a> {
+    source_root: &'a Path,
+    product_root: &'a Path,
+    helper_payload_root: &'a Path,
+    cache: Option<&'a crate::build::cache::BuildCache>,
+    execution_mode: crate::model::manifest::ExecutionMode,
+    skipped_requirement_gates: Vec<String>,
+}
+
 pub(super) fn materialise_product(
     source_root: &Path,
     product_root: &Path,
+    helper_payload_root: &Path,
     desired: crate::model::manifest::EvaluatedManifest,
     cache: &crate::build::cache::BuildCache,
     execution_mode: crate::model::manifest::ExecutionMode,
     skipped_requirement_gates: Vec<String>,
 ) -> Result<Manifest> {
     materialise_inner(
-        source_root,
-        product_root,
+        MaterialisationOptions {
+            source_root,
+            product_root,
+            helper_payload_root,
+            cache: Some(cache),
+            execution_mode,
+            skipped_requirement_gates,
+        },
         desired,
-        Some(cache),
-        execution_mode,
-        skipped_requirement_gates,
         |_| {},
     )
 }
@@ -36,31 +49,45 @@ pub(super) fn materialise_with_hook(
     hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
     materialise_inner(
-        source_root,
-        product_root,
+        MaterialisationOptions {
+            source_root,
+            product_root,
+            helper_payload_root: product_root,
+            cache: None,
+            execution_mode: crate::model::manifest::ExecutionMode::Normal,
+            skipped_requirement_gates: Vec::new(),
+        },
         desired,
-        None,
-        crate::model::manifest::ExecutionMode::Normal,
-        Vec::new(),
         hook,
     )
 }
 
 fn materialise_inner(
-    source_root: &Path,
-    product_root: &Path,
+    options: MaterialisationOptions<'_>,
     desired: crate::model::manifest::EvaluatedManifest,
-    cache: Option<&crate::build::cache::BuildCache>,
-    execution_mode: crate::model::manifest::ExecutionMode,
-    skipped_requirement_gates: Vec<String>,
     mut hook: impl FnMut(MaterialisationPoint),
 ) -> Result<Manifest> {
+    let MaterialisationOptions {
+        source_root,
+        product_root,
+        helper_payload_root,
+        cache,
+        execution_mode,
+        skipped_requirement_gates,
+    } = options;
     let tree = product_root.join("tree");
     fs::create_dir(&tree).map_err(|error| WombatError::io(&tree, error))?;
 
     let mut artifacts = Vec::with_capacity(desired.artifacts.len());
     for (index, artifact) in desired.artifacts.iter().enumerate() {
-        artifacts.push(materialise_artifact(source_root, &tree, artifact, cache)?);
+        artifacts.push(materialise_artifact(
+            source_root,
+            &tree,
+            helper_payload_root,
+            &desired.template_helpers,
+            artifact,
+            cache,
+        )?);
         hook(MaterialisationPoint::AfterArtifact(index));
     }
     materialise_provider_payloads(source_root, product_root, &desired.providers)?;
@@ -89,6 +116,7 @@ fn materialise_inner(
         process_observations: desired.process_observations,
         modules: desired.modules,
         dependencies: desired.dependencies,
+        template_helpers: desired.template_helpers,
         project_identity: desired.project_identity,
         ladder: desired.ladder,
         providers: desired.providers,
@@ -183,6 +211,8 @@ fn revalidate_lua_sources(
 fn materialise_artifact(
     source_root: &Path,
     tree: &Path,
+    helper_payload_root: &Path,
+    template_helpers: &[crate::model::manifest::TemplateHelperPack],
     artifact: &EvaluatedArtifact,
     cache: Option<&crate::build::cache::BuildCache>,
 ) -> Result<Artifact> {
@@ -209,19 +239,21 @@ fn materialise_artifact(
         }
         EvaluatedProduction::Template { context } => {
             reject_source_symlinks(source_root, &source_path)?;
-            let (source_digest, content) = render_and_hash(
-                &source_path,
-                &artifact.source,
-                &destination,
-                artifact.fingerprint.as_ref().ok_or_else(|| {
+            let (source_digest, content) = render_and_hash(TemplateRender {
+                source: &source_path,
+                source_name: &artifact.source,
+                destination: &destination,
+                expected: artifact.fingerprint.as_ref().ok_or_else(|| {
                     WombatError::invariant(format!(
                         "template artifact `{}` has no frozen fingerprint",
                         artifact.source
                     ))
                 })?,
                 context,
+                template_helpers,
+                helper_payload_root,
                 cache,
-            )?;
+            })?;
             (
                 Production::Template {
                     renderer: RendererIdentity {
@@ -291,14 +323,28 @@ fn write_generated(destination: &Path, bytes: &[u8], executable: bool) -> Result
     })
 }
 
-fn render_and_hash(
-    source: &Path,
-    source_name: &str,
-    destination: &Path,
-    expected: &SourceFingerprint,
-    context: &crate::model::frozen::FrozenValue,
-    cache: Option<&crate::build::cache::BuildCache>,
-) -> Result<(String, FileContent)> {
+struct TemplateRender<'a> {
+    source: &'a Path,
+    source_name: &'a str,
+    destination: &'a Path,
+    expected: &'a SourceFingerprint,
+    context: &'a crate::model::frozen::FrozenValue,
+    template_helpers: &'a [crate::model::manifest::TemplateHelperPack],
+    helper_payload_root: &'a Path,
+    cache: Option<&'a crate::build::cache::BuildCache>,
+}
+
+fn render_and_hash(options: TemplateRender<'_>) -> Result<(String, FileContent)> {
+    let TemplateRender {
+        source,
+        source_name,
+        destination,
+        expected,
+        context,
+        template_helpers,
+        helper_payload_root,
+        cache,
+    } = options;
     let mut input = File::open(source).map_err(|error| WombatError::io(source, error))?;
     let before = input
         .metadata()
@@ -333,7 +379,9 @@ fn render_and_hash(
         contract_version: u32,
         source_digest: &'a str,
         context: &'a crate::model::frozen::FrozenValue,
+        helper_registry: &'a str,
     }
+    let helper_registry = crate::lua::template_helpers::registry_digest(template_helpers)?;
     let cache_key = cache
         .map(|cache| {
             cache.key(
@@ -343,6 +391,7 @@ fn render_and_hash(
                     contract_version: TEMPLATE_CONTRACT_VERSION,
                     source_digest: &source_digest,
                     context,
+                    helper_registry: &helper_registry,
                 },
             )
         })
@@ -365,12 +414,21 @@ fn render_and_hash(
         Box::new(StrictConditionalHelper::new("unless", false)),
     );
     renderer.register_helper("coalesce", Box::new(CoalesceHelper));
+    crate::lua::template_helpers::register_handlebars_helpers(&mut renderer, template_helpers);
     let template = handlebars::Template::compile(template_source)
         .map_err(|error| template_compile_error(source_name, template_source, error))?;
     renderer.register_template(source_name, template);
-    let rendered = renderer
-        .render(source_name, context)
-        .map_err(|error| template_render_error(source_name, template_source, error))?;
+    let rendered = crate::lua::template_helpers::render(
+        &renderer,
+        source_name,
+        context,
+        template_helpers,
+        helper_payload_root,
+    )
+    .map_err(|error| {
+        let error = *error;
+        template_render_error(source_name, template_source, error.render, error.helper)
+    })?;
     let rendered = rendered.as_bytes();
 
     let mut output = OpenOptions::new()
@@ -421,15 +479,32 @@ fn template_render_error(
     source_name: &str,
     source: &str,
     error: handlebars::RenderError,
+    helper: Option<crate::lua::template_helpers::RenderFailure>,
 ) -> WombatError {
     let position = error.line_no.zip(error.column_no);
-    template_diagnostic(
+    let mut error = template_diagnostic(
         format!("failed to render template `{source_name}`: {error}"),
         source_name,
         source,
         position,
         error.to_string(),
-    )
+    );
+    if let Some(helper) = helper
+        && let WombatError::Diagnostic(diagnostic) = &mut error
+    {
+        diagnostic.message = format!(
+            "template helper `{}` failed while rendering `{source_name}`: {}",
+            helper.helper, helper.reason
+        );
+        if let Some(definition) = helper.definition {
+            diagnostic
+                .notes
+                .push(format!("helper defined at {definition}"));
+            diagnostic.user_frames.push(definition);
+        }
+        diagnostic.underlying = Some(helper.underlying);
+    }
+    error
 }
 
 fn template_diagnostic(
@@ -745,6 +820,7 @@ pub(super) fn compute_build_id(manifest: &Manifest) -> Result<String> {
         process_observations: &manifest.process_observations,
         modules: &manifest.modules,
         dependencies: &manifest.dependencies,
+        template_helpers: &manifest.template_helpers,
         ladder: &manifest.ladder,
         providers: &manifest.providers,
         requirements: &manifest.requirements,

@@ -1,5 +1,7 @@
 local w = require("wombat")
 
+w.template.helpers("theme.colors")
+
 local prepare = w.rung("prepare")
 local verify = w.rung("verify")
 

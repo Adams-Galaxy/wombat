@@ -74,6 +74,28 @@ function wombat.toml.encode(value)
     return native.toml_encode(value)
 end
 
+wombat.template = {}
+
+function wombat.template.helpers(module, options)
+    if type(module) ~= "string" then
+        error("w.template.helpers() requires a string module name", 2)
+    end
+    if options ~= nil and type(options) ~= "table" then
+        error("w.template.helpers() options must be a table", 2)
+    end
+    options = options or {}
+    for key in pairs(options) do
+        if key ~= "prefix" then
+            error("w.template.helpers() does not support option `" .. tostring(key) .. "`", 2)
+        end
+    end
+    local prefix = options.prefix or ""
+    if type(prefix) ~= "string" then
+        error("w.template.helpers() `prefix` must be a string", 2)
+    end
+    return native.declare_template_helpers(module, prefix)
+end
+
 function wombat.exec(argv, options)
     if type(argv) ~= "table" then error("w.exec() requires an argv array", 2) end
     if options ~= nil and type(options) ~= "table" then error("w.exec() options must be a table", 2) end
