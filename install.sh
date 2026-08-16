@@ -108,10 +108,29 @@ fi
 
 install_root=${WOMBAT_INSTALL_ROOT:-"$HOME/.local"}
 repository=${WOMBAT_INSTALL_REPOSITORY:-"https://github.com/Adams-Galaxy/wombat.git"}
+cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
+cargo_default_root=${CARGO_INSTALL_ROOT:-"$cargo_home"}
 if [ -n "${WOMBAT_INSTALL_REV:-}" ]; then
     "$cargo_path" install --git "$repository" --rev "$WOMBAT_INSTALL_REV" --locked --force --root "$install_root" wombat
 else
     "$cargo_path" install --git "$repository" --branch main --locked --force --root "$install_root" wombat
 fi
 
-exec "$install_root/bin/wombat" "$@"
+installed_binary="$install_root/bin/wombat"
+default_binary="$cargo_default_root/bin/wombat"
+if [ "$default_binary" != "$installed_binary" ] && [ -x "$default_binary" ]; then
+    printf '%s\n' "warning: another Wombat executable exists at $default_binary; this installer uses $installed_binary." >&2
+    printf '%s\n' "warning: remove or update the other executable so PATH cannot select an older Wombat." >&2
+fi
+
+printf '%s\n' "Installed Wombat at $installed_binary." >&2
+printf '%s\n' "To update this installation, use:" >&2
+if [ -n "${WOMBAT_INSTALL_REV:-}" ]; then
+    printf '  %s install --git %s --rev %s --locked --force --root %s wombat\n' \
+        "$cargo_path" "$repository" "$WOMBAT_INSTALL_REV" "$install_root" >&2
+else
+    printf '  %s install --git %s --branch main --locked --force --root %s wombat\n' \
+        "$cargo_path" "$repository" "$install_root" >&2
+fi
+
+exec "$installed_binary" "$@"

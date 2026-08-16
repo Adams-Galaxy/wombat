@@ -64,8 +64,13 @@ can inspect, diff, and explain, and only then does anything get written.
 Requires Rust 1.89 or newer. Lua 5.5 is built into the binary.
 
 ```sh
-cargo install --git https://github.com/Adams-Galaxy/wombat --branch main --locked wombat
+cargo install --git https://github.com/Adams-Galaxy/wombat \
+  --branch main --locked --force --root "$HOME/.local" wombat
 ```
+
+Wombat's canonical executable location is `~/.local/bin`. Use the same
+`--root "$HOME/.local"` command when updating; plain `cargo install` defaults
+to `~/.cargo/bin` and can leave an older executable earlier on `PATH`.
 
 On a fresh machine, one command can fetch Wombat, build your repository, install
 what it declares, and deploy it:

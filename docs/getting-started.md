@@ -9,8 +9,12 @@ install it separately.
 ## Install
 
 ```sh
-cargo install --git https://github.com/Adams-Galaxy/wombat --branch main --locked wombat
+cargo install --git https://github.com/Adams-Galaxy/wombat \
+  --branch main --locked --force --root "$HOME/.local" wombat
 ```
+
+Wombat installs in `~/.local/bin`. Keep that `--root "$HOME/.local"` option
+when updating so Cargo does not create a second executable under `~/.cargo/bin`.
 
 Or, from a clone, `cargo build --release` and use `./target/release/wombat`.
 
