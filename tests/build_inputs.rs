@@ -100,6 +100,8 @@ fn mac_host(hostname: &str) -> HostContext {
         hostname: Some(hostname.into()),
         username: Some("unused-user".into()),
         home: Some(PathBuf::from("/unused/home")),
+        paths: wombat::HostPaths::conventional(Path::new("/unused/home")),
+        wsl: false,
     }
 }
 
@@ -126,6 +128,8 @@ fn linux_host() -> HostContext {
         hostname: Some("fedora-box".into()),
         username: Some("unused-user".into()),
         home: Some(PathBuf::from("/unused/home")),
+        paths: wombat::HostPaths::conventional(Path::new("/unused/home")),
+        wsl: false,
     }
 }
 
@@ -302,6 +306,362 @@ fn rich_linux_distribution_and_kernel_context_are_available_and_tracked() {
         assert!(outcome.manifest.observations.iter().any(|observation| {
             observation.subject == ObservationSubject::Target && observation.path == path
         }));
+    }
+}
+
+#[test]
+fn common_context_is_lazy_composable_and_records_only_canonical_facts() {
+    let repository = Repository::new(
+        r#"local w = require('wombat')
+local p = w.paths
+assert(w.macos and not w.linux and not w.wsl)
+assert(w.os.distribution == nil)
+w.generate('context', {
+    to = 'context',
+    content = table.concat({ w.os.name, w.arch, p.home, p.local_root, p.config, p.data, p.state, p.cache }, '\n'),
+})
+"#,
+    );
+    let mut host = mac_host("host");
+    host.home = Some(PathBuf::from("/home/adam"));
+    host.paths = wombat::HostPaths {
+        config: Some(PathBuf::from("/xdg/config")),
+        data: Some(PathBuf::from("/xdg/data")),
+        state: Some(PathBuf::from("/xdg/state")),
+        cache: Some(PathBuf::from("/xdg/cache")),
+    };
+    let outcome = repository.build("build", &[], host).unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/context")).unwrap(),
+        "macos\naarch64\n/home/adam\n/home/adam/.local\n/xdg/config\n/xdg/data\n/xdg/state\n/xdg/cache"
+    );
+    let observations = outcome
+        .manifest
+        .observations
+        .iter()
+        .map(|observation| (observation.subject, observation.path.as_str()))
+        .collect::<Vec<_>>();
+    for path in [
+        "os.name",
+        "os.distribution",
+        "arch",
+        "wsl",
+        "home",
+        "paths.local_root",
+        "paths.config",
+        "paths.data",
+        "paths.state",
+        "paths.cache",
+    ] {
+        assert!(
+            observations.contains(&(ObservationSubject::Host, path)),
+            "missing {path}: {observations:?}"
+        );
+    }
+    assert_eq!(observations.len(), 10, "{observations:?}");
+}
+
+#[test]
+fn template_context_snapshots_lazy_namespaces_recursively() {
+    let repository = Repository::new(
+        r##"local w = require("wombat")
+local context = w.template.context({
+    theme = { accent = "#112233" },
+    os = w.os,
+    arch = w.arch,
+    paths = w.paths,
+    host = w.host,
+    target = w.target,
+    nested = w.array({ { system = w.os } }),
+    absent = w.null,
+})
+context.theme.accent = "#445566"
+w.install("context", { with = context })
+w.generate("snapshot", { to = "snapshot.json", content = w.json.encode(context) })
+"##,
+    );
+    repository.write(
+        "src/context.tmpl",
+        "{{theme.accent}} {{os.name}} {{arch}} {{paths.home}} {{host.hostname}} {{target.os.name}} {{nested.[0].system.family}}\n",
+    );
+    let outcome = repository
+        .build("build", &[], mac_host("snapshot-host"))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/context")).unwrap(),
+        "#445566 macos aarch64 /unused/home snapshot-host macos unix\n"
+    );
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &fs::read(repository.root.join("build/tree/snapshot.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(snapshot["absent"].is_null());
+    assert_eq!(snapshot["nested"][0]["system"]["name"], "macos");
+    for path in [
+        "os.name",
+        "os.family",
+        "os.version.raw",
+        "os.kernel.release",
+        "arch",
+        "hostname",
+        "home",
+        "paths.local_root",
+        "paths.config",
+        "paths.data",
+        "paths.state",
+        "paths.cache",
+    ] {
+        assert!(
+            outcome.manifest.observations.iter().any(|observation| {
+                observation.subject == ObservationSubject::Host && observation.path == path
+            }),
+            "missing host observation {path}: {:?}",
+            outcome.manifest.observations
+        );
+    }
+}
+
+#[test]
+fn template_context_keeps_explicit_cross_target_snapshots_available() {
+    let repository = Repository::new(
+        r#"local w = require("wombat")
+w.target("linux/x86_64")
+local context = w.template.context({ host = w.host, target = w.target })
+w.generate("context", { to = "context", content = w.json.encode(context) })
+"#,
+    );
+    let outcome = build(
+        BuildOptions::new(&repository.root, repository.root.join("build"))
+            .with_host(mac_host("cross-host"))
+            .with_compile_only(true),
+    )
+    .unwrap();
+    let context: serde_json::Value =
+        serde_json::from_slice(&fs::read(repository.root.join("build/tree/context")).unwrap())
+            .unwrap();
+    assert_eq!(context["host"]["os"]["name"], "macos");
+    assert_eq!(context["target"]["os"]["name"], "linux");
+    assert_eq!(
+        outcome.manifest.target.platform.os.name,
+        OperatingSystemName::Linux
+    );
+}
+
+#[test]
+fn template_context_snapshots_nested_readonly_context_arrays() {
+    let repository = Repository::new(
+        r#"local w = require("wombat")
+local context = w.template.context({ id_like = w.host.os.distribution.id_like })
+w.generate("context", { to = "context", content = w.json.encode(context) })
+"#,
+    );
+    let outcome = repository.build("build", &[], linux_host()).unwrap();
+    let context: serde_json::Value =
+        serde_json::from_slice(&fs::read(repository.root.join("build/tree/context")).unwrap())
+            .unwrap();
+    assert_eq!(context["id_like"], serde_json::json!(["rhel"]));
+    assert!(outcome.manifest.observations.iter().any(|observation| {
+        observation.subject == ObservationSubject::Host
+            && observation.path == "os.distribution.id_like"
+    }));
+}
+
+#[test]
+fn template_context_rejects_ambiguous_or_unfreezable_values() {
+    let cross = Repository::new(
+        "local w = require('wombat')\nw.target('linux/x86_64')\nlocal _ = w.template.context({ os = w.os })\n",
+    );
+    let error = build(
+        BuildOptions::new(&cross.root, cross.root.join("build"))
+            .with_host(mac_host("host"))
+            .with_compile_only(true),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("common local context is unavailable"),
+        "{error}"
+    );
+    assert!(error.contains("wombat.lua:3"), "{error}");
+
+    for (source, expected) in [
+        (
+            "local w = require('wombat')\nw.template.context(w.array())\n",
+            "requires a string-keyed map",
+        ),
+        (
+            "local w = require('wombat')\nw.template.context({ value = function() end })\n",
+            "unsupported Lua function value",
+        ),
+        (
+            "local w = require('wombat')\nlocal value = {}\nvalue.self = value\nw.template.context(value)\n",
+            "cyclic Lua tables",
+        ),
+    ] {
+        let repository = Repository::new(source);
+        let error = repository
+            .build("build", &[], mac_host("host"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn wsl_is_a_linux_specialization_without_kernel_identity_leakage() {
+    let repository = Repository::new(
+        "local w = require('wombat')\nassert(w.wsl and w.linux and not w.macos)\nw.generate('wsl', { to = 'wsl', content = tostring(w.wsl) })\n",
+    );
+    let mut host = linux_host();
+    host.wsl = true;
+    host.platform.os.kernel = Some(Kernel {
+        name: "linux".into(),
+        release: "6.6.87.2-microsoft-standard-WSL2".into(),
+    });
+    let outcome = repository.build("build", &[], host).unwrap();
+    assert_eq!(
+        fs::read_to_string(repository.root.join("build/tree/wsl")).unwrap(),
+        "true"
+    );
+    assert!(outcome.manifest.observations.iter().any(|observation| {
+        observation.subject == ObservationSubject::Host
+            && observation.path == "wsl"
+            && observation.value == wombat::frozen::FrozenValue::Boolean(true)
+    }));
+    assert!(
+        !outcome
+            .manifest
+            .observations
+            .iter()
+            .any(|observation| observation.path == "os.kernel.release")
+    );
+}
+
+#[test]
+fn unused_common_context_does_not_change_identity_or_observations() {
+    let repository = Repository::new(
+        "local w = require('wombat')\nw.generate('same', { to = 'same', content = 'same' })\n",
+    );
+    let first_host = linux_host();
+    let mut second_host = first_host.clone();
+    second_host.wsl = true;
+    second_host.paths.config = Some(PathBuf::from("/different/config"));
+    let first = repository.build("build/first", &[], first_host).unwrap();
+    let second = repository.build("build/second", &[], second_host).unwrap();
+    assert_eq!(first.build_id, second.build_id);
+    assert!(first.manifest.observations.is_empty());
+    assert!(second.manifest.observations.is_empty());
+}
+
+#[test]
+fn common_context_rejects_cross_targets_and_late_target_selection() {
+    let cross = Repository::new(
+        "local w = require('wombat')\nw.target('linux/x86_64')\nlocal _ = w.macos\n",
+    );
+    let error = build(
+        BuildOptions::new(&cross.root, cross.root.join("build"))
+            .with_host(mac_host("host"))
+            .with_compile_only(true),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("common local context is unavailable"),
+        "{error}"
+    );
+    assert!(
+        error.contains("use w.host or w.target explicitly"),
+        "{error}"
+    );
+    assert!(error.contains("wombat.lua:3"), "{error}");
+
+    let late = Repository::new(
+        "local w = require('wombat')\nlocal _ = w.arch\nw.target('macos/aarch64')\n",
+    );
+    let error = late
+        .build("build", &[], mac_host("host"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("after it was read"), "{error}");
+
+    let local = Repository::new(
+        "local w = require('wombat')\nw.target('macos/aarch64')\nassert(w.macos)\nw.generate('ok', { to = 'ok', content = w.os.name })\n",
+    );
+    local.build("build", &[], mac_host("host")).unwrap();
+}
+
+#[test]
+fn common_paths_validate_availability_absolute_values_and_immutability() {
+    let fallback = Repository::new(
+        "local w = require('wombat')\nlocal p = w.paths\nw.generate('paths', { to = 'paths', content = table.concat({ p.local_root, p.config, p.data, p.state, p.cache }, '\\n') })\n",
+    );
+    fallback.build("build", &[], mac_host("host")).unwrap();
+    assert_eq!(
+        fs::read_to_string(fallback.root.join("build/tree/paths")).unwrap(),
+        "/unused/home/.local\n/unused/home/.config\n/unused/home/.local/share\n/unused/home/.local/state\n/unused/home/.cache"
+    );
+
+    let repository_only = Repository::new(
+        "local w = require('wombat')\nw.target('linux/x86_64')\nw.generate('root', { to = 'root', content = w.paths.repository })\n",
+    );
+    let outcome = build(
+        BuildOptions::new(&repository_only.root, repository_only.root.join("build"))
+            .with_host(mac_host("host"))
+            .with_compile_only(true),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(repository_only.root.join("build/tree/root")).unwrap(),
+        fs::canonicalize(&repository_only.root)
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert!(outcome.manifest.observations.is_empty());
+
+    let mut missing_host = mac_host("host");
+    missing_host.home = None;
+    missing_host.paths = wombat::HostPaths {
+        config: None,
+        data: None,
+        state: None,
+        cache: None,
+    };
+    let missing = Repository::new("local p = require('wombat').paths\nlocal _ = p.home\n");
+    let error = missing
+        .build("build", &[], missing_host)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("HOME is not set"), "{error}");
+
+    let mut relative_host = mac_host("host");
+    relative_host.paths.config = Some(PathBuf::from("relative/config"));
+    let relative = Repository::new("local p = require('wombat').paths\nlocal _ = p.config\n");
+    let error = relative
+        .build("build", &[], relative_host)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("w.paths.config must be absolute"), "{error}");
+
+    for (source, expected) in [
+        (
+            "local p = require('wombat').paths\nlocal _ = p.typo\n",
+            "unknown w.paths key `typo`",
+        ),
+        (
+            "local p = require('wombat').paths\np.home = '/changed'\n",
+            "w.paths is immutable",
+        ),
+        (
+            "local w = require('wombat')\nw.macos = false\n",
+            "w.macos is immutable",
+        ),
+    ] {
+        let repository = Repository::new(source);
+        let error = repository
+            .build("build", &[], mac_host("host"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
     }
 }
 

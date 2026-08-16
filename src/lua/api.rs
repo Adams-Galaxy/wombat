@@ -52,6 +52,29 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
         })?,
     )?;
 
+    let common_os_state = Rc::clone(&state);
+    native.set(
+        "common_os_context",
+        lua.create_function(move |lua, ()| {
+            create_common_os_proxy(lua, Rc::clone(&common_os_state))
+        })?,
+    )?;
+
+    let common_value_state = Rc::clone(&state);
+    native.set(
+        "common_value",
+        lua.create_function(move |lua, name: String| {
+            let location = caller_location(lua, &common_value_state);
+            common_value(lua, &common_value_state, &name, location).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let paths_state = Rc::clone(&state);
+    native.set(
+        "paths_context",
+        lua.create_function(move |lua, ()| create_paths_proxy(lua, Rc::clone(&paths_state)))?,
+    )?;
+
     let use_state = Rc::clone(&state);
     native.set(
         "use_module",
@@ -171,12 +194,6 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
         })?,
     )?;
 
-    let repository_root = state.borrow().root.clone();
-    native.set(
-        "repository_path",
-        repository_root.to_string_lossy().to_string(),
-    )?;
-
     let toml_decode_state = Rc::clone(&state);
     native.set(
         "toml_decode",
@@ -233,6 +250,16 @@ pub(super) fn create_native_module(lua: &Lua, state: Rc<RefCell<RuntimeState>>) 
     native.set(
         "declare_template_helpers",
         super::template_helpers::register_native(lua, Rc::clone(&state))?,
+    )?;
+
+    let template_context_state = Rc::clone(&state);
+    native.set(
+        "template_context",
+        lua.create_function(move |lua, value: Value| {
+            let location = caller_location(lua, &template_context_state);
+            resolve_template_context(lua, &template_context_state, value, location)
+                .map_err(mlua::Error::external)
+        })?,
     )?;
 
     let log_state = Rc::clone(&state);

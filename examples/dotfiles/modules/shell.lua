@@ -4,8 +4,11 @@ local config = w.module.config()
 
 w.module.from(".")
 w.install(".zshrc", {
-    with = {
+    with = w.template.context({
         theme = theme.name,
         search = config.search,
-    },
+        os = w.os,
+        arch = w.arch,
+        paths = w.paths,
+    }),
 })

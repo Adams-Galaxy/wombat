@@ -66,10 +66,15 @@ Construction time is Lua. Conditionals, loops, reading host facts, choosing
 modules, assembling template context — all of it happens while the plan is being
 frozen, and all of it is recorded.
 
+Lazy Wombat namespaces stay lazy until read. When a template needs a complete
+namespace, `w.template.context({ os = w.os, paths = w.paths })` snapshots it
+recursively into ordinary plan data during construction; the renderer never
+receives a live Lua or host-context handle.
+
 Execution time is Rust. Running tasks, rendering templates, installing packages,
 writing files. By then your Lua has finished and the decisions are already made.
 
-So `if w.host.os.name == "macos" then ... end` is a construction-time choice, and
+So `if w.macos then ... end` is a construction-time choice, and
 the plan records which branch you took. There's deliberately no way to make that
 decision later, during execution, because then the plan would no longer describe
 what actually happened.

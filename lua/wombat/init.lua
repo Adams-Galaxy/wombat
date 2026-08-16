@@ -42,7 +42,8 @@ end
 
 wombat.host = native.host_context()
 wombat.target = native.target_context()
-wombat.paths = { repository = native.repository_path }
+wombat.os = native.common_os_context()
+wombat.paths = native.paths_context()
 wombat.null = native.null
 
 function wombat.array(value)
@@ -75,6 +76,13 @@ function wombat.toml.encode(value)
 end
 
 wombat.template = {}
+
+function wombat.template.context(value)
+    if type(value) ~= "table" then
+        error("w.template.context() requires a table", 2)
+    end
+    return native.template_context(value)
+end
 
 function wombat.template.helpers(module, options)
     if type(module) ~= "string" then
@@ -380,5 +388,19 @@ end
 function wombat.module.config()
     return native.module_config()
 end
+
+local common_values = { arch = true, macos = true, linux = true, wsl = true }
+setmetatable(wombat, {
+    __index = function(_, key)
+        if common_values[key] then return native.common_value(key) end
+        return nil
+    end,
+    __newindex = function(table, key, value)
+        if common_values[key] then
+            error("w." .. tostring(key) .. " is immutable", 2)
+        end
+        rawset(table, key, value)
+    end,
+})
 
 return wombat

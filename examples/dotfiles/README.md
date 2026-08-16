@@ -9,6 +9,9 @@ ladder, a scheduled Python preparation script, and a post-deployment shell
 verification script.
 Its editor template also registers a deterministic Lua Handlebars helper pack
 and derives a translucent color from the theme's small base palette.
+The shell module snapshots `w.os` and `w.paths` through
+`w.template.context()`, keeping lazy construction views out of the persisted
+template payload.
 
 Module files are deliberately flat and organized as code; their physical
 location has no relationship to deployed paths. Each module establishes any

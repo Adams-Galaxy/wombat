@@ -8,6 +8,17 @@ that exact plan to build a verified product, and then deploys it under guard. Yo
 can read the whole plan before anything touches your machine.
 
 ```lua
+local w = require("wombat")
+local p = w.paths
+
+if w.macos then w.log.info("selecting macOS policy") end
+if w.linux then w.log.info("selecting Linux policy") end
+if w.wsl then w.log.info("selecting WSL policy") end
+
+w.log.info("building repository", { root = p.repository })
+```
+
+```lua
 -- modules/shell.lua
 local w = require("wombat")
 local theme = w.using("theme")

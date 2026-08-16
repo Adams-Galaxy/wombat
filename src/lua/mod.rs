@@ -27,7 +27,9 @@ use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value};
 use sha2::{Digest, Sha256};
 
 use crate::execution::ladder::{CoreRung, ExecutionLadder, LadderRung, RungId};
-use crate::model::context::{HostContext, ResolvedTarget, TargetOrigin, TargetPlatform};
+use crate::model::context::{
+    HostContext, OperatingSystemName, ResolvedTarget, TargetOrigin, TargetPlatform,
+};
 use crate::model::frozen::FrozenValue;
 use crate::model::manifest::{
     ArtifactKind, ArtifactNotice, ArtifactNoticeKind, ArtifactPolicy, ArtifactSelection,

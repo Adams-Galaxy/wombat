@@ -23,7 +23,7 @@ const SNAPSHOT: &str = "tests/fixtures/surface-inventory.txt";
 /// nothing to `pairs`.
 const WALK: &str = r#"
 local w = require("wombat")
-local opaque = { host = true, target = true }
+local opaque = { host = true, os = true, paths = true, target = true }
 local lines = {}
 local function walk(value, prefix, depth)
     if depth > 2 then return end
@@ -42,6 +42,13 @@ local function walk(value, prefix, depth)
     end
 end
 walk(w, "w", 0)
+for _, key in ipairs({ "arch", "linux", "macos", "wsl" }) do
+    lines[#lines + 1] = "w." .. key .. " " .. type(w[key])
+end
+for _, key in ipairs({ "cache", "config", "data", "home", "local_root", "repository", "state" }) do
+    lines[#lines + 1] = "w.paths." .. key .. " " .. type(w.paths[key])
+end
+table.sort(lines)
 w.generate("inventory", { content = table.concat(lines, "\n"), to = "inventory" })
 "#;
 

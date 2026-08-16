@@ -1,6 +1,7 @@
 # Lua API reference
 
 Everything below comes from `require("wombat")`, conventionally bound to `w`.
+Bind its path namespace to `p` when paths appear more than once.
 
 All of it runs at **construction time** — while the plan is being frozen.
 Nothing here executes during materialisation or deployment. Where an entry says
@@ -9,6 +10,7 @@ later.
 
 ```lua
 local w = require("wombat")
+local p = w.paths
 ```
 
 Unknown options are rejected everywhere rather than ignored, so a typo fails at
@@ -17,7 +19,8 @@ construction instead of quietly doing nothing.
 Contents: [module selection](#module-selection) ·
 [sources and artifacts](#sources-and-artifacts) ·
 [generated content](#generated-content) · [inputs](#inputs) ·
-[host and target](#host-and-target-context) ·
+[local system and paths](#local-system-and-paths) ·
+[advanced host and target](#advanced-host-and-target-context) ·
 [requirements and providers](#requirements-and-providers) ·
 [tasks and scripts](#tasks-and-scripts) · [ladders](#ladders) ·
 [data, processes, logging](#data-processes-and-logging)
@@ -134,7 +137,36 @@ defaults to an empty table when `with` is omitted.
 w.install.template("input", { to = ".config/output", with = context })
 ```
 
-## Template helpers
+## Template context and helpers
+
+### `w.template.context(value)`
+
+Recursively snapshots a string-keyed context map during construction. Ordinary
+maps, arrays, `w.array()` markers, and `w.null` retain their existing shapes.
+Wombat's lazy `w.os`, `w.paths`, `w.host`, and `w.target` views — including
+nested views — become plain Lua data that `with` can freeze:
+
+```lua
+local context = w.template.context({
+    theme = w.using("theme"),
+    os = w.os,
+    arch = w.arch,
+    paths = w.paths,
+})
+
+w.install("zsh", { with = context })
+```
+
+Snapshotting a complete lazy namespace observes and makes the context depend on
+all of its available facts. Pass an individual value such as `w.paths.config`
+when only that fact should affect identity. Common-local snapshots retain the
+host/target compatibility rule; explicit `w.host` and `w.target` snapshots are
+available for deliberate cross-target policy.
+
+The result is an ordinary Lua table and may still be adjusted before a
+declaration freezes it. Wombat resolves only its own native proxies: arbitrary
+user metatables are not executed as lazy configuration. Cycles, functions, and
+other values that cannot cross the frozen-data boundary remain errors.
 
 ### `w.template.helpers(module, options?)`
 
@@ -250,7 +282,51 @@ and `--name=value`. `target` parses a platform such as `linux/x86_64`.
 Resolved inputs are recorded in the manifest and participate in build identity,
 so two products built with different inputs are different products.
 
-## Host and target context
+## Local system and paths
+
+### `w.os` · `w.arch` · `w.macos` · `w.linux` · `w.wsl`
+
+Lazy facts about the common local system. `w.os` contains the rich OS version,
+kernel, and Linux distribution data; `w.arch` is the normalized architecture.
+The boolean predicates make the ordinary branches terse, and WSL is a Linux
+specialization:
+
+```lua
+if w.macos then w.use("macos-only") end
+if w.linux then w.use("linux") end
+if w.wsl then
+    assert(w.linux)
+    w.use("wsl")
+end
+```
+
+Only accessed facts become observations or participate in identity. Reading
+this common interface locks target selection and requires the effective target
+to remain locally compatible with the host. Deliberate cross-target code uses
+the explicit contexts below.
+
+### `w.paths`
+
+Immutable local paths, conventionally bound to `p`:
+
+```lua
+local p = w.paths
+
+p.repository  -- source repository root
+p.home        -- $HOME
+p.local_root  -- $HOME/.local
+p.config      -- $XDG_CONFIG_HOME or $HOME/.config
+p.data        -- $XDG_DATA_HOME or $HOME/.local/share
+p.state       -- $XDG_STATE_HOME or $HOME/.local/state
+p.cache       -- $XDG_CACHE_HOME or $HOME/.cache
+```
+
+`local_root` is used because `local` is a Lua keyword, making `p.local` invalid
+syntax. The repository path is independent of target selection. Other paths
+require an absolute home or XDG value and obey the common-local compatibility
+rule.
+
+## Advanced host and target context
 
 ### `w.host`
 
@@ -268,18 +344,10 @@ participate in build identity — so reading `w.host.os.version` makes your
 product depend on it, and not reading it doesn't.
 
 ```lua
-if w.target.os.name == "macos" then
-    w.use("macos-only")
-end
-
-if w.host.os.distribution and w.host.os.distribution.id == "fedora" then
-    w.use("fedora")
+if w.target.os.name == "linux" and w.host.os.name == "macos" then
+    -- deliberate cross-target policy
 end
 ```
-
-### `w.paths.repository`
-
-Absolute path to the source repository, as a string.
 
 ## Requirements and providers
 
@@ -356,9 +424,11 @@ somewhere. `with` takes:
   clone's default branch resolves to at clone time.
 
 ```lua
+local p = w.paths
+
 w.providers({ "git" })
 w.need.package("tpm", {
-    with = { repository = "https://github.com/tmux-plugins/tpm.git", to = w.host.home .. "/.tmux/plugins/tpm" },
+    with = { repository = "https://github.com/tmux-plugins/tpm.git", to = p.home .. "/.tmux/plugins/tpm" },
 })
 ```
 

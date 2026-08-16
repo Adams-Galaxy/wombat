@@ -24,6 +24,7 @@ wombat plan materialise [--allow-host-scripts --clean --compile-only --rerun-scr
 wombat setup [--allow-host-scripts --clean --conflict --rerun-scripts --skip-requirements --skip-scripts --ssh --target-root --yes -B/--build-dir project_arguments repository]
 
 [lua]
+w.arch string
 w.array function
 w.build table
 w.build.task function
@@ -45,12 +46,14 @@ w.json table
 w.json.decode function
 w.json.encode function
 w.ladder function
+w.linux boolean
 w.log table
 w.log.debug function
 w.log.error function
 w.log.info function
 w.log.notice function
 w.log.warn function
+w.macos boolean
 w.module table
 w.module.config function
 w.module.from function
@@ -58,8 +61,15 @@ w.need table
 w.need.command function
 w.need.package function
 w.null userdata
+w.os table
 w.paths table
+w.paths.cache string
+w.paths.config string
+w.paths.data string
+w.paths.home string
+w.paths.local_root string
 w.paths.repository string
+w.paths.state string
 w.prefer table
 w.prefer.command function
 w.prefer.package function
@@ -70,9 +80,11 @@ w.script function
 w.shell function
 w.target table
 w.template table
+w.template.context function
 w.template.helpers function
 w.toml table
 w.toml.decode function
 w.toml.encode function
 w.use function
 w.using function
+w.wsl boolean

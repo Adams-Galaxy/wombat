@@ -56,9 +56,11 @@ Git packages need an absolute destination, since there's no implicit install
 location the way there is for a package manager:
 
 ```lua
+local p = w.paths
+
 w.providers({ "git" })
 w.need.package("tpm", {
-    with = { repository = "https://github.com/tmux-plugins/tpm.git", to = w.host.home .. "/.tmux/plugins/tpm" },
+    with = { repository = "https://github.com/tmux-plugins/tpm.git", to = p.home .. "/.tmux/plugins/tpm" },
 })
 ```
 

@@ -4,6 +4,8 @@
 //! configuration can ask precise questions — major version, distribution id,
 //! kernel — instead of pattern-matching a name. [`LooseVersion`] compares what
 //! platforms actually report, which is not reliably semver.
+//! Local paths and WSL identity live beside those facts so the common Lua
+//! facade can observe one normalized system without re-reading process state.
 //!
 //! Only facts a configuration actually reads are recorded as observations and
 //! feed build identity. That is deliberate: a product should depend on the host
@@ -267,6 +269,20 @@ pub struct HostContext {
     pub hostname: Option<String>,
     pub username: Option<String>,
     pub home: Option<PathBuf>,
+    pub paths: HostPaths,
+    pub wsl: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostPaths {
+    /// XDG configuration root, including its conventional fallback.
+    pub config: Option<PathBuf>,
+    /// XDG data root, including its conventional fallback.
+    pub data: Option<PathBuf>,
+    /// XDG state root, including its conventional fallback.
+    pub state: Option<PathBuf>,
+    /// XDG cache root, including its conventional fallback.
+    pub cache: Option<PathBuf>,
 }
 
 impl HostContext {
@@ -283,6 +299,8 @@ impl HostContext {
                 (None, read_linux_distribution(Path::new("/etc/os-release"))?)
             }
         };
+        let home = clean_value(env::var("HOME").ok()).map(PathBuf::from);
+        let wsl = observe_wsl(os_name, kernel.as_ref());
         Ok(Self {
             platform: TargetPlatform {
                 os: OperatingSystem {
@@ -296,7 +314,9 @@ impl HostContext {
             },
             hostname: observe_hostname(),
             username: clean_value(env::var("USER").ok()),
-            home: clean_value(env::var("HOME").ok()).map(PathBuf::from),
+            paths: HostPaths::observe(home.as_deref()),
+            wsl,
+            home,
         })
     }
 
@@ -306,6 +326,8 @@ impl HostContext {
             hostname: Some("fixture-host".to_string()),
             username: Some("fixture-user".to_string()),
             home: Some(PathBuf::from("/fixture/home")),
+            paths: HostPaths::conventional(Path::new("/fixture/home")),
+            wsl: false,
         }
     }
 
@@ -337,8 +359,62 @@ impl HostContext {
                 FrozenValue::String(value.to_string_lossy().into_owned()),
             );
         }
+        map.insert("wsl".to_string(), FrozenValue::Boolean(self.wsl));
         FrozenValue::Map(map)
     }
+}
+
+impl HostPaths {
+    /// Produces the conventional XDG roots beneath a fixture home.
+    pub fn conventional(home: &Path) -> Self {
+        Self {
+            config: Some(home.join(".config")),
+            data: Some(home.join(".local/share")),
+            state: Some(home.join(".local/state")),
+            cache: Some(home.join(".cache")),
+        }
+    }
+
+    fn observe(home: Option<&Path>) -> Self {
+        Self {
+            config: observed_path("XDG_CONFIG_HOME", home.map(|home| home.join(".config"))),
+            data: observed_path("XDG_DATA_HOME", home.map(|home| home.join(".local/share"))),
+            state: observed_path("XDG_STATE_HOME", home.map(|home| home.join(".local/state"))),
+            cache: observed_path("XDG_CACHE_HOME", home.map(|home| home.join(".cache"))),
+        }
+    }
+}
+
+fn observed_path(name: &str, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or(fallback)
+}
+
+fn observe_wsl(os: OperatingSystemName, kernel: Option<&Kernel>) -> bool {
+    is_wsl(
+        os,
+        kernel,
+        nonempty_environment("WSL_INTEROP"),
+        nonempty_environment("WSL_DISTRO_NAME"),
+    )
+}
+
+fn nonempty_environment(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn is_wsl(
+    os: OperatingSystemName,
+    kernel: Option<&Kernel>,
+    interop_environment: bool,
+    distro_environment: bool,
+) -> bool {
+    os == OperatingSystemName::Linux
+        && (kernel.is_some_and(|kernel| kernel.release.to_ascii_lowercase().contains("microsoft"))
+            || interop_environment
+            || distro_environment)
 }
 
 fn os_to_frozen(os: &OperatingSystem) -> FrozenValue {
@@ -706,7 +782,8 @@ fn normalize_identifier(value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, LooseVersion, OperatingSystemName, TargetPlatform, parse_os_release,
+        Architecture, Kernel, LooseVersion, OperatingSystemName, TargetPlatform, is_wsl,
+        parse_os_release,
     };
 
     #[test]
@@ -745,5 +822,42 @@ mod tests {
         assert_eq!(distribution.id_like, ["fedora", "rhel"]);
         assert_eq!(distribution.version.unwrap().major, Some(42));
         assert_eq!(distribution.pretty_name.as_deref(), Some("Fedora Linux 42"));
+    }
+
+    #[test]
+    fn recognizes_wsl_only_for_linux_from_kernel_or_environment_evidence() {
+        let wsl_kernel = Kernel {
+            name: "linux".to_string(),
+            release: "6.6.87.2-microsoft-standard-WSL2".to_string(),
+        };
+        let normal_kernel = Kernel {
+            name: "linux".to_string(),
+            release: "6.14.0".to_string(),
+        };
+        assert!(is_wsl(
+            OperatingSystemName::Linux,
+            Some(&wsl_kernel),
+            false,
+            false
+        ));
+        assert!(is_wsl(
+            OperatingSystemName::Linux,
+            Some(&normal_kernel),
+            true,
+            false
+        ));
+        assert!(is_wsl(OperatingSystemName::Linux, None, false, true));
+        assert!(!is_wsl(
+            OperatingSystemName::Linux,
+            Some(&normal_kernel),
+            false,
+            false
+        ));
+        assert!(!is_wsl(
+            OperatingSystemName::Macos,
+            Some(&wsl_kernel),
+            true,
+            true
+        ));
     }
 }

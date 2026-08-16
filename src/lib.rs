@@ -95,7 +95,7 @@ pub use deploy::{
 pub use error::{Diagnostic, ErrorKind, Result, WombatError};
 pub use inspection::{InspectSection, PlanInspectSection, compare, explain, inspect, inspect_plan};
 pub use model::context::{
-    Architecture, Distribution, HostContext, Kernel, LooseVersion, OperatingSystem,
+    Architecture, Distribution, HostContext, HostPaths, Kernel, LooseVersion, OperatingSystem,
     OperatingSystemName, ResolvedTarget, TargetOrigin, TargetPlatform,
 };
 pub use model::manifest::Manifest;

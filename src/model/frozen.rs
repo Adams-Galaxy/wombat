@@ -27,10 +27,21 @@ impl FrozenValue {
     }
 
     pub fn from_lua(value: Value) -> Result<Self> {
-        Self::freeze(value, &mut HashSet::new())
+        Self::from_lua_resolving(value, |_| Ok(None))
     }
 
-    fn freeze(value: Value, active_tables: &mut HashSet<usize>) -> Result<Self> {
+    pub(crate) fn from_lua_resolving(
+        value: Value,
+        mut resolve_table: impl FnMut(&Table) -> Result<Option<Self>>,
+    ) -> Result<Self> {
+        Self::freeze(value, &mut HashSet::new(), &mut resolve_table)
+    }
+
+    fn freeze(
+        value: Value,
+        active_tables: &mut HashSet<usize>,
+        resolve_table: &mut impl FnMut(&Table) -> Result<Option<Self>>,
+    ) -> Result<Self> {
         match value {
             Value::Nil => Ok(Self::Null),
             Value::Boolean(value) => Ok(Self::Boolean(value)),
@@ -43,7 +54,7 @@ impl FrozenValue {
                 .to_str()
                 .map(|value| Self::String(value.to_owned()))
                 .map_err(WombatError::from),
-            Value::Table(table) => Self::freeze_table(table, active_tables),
+            Value::Table(table) => Self::freeze_table(table, active_tables, resolve_table),
             Value::LightUserData(value) if value.0.is_null() => Ok(Self::Null),
             other => Err(WombatError::configuration(format!(
                 "unsupported Lua {} value; expected nil, boolean, number, string, array, or string-keyed map",
@@ -52,7 +63,14 @@ impl FrozenValue {
         }
     }
 
-    fn freeze_table(table: Table, active_tables: &mut HashSet<usize>) -> Result<Self> {
+    fn freeze_table(
+        table: Table,
+        active_tables: &mut HashSet<usize>,
+        resolve_table: &mut impl FnMut(&Table) -> Result<Option<Self>>,
+    ) -> Result<Self> {
+        if let Some(value) = resolve_table(&table)? {
+            return Ok(value);
+        }
         let pointer = table.to_pointer() as usize;
         if !active_tables.insert(pointer) {
             return Err(WombatError::configuration(
@@ -69,14 +87,14 @@ impl FrozenValue {
             .metatable()
             .is_some_and(|metatable| metatable.raw_get::<bool>(ARRAY_MARKER).unwrap_or(false));
         let result = if marked_array {
-            Self::freeze_array_pairs(pairs, active_tables)
+            Self::freeze_array_pairs(pairs, active_tables, resolve_table)
         } else if pairs.is_empty() {
             Ok(Self::empty_map())
         } else if pairs
             .iter()
             .all(|(key, _)| matches!(key, Value::Integer(value) if *value > 0))
         {
-            Self::freeze_array_pairs(pairs, active_tables)
+            Self::freeze_array_pairs(pairs, active_tables, resolve_table)
         } else if pairs.iter().all(|(key, _)| matches!(key, Value::String(_))) {
             let mut values = BTreeMap::new();
             for (key, value) in pairs {
@@ -84,7 +102,7 @@ impl FrozenValue {
                     unreachable!("map keys were checked above");
                 };
                 let key = key.to_str().map_err(WombatError::from)?.to_owned();
-                values.insert(key, Self::freeze(value, active_tables)?);
+                values.insert(key, Self::freeze(value, active_tables, resolve_table)?);
             }
             Ok(Self::Map(values))
         } else {
@@ -100,6 +118,7 @@ impl FrozenValue {
     fn freeze_array_pairs(
         pairs: Vec<(Value, Value)>,
         active_tables: &mut HashSet<usize>,
+        resolve_table: &mut impl FnMut(&Table) -> Result<Option<Self>>,
     ) -> Result<Self> {
         let mut indexed = pairs
             .into_iter()
@@ -124,7 +143,7 @@ impl FrozenValue {
 
         indexed
             .into_iter()
-            .map(|(_, value)| Self::freeze(value, active_tables))
+            .map(|(_, value)| Self::freeze(value, active_tables, resolve_table))
             .collect::<Result<Vec<_>>>()
             .map(Self::Array)
     }

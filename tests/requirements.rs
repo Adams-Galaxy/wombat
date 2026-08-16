@@ -28,6 +28,8 @@ fn debian_host() -> wombat::HostContext {
         hostname: Some("ubuntu-test".into()),
         username: Some("wombat".into()),
         home: Some(PathBuf::from("/home/wombat")),
+        paths: wombat::HostPaths::conventional(Path::new("/home/wombat")),
+        wsl: false,
     }
 }
 

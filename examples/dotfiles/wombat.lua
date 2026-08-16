@@ -30,7 +30,7 @@ w.ladder("example", {
     w.rungs.deploy.after,
 })
 
-if w.target.os.name == "macos" then
+if w.macos then
     w.providers({ "brew" })
 else
     w.providers({ { name = "apt", with = { update = true } } })
