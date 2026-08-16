@@ -88,3 +88,6 @@ w.toml.encode function
 w.use function
 w.using function
 w.wsl boolean
+w.yaml table
+w.yaml.decode function
+w.yaml.encode function

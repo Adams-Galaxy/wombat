@@ -554,42 +554,62 @@ reference a custom rung declared in another module.
 
 ## Data, processes, and logging
 
-### `w.json.decode(path)` · `w.toml.decode(path)`
+### `w.json.decode(path)` · `w.toml.decode(path)` · `w.yaml.decode(path)`
 
-Reads a data file from the repository and returns it as frozen Lua data. Both
-share one path: a repository-relative safety check, then the file's digest
+Reads a data file from the repository and returns it as frozen Lua data. All
+three share one path: a repository-relative safety check, then the file's digest
 joins the source catalogue and build identity, so editing it produces a new
 build.
 
 ```lua
 local manifest = w.json.decode("data/manifest.json")
 local packages = w.toml.decode("data/packages.toml")
+local theme = w.yaml.decode("themes/gruvbox.yaml")
 ```
 
-### `w.json.encode(value)` · `w.toml.encode(map)`
+### `w.json.encode(value)` · `w.toml.encode(map)` · `w.yaml.encode(value)`
 
-The other direction returns a JSON or TOML string. Unlike `decode`, encoding
-never touches the repository — pair it with `w.generate` to write the result as
-an artifact.
+The other direction returns a JSON, TOML, or YAML string. Unlike `decode`,
+encoding never touches the repository — pair it with `w.generate` to write the
+result as an artifact.
 
 JSON accepts every frozen value at the root: strings, finite numbers, booleans,
 `w.null`, arrays, and maps. TOML requires a string-keyed map at the root and
-rejects `w.null` anywhere because TOML has no null value.
+rejects `w.null` anywhere because TOML has no null value. YAML accepts the same
+roots as JSON and emits deterministic two-space YAML with sorted maps, explicit
+`null`, distinct `{}` and `[]`, safe string quoting, and one trailing newline.
+
+YAML decoding accepts one YAML 1.2 document containing core scalar values,
+sequences, string-keyed maps, and bounded ordinary anchors and aliases. It
+rejects duplicate or non-string keys, merge keys, recursive or excessive
+aliases, non-finite and out-of-range numbers, and tags outside the representable
+core types. In particular, `yes`, `no`, `on`, and `off` are strings rather than
+booleans.
 
 ```lua
 w.generate("settings.json", { content = w.json.encode({ theme = "dark" }) })
+w.generate("settings.yaml", {
+    content = w.yaml.encode(w.template.context({ paths = w.paths })),
+})
 ```
+
+These are structured codecs, not source editors. YAML comments, anchors,
+quoting style, whitespace, and original key order do not survive decoding. Use
+an authored `.yaml.tmpl` when those presentation details matter. Encoding does
+not resolve lazy native views implicitly; snapshot them explicitly with
+`w.template.context()`.
 
 ### `w.array(values?)` · `w.null`
 
 Lua's empty `{}` is intentionally a map. Use `w.array()` for an empty array, or
 `w.array({ value1, value2 })` to mark a contiguous integer-keyed table as an
-array. Sparse or mixed-key arrays fail immediately. Arrays decoded from JSON or
-TOML retain the same protected marker, including when nested, so decoding and
-encoding does not turn an empty array into an empty object.
+array. Sparse or mixed-key arrays fail immediately. Arrays decoded from JSON,
+TOML, or YAML retain the same protected marker, including when nested, so
+decoding and encoding does not turn an empty array into an empty object.
 
-`w.null` is the explicit null value. It survives JSON decode/encode and frozen
-configuration boundaries; it is distinct from Lua `nil`, which means absence.
+`w.null` is the explicit null value. It survives JSON and YAML decode/encode and
+frozen configuration boundaries; it is distinct from Lua `nil`, which means
+absence.
 
 ```lua
 local document = {

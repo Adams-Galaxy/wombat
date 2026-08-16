@@ -6,10 +6,15 @@ local prepare = w.rung("prepare")
 local verify = w.rung("verify")
 
 local example = w.toml.decode("example.toml")
+local yaml_example = w.yaml.decode("example.yaml")
 local shell = w.exec({ "sh", "-c", 'printf %s "$WOMBAT_EXAMPLE_MODE"' }, {
     env = { WOMBAT_EXAMPLE_MODE = "canonical" },
 }):check()
-w.log.info("constructing canonical example", { mode = shell.stdout, owner = example.example.owner })
+w.log.info("constructing canonical example", {
+    animal = yaml_example.example.animal,
+    mode = shell.stdout,
+    owner = example.example.owner,
+})
 
 local input = w.inputs({
     name = w.input.string({ default = "Wombat User", help = "Git author name" }),

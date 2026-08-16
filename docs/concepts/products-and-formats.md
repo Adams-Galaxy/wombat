@@ -42,6 +42,19 @@ Where the repository happens to sit on disk is *not* part of identity. Only
 per-checkout operational state — script scheduling, mainly — is namespaced by
 location.
 
+## Structured source data
+
+Configuration Lua can read repository-relative JSON, TOML, and strict YAML as
+frozen data. Those reads use the same source catalogue as Lua modules and
+artifacts, so changing a decoded data file changes construction identity.
+
+Encoding travels in the other direction: it returns a string for
+`w.generate()` and does not read or write the repository itself. JSON and YAML
+accept every frozen root shape; TOML requires a map and cannot represent null.
+YAML output is canonical structured data rather than a rewrite of the authored
+document—comments, anchors, scalar styles, and layout are not preserved. Use a
+template when presentation is part of the file you intend to maintain.
+
 ## Versioned formats, and no migrations
 
 Everything Wombat persists carries a format version. When the shape or meaning

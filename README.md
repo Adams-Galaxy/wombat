@@ -18,6 +18,15 @@ if w.wsl then w.log.info("selecting WSL policy") end
 w.log.info("building repository", { root = p.repository })
 ```
 
+Repository data can be read as tracked JSON, TOML, or strict YAML. Generated
+configuration can be encoded back to any of those formats without losing empty
+arrays, empty maps, or explicit null where the format supports it.
+
+```lua
+local theme = w.yaml.decode("themes/gruvbox.yaml")
+w.generate("theme.yaml", { content = w.yaml.encode(theme) })
+```
+
 ```lua
 -- modules/shell.lua
 local w = require("wombat")

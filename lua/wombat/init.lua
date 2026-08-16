@@ -75,6 +75,17 @@ function wombat.toml.encode(value)
     return native.toml_encode(value)
 end
 
+wombat.yaml = {}
+
+function wombat.yaml.decode(path)
+    if type(path) ~= "string" then error("w.yaml.decode() requires a string path", 2) end
+    return native.yaml_decode(path)
+end
+
+function wombat.yaml.encode(value)
+    return native.yaml_encode(value)
+end
+
 wombat.template = {}
 
 function wombat.template.context(value)
