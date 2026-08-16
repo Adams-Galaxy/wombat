@@ -173,11 +173,9 @@ pub(crate) fn run_inherited(command: &mut Command, label: &str) -> Result<Proces
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    // Interactive children must stay in Wombat's foreground process group.
+    // Giving `sudo` a new group makes the terminal stop it with SIGTTIN before
+    // its password prompt becomes visible.
     let status = command
         .spawn()
         .and_then(|mut child| child.wait())
