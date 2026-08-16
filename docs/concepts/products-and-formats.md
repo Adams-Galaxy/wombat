@@ -24,7 +24,7 @@ what it is.
 Every product has a `build_id`: a SHA-256 over its complete configuration
 content — sources and their digests, resolved inputs, the target, consulted host
 observations, modules, dependencies, template helper packs, the ladder,
-requirements, tasks, scripts, and artifacts.
+requirements and their provider prerequisites, tasks, scripts, and artifacts.
 
 Two properties follow, and both are deliberate.
 

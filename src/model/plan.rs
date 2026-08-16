@@ -104,6 +104,7 @@ pub(crate) fn freeze(source_root: &Path, desired: &EvaluatedManifest) -> Result<
         ladder: desired.ladder.clone(),
         providers: desired.providers.clone(),
         requirements: desired.requirements.clone(),
+        prerequisites: desired.prerequisites.clone(),
         preparations: desired.preparations.clone(),
         tasks: desired.tasks.iter().map(|task| task.task.clone()).collect(),
         scripts: desired.scripts.clone(),
@@ -257,6 +258,15 @@ pub fn validate(plan: &BuildPlan) -> Result<()> {
         .iter()
         .map(|source| source.path.as_str())
         .collect::<std::collections::BTreeSet<_>>();
+    crate::build::validate_provider_scope(
+        &plan.providers,
+        &plan.requirements,
+        &plan.prerequisites,
+        &plan.preparations,
+        &plan.ladder,
+        &source_paths,
+        "plan",
+    )?;
     for pack in &plan.template_helpers {
         for location in std::iter::once(&pack.declared_at.primary).chain(&pack.declared_at.callers)
         {
@@ -359,6 +369,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         ladder: &'a crate::execution::ladder::ExecutionLadder,
         providers: &'a [Provider],
         requirements: &'a [crate::model::manifest::Requirement],
+        prerequisites: &'a [crate::model::manifest::ProviderPrerequisite],
         preparations: &'a [crate::model::manifest::ProviderPreparation],
         tasks: &'a [crate::model::manifest::Task],
         scripts: &'a [crate::model::manifest::Script],
@@ -381,6 +392,7 @@ fn compute_id(plan: &BuildPlan) -> Result<String> {
         ladder: &plan.ladder,
         providers: &plan.providers,
         requirements: &plan.requirements,
+        prerequisites: &plan.prerequisites,
         preparations: &plan.preparations,
         tasks: &plan.tasks,
         scripts: &plan.scripts,

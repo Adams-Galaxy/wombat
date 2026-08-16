@@ -10,7 +10,7 @@ There are three stages, and they always happen in this order.
 
 `plan construct` evaluates your Lua exactly once. It resolves modules, reads
 inputs, observes the host, picks providers, and works out every artifact,
-requirement, task, and script involved.
+requirement, checked provider prerequisite, task, and script involved.
 
 The result is frozen into an executable plan on disk. That plan is the complete
 list of things Wombat is permitted to do. Nothing outside it can happen later,
@@ -22,7 +22,8 @@ it doesn't install packages, run your tasks, or write to your home directory.
 ## Materialise
 
 `plan materialise` executes that exact plan, and does not run your configuration
-Lua again. It reconciles requirements at their declared deadlines, runs tasks to
+Lua again. It checks and reconciles provider prerequisites before their dependent
+requirements, reconciles requirements at their declared deadlines, runs tasks to
 generate content, renders templates, and assembles a complete tree of the files
 that would be deployed.
 

@@ -53,10 +53,11 @@ There's no broad `--force`. Every escape hatch is per-conflict and named.
 
 ## Nothing changes before you've decided
 
-Deployment computes the whole picture — including package work — and collects
-every decision before it mutates anything. If you decline a conflict, no package
-was installed and no file was written. If a package provider fails, the target is
-untouched.
+Deployment computes the whole picture — including checked provider prerequisites,
+shared preparation, and package work — and collects every decision before it
+mutates anything. If you decline a conflict, no repository, package, or key was
+installed and no file was written. If a package provider fails, the deployment
+target is untouched.
 
 That ordering is deliberate and tested. A half-applied deployment where the
 packages landed but the files didn't is the failure mode this design exists to

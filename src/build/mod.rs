@@ -56,7 +56,9 @@ use publication::{
     ensure_plain_file_or_missing, inspect_product, publish, recover_publication,
 };
 use validation::verify_product;
-pub(crate) use validation::{validate_artifact_metadata, validate_manifest};
+pub(crate) use validation::{
+    validate_artifact_metadata, validate_manifest, validate_provider_scope,
+};
 use workspace::{
     acquire_build_lock, clean_transient_workspace, ensure_workspace_marker,
     prepare_workspace_directory, resolve_maybe_missing, validate_build_location,
@@ -288,6 +290,7 @@ struct IdentityPayload<'a> {
     ladder: &'a crate::execution::ladder::ExecutionLadder,
     providers: &'a [crate::model::manifest::Provider],
     requirements: &'a [crate::model::manifest::Requirement],
+    prerequisites: &'a [crate::model::manifest::ProviderPrerequisite],
     preparations: &'a [crate::model::manifest::ProviderPreparation],
     tasks: &'a [crate::model::manifest::Task],
     scripts: &'a [crate::model::manifest::Script],
@@ -377,12 +380,15 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
         journal.configure(execution_mode, journal_skips);
         journal.build_id = Some(manifest.build_id.clone());
         journal.record_reuse("product");
-        if !manual_requirement_skips.is_empty() {
-            journal.record_action(
-                "requirements:check",
-                &crate::execution::ladder::CoreRung::MaterialiseBefore.into(),
-                crate::execution::ladder::ExecutionStatus::Skipped,
-                "requirement checking skipped by --skip-requirements",
+        if !journal.skipped_requirement_gates.is_empty() {
+            record_materialise_requirement_skips(
+                &mut journal,
+                &plan,
+                if options.compile_only {
+                    "provider checks skipped by --compile-only"
+                } else {
+                    "provider checks skipped by --skip-requirements"
+                },
             );
         }
         let mut authorization = None;
@@ -428,9 +434,17 @@ fn try_reuse_product(options: &BuildOptions) -> Result<Option<BuildOutcome>> {
         )? {
             journal.set_id(&rung, crate::execution::ladder::ExecutionStatus::Running);
             if let Some(approved) = &mut authorization {
-                crate::requirements::prepare_target_plan_at_authorized(
+                let outcome = crate::requirements::prepare_target_plan_at_authorized(
                     &build_dir, &plan, &rung, approved,
                 )?;
+                for identity in outcome.completed {
+                    journal.record_action(
+                        identity,
+                        &rung,
+                        crate::execution::ladder::ExecutionStatus::Succeeded,
+                        "provider action reconciled",
+                    );
+                }
             }
             let outcomes = crate::execution::script::execute_at(
                 &plan.scripts,
@@ -660,12 +674,15 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
         let requirements_gate = crate::execution::ladder::RungId::from(
             crate::execution::ladder::CoreRung::MaterialiseBefore,
         );
-        if !manual_requirement_skips.is_empty() {
-            journal.record_action(
-                "requirements:check",
-                &requirements_gate,
-                crate::execution::ladder::ExecutionStatus::Skipped,
-                "requirement checking skipped by --skip-requirements",
+        if !journal.skipped_requirement_gates.is_empty() {
+            record_materialise_requirement_skips(
+                &mut journal,
+                &plan,
+                if options.compile_only {
+                    "provider checks skipped by --compile-only"
+                } else {
+                    "provider checks skipped by --skip-requirements"
+                },
             );
             crate::execution::ladder::write(&build_dir, &journal)?;
         }
@@ -727,21 +744,32 @@ fn materialise_at(options: BuildOptions, requested_build_dir: PathBuf) -> Result
                     "observing deadline gate",
                 );
                 crate::execution::ladder::write(&build_dir, &journal)?;
-                if let Err(error) = crate::requirements::prepare_target_plan_at_authorized(
+                let outcome = match crate::requirements::prepare_target_plan_at_authorized(
                     &build_dir,
                     &plan,
                     &rung,
                     authorization,
                 ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        journal.record_action(
+                            &gate,
+                            &rung,
+                            crate::execution::ladder::ExecutionStatus::Failed,
+                            error.to_string(),
+                        );
+                        journal.fail_id(&rung, &error);
+                        let _ = crate::execution::ladder::write(&build_dir, &journal);
+                        return Err(error);
+                    }
+                };
+                for identity in outcome.completed {
                     journal.record_action(
-                        &gate,
+                        identity,
                         &rung,
-                        crate::execution::ladder::ExecutionStatus::Failed,
-                        error.to_string(),
+                        crate::execution::ladder::ExecutionStatus::Succeeded,
+                        "provider action reconciled",
                     );
-                    journal.fail_id(&rung, &error);
-                    let _ = crate::execution::ladder::write(&build_dir, &journal);
-                    return Err(error);
                 }
                 journal.record_action(
                     gate,
@@ -1080,6 +1108,35 @@ fn materialise_requirement_gates(plan: &crate::model::manifest::BuildPlan) -> Ve
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn record_materialise_requirement_skips(
+    journal: &mut crate::execution::ladder::ExecutionJournal,
+    plan: &crate::model::manifest::BuildPlan,
+    reason: &str,
+) {
+    journal.record_action(
+        "requirements:check",
+        &crate::execution::ladder::CoreRung::MaterialiseBefore.into(),
+        crate::execution::ladder::ExecutionStatus::Skipped,
+        reason,
+    );
+    for prerequisite in &plan.prerequisites {
+        if plan.ladder.before_or_at(
+            &prerequisite.when,
+            crate::execution::ladder::CoreRung::MaterialiseAfter,
+        ) {
+            journal.record_action(
+                format!(
+                    "prerequisite:{}:{}",
+                    prerequisite.provider, prerequisite.identity
+                ),
+                &prerequisite.when,
+                crate::execution::ladder::ExecutionStatus::Skipped,
+                reason,
+            );
+        }
+    }
 }
 
 fn frozen_value_at_path<'a>(

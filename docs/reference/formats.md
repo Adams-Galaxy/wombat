@@ -9,8 +9,8 @@ telling you to rebuild. There are no migrations — see
 
 | Format | Version | Location |
 | --- | --- | --- |
-| Manifest | 19 | `<build>/manifest.json` |
-| Build plan | 10 | `<build>/.wombat/plan/plan.json` |
+| Manifest | 20 | `<build>/manifest.json` |
+| Build plan | 11 | `<build>/.wombat/plan/plan.json` |
 | Execution journal | 4 | `<build>/.wombat/execution-journal.json`, and per target |
 | Target state | 3 | `$XDG_STATE_HOME/wombat/targets/<target>/state.json` |
 | Script state | 1 | `$XDG_STATE_HOME/wombat/scripts/materialise/<project>/…/state.json` |
@@ -19,7 +19,7 @@ telling you to rebuild. There are no migrations — see
 | Repository config | 3 | `<repository>/wombat.toml` |
 | User config | 2 | `$XDG_CONFIG_HOME/wombat/config.toml` |
 
-Alongside these, `construction_version` is currently **1**. It gates product
+Alongside these, `construction_version` is currently **2**. It gates product
 compatibility and moves only when construction can produce different output for
 unchanged configuration — unlike the release version, which changes whenever
 Wombat is released and does not invalidate products.
@@ -29,7 +29,7 @@ Wombat is released and does not invalidate products.
 **Manifest** — the canonical product description, and the machine-readable
 contract. Resolved inputs, target, consulted observations, source catalogue with
 digests, modules and dependencies, template helper packs, ladder, providers,
-requirements, preparations, tasks, scripts, artifact policy and notices,
+requirements, checked provider prerequisites, preparations, tasks, scripts, artifact policy and notices,
 selections, artifacts, and the identities. Sealed after publication.
 
 **Build plan** — the frozen intent from construction: everything Wombat is
@@ -63,7 +63,8 @@ bytes.
 `plan_id` and `build_id` are SHA-256 digests over configuration content:
 versions, source digests, inputs, resolved target, observations, modules,
 dependencies, template helper packs, ladder, providers, requirements,
-preparations, tasks, scripts, artifact policy and selections, and artifacts.
+prerequisites, preparations, tasks, scripts, artifact policy and selections,
+and artifacts.
 
 They deliberately exclude where the repository sits on disk and which Wombat
 release built it, so the same configuration yields the same identity anywhere.

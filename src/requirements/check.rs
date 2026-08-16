@@ -1,14 +1,37 @@
-//! Read-only requirement checking against the current host environment.
+//! Read-only provider-prerequisite and requirement checks against the current
+//! host environment.
 
 use super::providers::*;
 use super::*;
 
 pub(super) fn check_context(context: &RequirementContext<'_>) -> Result<CheckOutcome> {
+    let referenced = context
+        .requirements
+        .iter()
+        .flat_map(|requirement| {
+            requirement
+                .binding
+                .prerequisites
+                .iter()
+                .map(move |identity| (requirement.binding.provider.as_str(), identity.as_str()))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut items = context
+        .prerequisites
+        .iter()
+        .filter(|prerequisite| {
+            referenced.contains(&(
+                prerequisite.provider.as_str(),
+                prerequisite.identity.as_str(),
+            ))
+        })
+        .map(|prerequisite| check_prerequisite(context, prerequisite))
+        .collect::<Result<Vec<_>>>()?;
     // Each check is a blocking subprocess (brew, dpkg, git...), so the
     // dominant cost is wall-clock wait, not CPU — running them concurrently
     // turns N sequential spawns into roughly the slowest one.
     let brew = BrewSnapshot::fetch(context.requirements)?;
-    let items = std::thread::scope(|scope| {
+    let requirements = std::thread::scope(|scope| {
         context
             .requirements
             .iter()
@@ -31,9 +54,43 @@ pub(super) fn check_context(context: &RequirementContext<'_>) -> Result<CheckOut
             })
             .collect::<Result<Vec<_>>>()
     })?;
+    items.extend(requirements);
     Ok(CheckOutcome {
         build_id: context.id.to_string(),
         items,
+    })
+}
+
+pub(super) fn check_prerequisite(
+    context: &RequirementContext<'_>,
+    prerequisite: &ProviderPrerequisite,
+) -> Result<CheckItem> {
+    let started = std::time::Instant::now();
+    let provider = provider_for(context.providers, &prerequisite.provider)?;
+    let (status, detail) = match &provider.origin {
+        ProviderOrigin::Builtin { .. } if provider.name == "apt" => {
+            check_apt_source(context, prerequisite)?
+        }
+        ProviderOrigin::Builtin { .. } => {
+            return Err(WombatError::configuration(format!(
+                "built-in provider `{}` does not support prerequisites",
+                provider.name
+            )));
+        }
+        ProviderOrigin::Custom { .. } => {
+            check_custom_prerequisite(context, provider, prerequisite)?
+        }
+    };
+    Ok(CheckItem {
+        subject: CheckSubject::Prerequisite,
+        identity: format!(
+            "prerequisite:{}:{}",
+            prerequisite.provider, prerequisite.identity
+        ),
+        provider: prerequisite.provider.clone(),
+        status,
+        detail,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }
 
@@ -62,7 +119,8 @@ fn check_requirement_uncounted(
                 let observed = observe_command_version(&path)?;
                 if version_at_least(&observed, minimum) {
                     return Ok(CheckItem {
-                        requirement: label,
+                        subject: CheckSubject::Requirement,
+                        identity: label,
                         provider: requirement.binding.provider.clone(),
                         status: CheckStatus::Satisfied,
                         detail: format!("{} at {}", path.display(), observed),
@@ -70,7 +128,8 @@ fn check_requirement_uncounted(
                     });
                 }
                 return Ok(CheckItem {
-                    requirement: label,
+                    subject: CheckSubject::Requirement,
+                    identity: label,
                     provider: requirement.binding.provider.clone(),
                     status: CheckStatus::Outdated,
                     detail: format!("observed {observed}; needs at least {minimum}"),
@@ -78,7 +137,8 @@ fn check_requirement_uncounted(
                 });
             }
             return Ok(CheckItem {
-                requirement: label,
+                subject: CheckSubject::Requirement,
+                identity: label,
                 provider: requirement.binding.provider.clone(),
                 status: CheckStatus::Satisfied,
                 detail: path.display().to_string(),
@@ -100,7 +160,8 @@ fn check_requirement_uncounted(
         },
         ProviderOrigin::Custom { .. } => check_custom(context, provider, requirement)?,
     };
-    result.requirement = label;
+    result.subject = CheckSubject::Requirement;
+    result.identity = label;
     if result.status == CheckStatus::Satisfied {
         for command in &requirement.binding.publications.commands {
             if which(command).is_none() {
@@ -286,7 +347,7 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
     )?;
     if output.success {
         let text = String::from_utf8_lossy(&output.stdout.bytes);
-        let Some((status, observed)) = text.trim().rsplit_once('\t') else {
+        let Some((status, observed)) = parse_dpkg_record(&text) else {
             return Ok(provider_item(
                 binding,
                 CheckStatus::Unavailable,
@@ -353,12 +414,23 @@ pub(super) fn check_apt(binding: &ProviderBinding, minimum: Option<&str>) -> Res
             CheckStatus::Missing,
             &format!("not installed; candidate {candidate}"),
         )),
+        _ if !binding.prerequisites.is_empty() => Ok(provider_item(
+            binding,
+            CheckStatus::Missing,
+            "not installed; declared Apt source will provide the candidate",
+        )),
         _ => Ok(provider_item(
             binding,
             CheckStatus::Unavailable,
             "no Apt candidate is available",
         )),
     }
+}
+
+fn parse_dpkg_record(text: &str) -> Option<(&str, &str)> {
+    // An uninstalled package has an empty `${Version}`, so the trailing tab is
+    // the only evidence that dpkg-query returned both requested fields.
+    text.trim_end_matches(['\r', '\n']).rsplit_once('\t')
 }
 
 pub(super) fn check_git(binding: &ProviderBinding) -> Result<CheckItem> {
@@ -455,4 +527,34 @@ pub(super) fn check_git(binding: &ProviderBinding) -> Result<CheckItem> {
         CheckStatus::Satisfied,
         &format!("checked out {reference} at {to}"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dpkg_record;
+
+    #[test]
+    fn dpkg_records_preserve_empty_versions_for_uninstalled_packages() {
+        assert_eq!(
+            parse_dpkg_record("unknown ok not-installed\t"),
+            Some(("unknown ok not-installed", ""))
+        );
+        assert_eq!(
+            parse_dpkg_record("unknown ok not-installed\t\n"),
+            Some(("unknown ok not-installed", ""))
+        );
+        assert_eq!(
+            parse_dpkg_record("unknown ok not-installed\t\r\n"),
+            Some(("unknown ok not-installed", ""))
+        );
+    }
+
+    #[test]
+    fn dpkg_records_keep_installed_versions_and_reject_missing_delimiters() {
+        assert_eq!(
+            parse_dpkg_record("install ok installed\t1.2.3-1\n"),
+            Some(("install ok installed", "1.2.3-1"))
+        );
+        assert_eq!(parse_dpkg_record("unknown ok not-installed\n"), None);
+    }
 }

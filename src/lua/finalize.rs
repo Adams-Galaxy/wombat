@@ -229,6 +229,7 @@ pub(super) fn visit_dependency<'a>(
 pub(super) fn build_manifest(
     state: &RuntimeState,
     template_helpers: Vec<TemplateHelperPack>,
+    mut prerequisites: Vec<ProviderPrerequisite>,
     preparations: Vec<ProviderPreparation>,
 ) -> Result<EvaluatedManifest> {
     let modules = state
@@ -266,6 +267,25 @@ pub(super) fn build_manifest(
     let ladder = state.ladder.clone().unwrap_or_default();
     validate_ladder_actions(&ladder, &state.requirements, &state.tasks, &state.scripts)?;
     let requirements = normalize_requirements(state.requirements.clone(), &ladder)?;
+    for prerequisite in &mut prerequisites {
+        prerequisite.when = requirements
+            .iter()
+            .filter(|requirement| {
+                requirement.binding.provider == prerequisite.provider
+                    && requirement
+                        .binding
+                        .prerequisites
+                        .contains(&prerequisite.identity)
+            })
+            .min_by_key(|requirement| ladder.position(&requirement.when))
+            .map(|requirement| requirement.when.clone())
+            .ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "provider `{}` planned unreferenced prerequisite `{}`",
+                    prerequisite.provider, prerequisite.identity
+                ))
+            })?;
+    }
     // Names the persistent script state namespace and is deliberately excluded
     // from plan and build identity. A declared project keeps that state across
     // relocation; otherwise it follows the already canonical root.
@@ -301,6 +321,7 @@ pub(super) fn build_manifest(
         ladder,
         providers: state.providers.clone(),
         requirements,
+        prerequisites,
         preparations,
         tasks: state.tasks.clone(),
         scripts: state.scripts.clone(),

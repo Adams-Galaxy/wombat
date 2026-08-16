@@ -88,7 +88,7 @@ pub(super) fn configure_providers(
                 )));
             }
             ProviderOrigin::Builtin {
-                contract_version: 1,
+                contract_version: if name == "apt" { 2 } else { 1 },
             }
         } else {
             let entrypoint = root.join("providers").join(format!("{name}.lua"));
@@ -556,6 +556,13 @@ pub(super) fn provider_api(lua: &Lua) -> Result<Table> {
             Ok(operation)
         })?,
     )?;
+    api.set(
+        "prerequisite",
+        lua.create_function(|_, prerequisite: Table| {
+            prerequisite.set("kind", "prerequisite")?;
+            Ok(prerequisite)
+        })?,
+    )?;
     Ok(api)
 }
 
@@ -588,19 +595,12 @@ pub(super) fn validate_custom_provider(
             provider_lua_error(name, &format!("definition requires {operation}()"), error)
         })?;
     }
-    if definition.get::<Option<Function>>("plan")?.is_some()
-        && definition.get::<Option<Function>>("prepare")?.is_none()
-    {
-        return Err(WombatError::configuration(format!(
-            "provider `{name}` definition with plan() requires prepare()"
-        )));
-    }
     Ok(())
 }
 
-pub(super) fn plan_provider_preparations(
+pub(super) fn plan_provider_actions(
     state: &Rc<RefCell<RuntimeState>>,
-) -> Result<Vec<ProviderPreparation>> {
+) -> Result<(Vec<ProviderPrerequisite>, Vec<ProviderPreparation>)> {
     let (providers, requirements, target) = {
         let state = state.borrow();
         (
@@ -609,8 +609,11 @@ pub(super) fn plan_provider_preparations(
             effective_target(&state),
         )
     };
+    let mut prerequisites = Vec::new();
     let mut preparations = Vec::new();
     for provider in providers {
+        let prerequisite_start = prerequisites.len();
+        let preparation_start = preparations.len();
         let lua = Lua::new_with(
             StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
             LuaOptions::default(),
@@ -673,13 +676,62 @@ pub(super) fn plan_provider_preparations(
             FrozenValue::Map(values) if values.is_empty() => Vec::new(),
             _ => {
                 return Err(WombatError::configuration(format!(
-                    "provider `{}` plan() must return an array of provider.operation() values",
+                    "provider `{}` plan() must return an array of provider.operation() or provider.prerequisite() values",
                     provider.name
                 )));
             }
         };
         for operation in operations {
-            preparations.push(parse_provider_operation(&provider.name, operation)?);
+            let FrozenValue::Map(values) = &operation else {
+                return Err(WombatError::configuration(format!(
+                    "provider `{}` plan() entries must be planned provider values",
+                    provider.name
+                )));
+            };
+            match values.get("kind") {
+                Some(FrozenValue::String(kind)) if kind == "operation" => {
+                    preparations.push(parse_provider_operation(&provider.name, operation)?);
+                }
+                Some(FrozenValue::String(kind)) if kind == "prerequisite" => {
+                    prerequisites.push(parse_provider_prerequisite(&provider.name, operation)?);
+                }
+                Some(FrozenValue::String(kind)) => {
+                    return Err(WombatError::configuration(format!(
+                        "provider `{}` returned unknown planned value `{kind}`",
+                        provider.name
+                    )));
+                }
+                _ => {
+                    return Err(WombatError::configuration(format!(
+                        "provider `{}` plan() entry lacks a provider value kind",
+                        provider.name
+                    )));
+                }
+            }
+        }
+        if prerequisites.len() > prerequisite_start
+            && matches!(provider.origin, ProviderOrigin::Custom { .. })
+        {
+            for callback in ["check_prerequisite", "reconcile_prerequisite"] {
+                definition.get::<Function>(callback).map_err(|error| {
+                    provider_lua_error(
+                        &provider.name,
+                        &format!("planned prerequisites require {callback}()"),
+                        error,
+                    )
+                })?;
+            }
+        }
+        if preparations.len() > preparation_start
+            && matches!(provider.origin, ProviderOrigin::Custom { .. })
+        {
+            definition.get::<Function>("prepare").map_err(|error| {
+                provider_lua_error(
+                    &provider.name,
+                    "planned operations require prepare()",
+                    error,
+                )
+            })?;
         }
         record_provider_sources(state, &provider.name)?;
     }
@@ -692,7 +744,96 @@ pub(super) fn plan_provider_preparations(
             )));
         }
     }
-    Ok(preparations)
+    let mut prerequisite_identities = BTreeSet::new();
+    for prerequisite in &prerequisites {
+        if !prerequisite_identities.insert((
+            prerequisite.provider.as_str(),
+            prerequisite.identity.as_str(),
+        )) {
+            return Err(WombatError::configuration(format!(
+                "provider `{}` planned duplicate prerequisite `{}`",
+                prerequisite.provider, prerequisite.identity
+            )));
+        }
+    }
+    let referenced = requirements
+        .iter()
+        .flat_map(|requirement| {
+            requirement
+                .binding
+                .prerequisites
+                .iter()
+                .map(move |identity| (requirement.binding.provider.as_str(), identity.as_str()))
+        })
+        .collect::<BTreeSet<_>>();
+    for reference in &referenced {
+        if !prerequisite_identities.contains(reference) {
+            return Err(WombatError::configuration(format!(
+                "provider `{}` binding references absent prerequisite `{}`",
+                reference.0, reference.1
+            )));
+        }
+    }
+    if let Some(prerequisite) = prerequisites.iter().find(|prerequisite| {
+        !referenced.contains(&(
+            prerequisite.provider.as_str(),
+            prerequisite.identity.as_str(),
+        ))
+    }) {
+        return Err(WombatError::configuration(format!(
+            "provider `{}` planned unreferenced prerequisite `{}`",
+            prerequisite.provider, prerequisite.identity
+        )));
+    }
+    Ok((prerequisites, preparations))
+}
+
+pub(super) fn parse_provider_prerequisite(
+    provider: &str,
+    value: FrozenValue,
+) -> Result<ProviderPrerequisite> {
+    let FrozenValue::Map(mut values) = value else {
+        return Err(WombatError::configuration(format!(
+            "provider `{provider}` plan() entries must be provider.prerequisite() values"
+        )));
+    };
+    let kind = take_string(&mut values, "kind", "provider prerequisite")?;
+    if kind != "prerequisite" {
+        return Err(WombatError::configuration(format!(
+            "provider `{provider}` returned unknown planned value `{kind}`"
+        )));
+    }
+    let identity = take_string(&mut values, "identity", "provider prerequisite")?;
+    let description = take_string(&mut values, "description", "provider prerequisite")?;
+    if identity.trim().is_empty() || description.trim().is_empty() {
+        return Err(WombatError::configuration(
+            "provider prerequisite identity and description must not be empty",
+        ));
+    }
+    let elevated = match values.remove("elevated") {
+        None => false,
+        Some(FrozenValue::Boolean(value)) => value,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "provider prerequisite `elevated` must be boolean",
+            ));
+        }
+    };
+    let data = values.remove("data").unwrap_or_else(FrozenValue::empty_map);
+    if !matches!(data, FrozenValue::Map(_)) {
+        return Err(WombatError::configuration(
+            "provider prerequisite data must be a string-keyed map",
+        ));
+    }
+    reject_unknown_options(&values, "provider prerequisite")?;
+    Ok(ProviderPrerequisite {
+        provider: provider.to_string(),
+        identity,
+        description,
+        when: crate::execution::ladder::CoreRung::DeployAfter.into(),
+        elevated,
+        data,
+    })
 }
 
 pub(super) fn parse_provider_operation(
@@ -889,6 +1030,30 @@ pub(super) fn parse_provider_resolution(
         .unwrap_or(Publications {
             commands: Vec::new(),
         });
+    let mut prerequisites = match values.remove("prerequisites") {
+        None => Vec::new(),
+        Some(FrozenValue::Array(values)) => values
+            .into_iter()
+            .map(|value| match value {
+                FrozenValue::String(identity) if !identity.trim().is_empty() => Ok(identity),
+                _ => Err(WombatError::configuration(
+                    "provider binding prerequisites must be non-empty strings",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(FrozenValue::Map(values)) if values.is_empty() => Vec::new(),
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "provider binding prerequisites must be an array",
+            ));
+        }
+    };
+    prerequisites.sort();
+    if prerequisites.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(WombatError::configuration(
+            "provider binding prerequisites must be unique",
+        ));
+    }
     let data = values.remove("data").unwrap_or_else(FrozenValue::empty_map);
     if !matches!(data, FrozenValue::Map(_)) {
         return Err(WombatError::configuration(
@@ -901,6 +1066,7 @@ pub(super) fn parse_provider_resolution(
         identity,
         package,
         publications,
+        prerequisites,
         data,
     }))
 }

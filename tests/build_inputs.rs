@@ -179,7 +179,7 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
         .build("build/default", &[], mac_host("wombat-mac"))
         .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 19);
+    assert_eq!(outcome.manifest.format_version, 20);
     assert_eq!(outcome.manifest.target.origin, TargetOrigin::RootOverride);
     assert_eq!(
         outcome

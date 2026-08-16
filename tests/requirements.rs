@@ -65,7 +65,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 19);
+    assert_eq!(outcome.manifest.format_version, 20);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -96,7 +96,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 19);
+    assert_eq!(outcome.manifest.format_version, 20);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -107,6 +107,10 @@ assert(search.package == "ripgrep")
     assert_eq!(preparation.provider, "apt");
     assert_eq!(preparation.identity, "update-index");
     assert!(preparation.elevated);
+    assert_eq!(
+        serde_json::to_value(&preparation.data).unwrap()["forced"],
+        true
+    );
     let inspected = wombat::inspect(&outcome.build_dir, wombat::InspectSection::Providers).unwrap();
     assert!(inspected.contains("Update the Apt package index"));
     let provider = wombat::explain(&outcome.build_dir, "provider:apt", None, None).unwrap();
@@ -119,6 +123,118 @@ assert(search.package == "ripgrep")
     .unwrap();
     assert!(provider.contains("update-index"));
     assert!(preparation.contains("elevated: true"));
+}
+
+#[test]
+fn apt_sources_freeze_one_checked_prerequisite_and_binding_dependency() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        r#"local w = require("wombat")
+w.providers({ {
+  name = "apt",
+  with = {
+    sources = {
+      yazi = {
+        uri = "https://yazi-rs.github.io/builds/",
+        suite = "stable",
+        components = { "main", "main" },
+        architectures = { "arm64", "amd64", "amd64" },
+        key = { url = "https://yazi-rs.github.io/builds/yazi-keyring.gpg" },
+      },
+    },
+  },
+} })
+w.need.package("yazi", {
+  provider = "apt",
+  publishes = { commands = { "yazi" } },
+  with = { source = "yazi" },
+  when = "deploy.before",
+})
+"#,
+    )
+    .unwrap();
+    let outcome = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.manifest.format_version, 20);
+    assert_eq!(outcome.manifest.prerequisites.len(), 1);
+    let prerequisite = &outcome.manifest.prerequisites[0];
+    assert_eq!(prerequisite.provider, "apt");
+    assert_eq!(prerequisite.identity, "source:yazi");
+    assert_eq!(prerequisite.when.id(), "deploy.before");
+    assert!(prerequisite.elevated);
+    let binding = &outcome.manifest.requirements[0].binding;
+    assert_eq!(binding.prerequisites, ["source:yazi"]);
+    assert_eq!(outcome.manifest.preparations.len(), 1);
+    assert_eq!(outcome.manifest.preparations[0].identity, "update-index");
+    assert_eq!(
+        serde_json::to_value(&outcome.manifest.preparations[0].data).unwrap()["forced"],
+        false
+    );
+    let data = serde_json::to_value(&prerequisite.data).unwrap();
+    assert_eq!(data["architectures"], serde_json::json!(["amd64", "arm64"]));
+    assert_eq!(data["components"], serde_json::json!(["main"]));
+    let provider = wombat::explain(&outcome.build_dir, "provider:apt", None, None).unwrap();
+    assert!(provider.contains("source:yazi"), "{provider}");
+    let explained = wombat::explain(
+        &outcome.build_dir,
+        "prerequisite:apt:source:yazi",
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        explained.contains("Configure Apt source yazi"),
+        "{explained}"
+    );
+}
+
+#[test]
+fn apt_source_schema_rejects_unsafe_or_unknown_configuration() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let cases = [
+        (
+            "http",
+            "key={url='http://example.test/key.gpg'}",
+            "requires HTTPS unless sha256 is supplied",
+        ),
+        (
+            "unknown",
+            "key={url='https://example.test/key.gpg'}, arbitrary=true",
+            "does not support `arbitrary`",
+        ),
+        (
+            "format",
+            "key={url='https://example.test/key.gpg',format='pem'}",
+            "format must be `gpg` or `asc`",
+        ),
+    ];
+    for (name, fields, expected) in cases {
+        fs::write(
+            source.join("wombat.lua"),
+            [
+                "local w=require('wombat')\nw.providers({{name='apt',with={sources={bad={uri='https://example.test/repo',suite='stable',components={'main'},",
+                fields,
+                "}}}}})\nw.need.package('tool',{provider='apt',with={source='bad'}})\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let error = wombat::build(
+            wombat::BuildOptions::new(&source, temporary.path().join(name))
+                .with_host(debian_host()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
 }
 
 #[test]
@@ -265,7 +381,7 @@ return provider.define({
     assert_eq!(outcome.manifest.preparations[0].identity, "catalog");
     fs::write(
         source.join("providers/custom.lua"),
-        "local p=require('wombat.provider') return p.define({ resolve=function(c) return p.binding({identity=c.name,data={}}) end, plan=function() return {} end, check=function() return p.satisfied() end, reconcile=function() end })",
+        "local p=require('wombat.provider') return p.define({ resolve=function(c) return p.binding({identity=c.name,data={}}) end, plan=function() return {p.operation({identity='catalog',description='Catalog',data={}})} end, check=function() return p.satisfied() end, reconcile=function() end })",
     )
     .unwrap();
     let error = wombat::build(
@@ -278,7 +394,7 @@ return provider.define({
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("requires prepare()"), "{error}");
+    assert!(error.contains("require prepare()"), "{error}");
 
     fs::write(
         source.join("providers/custom.lua"),
@@ -295,6 +411,192 @@ return provider.define({
         duplicate.contains("duplicate operation `same`"),
         "{duplicate}"
     );
+}
+
+#[test]
+fn custom_prerequisite_is_checked_reconciled_and_post_checked_before_its_requirement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let providers = source.join("providers");
+    let state = temporary.path().join("prerequisite-ready");
+    fs::create_dir_all(&providers).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'custom'})\nw.need.package('tool', {provider='custom'})\n",
+    )
+    .unwrap();
+    let state_literal = serde_json::to_string(&state.to_string_lossy()).unwrap();
+    fs::write(
+        providers.join("custom.lua"),
+        format!(
+            r#"local p=require('wombat.provider')
+local state={state_literal}
+return p.define({{
+  resolve=function(candidate)
+    return p.binding({{identity=candidate.name, prerequisites={{'catalog'}}, data={{}}}})
+  end,
+  plan=function()
+    return {{p.prerequisite({{identity='catalog', description='Prepare catalog', data={{state=state}}}})}}
+  end,
+  check_prerequisite=function(ctx)
+    local result=ctx:observe({{program='/bin/sh', args={{'-c', 'test -f "$1"', 'wombat', state}}}})
+    if result.success then return p.satisfied('catalog ready') end
+    return p.missing('catalog absent')
+  end,
+  reconcile_prerequisite=function(ctx)
+    local result=ctx:mutate({{program='/usr/bin/touch', args={{state}}}})
+    if not result.success then error('touch failed') end
+  end,
+  check=function() return p.satisfied('fixture package') end,
+  reconcile=function() error('satisfied package must not reconcile') end,
+}})
+"#
+        ),
+    )
+    .unwrap();
+
+    let outcome = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("build"))
+            .with_provider_reconciliation(true)
+            .with_yes(true),
+    )
+    .unwrap();
+    assert!(state.is_file());
+    assert_eq!(outcome.manifest.prerequisites.len(), 1);
+    assert_eq!(
+        outcome.manifest.prerequisites[0].when.id(),
+        "materialise.before"
+    );
+    let journal = wombat::ladder::read(&outcome.build_dir).unwrap();
+    assert!(journal.actions.iter().any(|action| {
+        action.identity == "prerequisite:custom:catalog"
+            && action.status == wombat::ladder::ExecutionStatus::Succeeded
+    }));
+}
+
+#[test]
+fn shared_prerequisite_uses_the_earliest_dependent_deadline() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir_all(source.join("providers")).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'custom'})\nw.need.package('late', {provider='custom', when='deploy.before'})\nw.need.package('early', {provider='custom', when='materialise.after'})\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("providers/custom.lua"),
+        r#"local p=require('wombat.provider')
+return p.define({
+  resolve=function(candidate) return p.binding({identity=candidate.name, prerequisites={'shared'}, data={}}) end,
+  plan=function() return {p.prerequisite({identity='shared', description='Shared', data={}})} end,
+  check_prerequisite=function() return p.satisfied() end,
+  reconcile_prerequisite=function() end,
+  check=function() return p.satisfied() end,
+  reconcile=function() end,
+})
+"#,
+    )
+    .unwrap();
+    let outcome = wombat::build(wombat::BuildOptions::new(
+        &source,
+        temporary.path().join("build"),
+    ))
+    .unwrap();
+    assert_eq!(
+        outcome.manifest.prerequisites[0].when.id(),
+        "materialise.after"
+    );
+}
+
+#[test]
+fn custom_prerequisites_reject_missing_unreferenced_and_unimplemented_contracts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir_all(source.join("providers")).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'custom'})\nw.need.package('tool', {provider='custom'})\n",
+    )
+    .unwrap();
+    let provider_path = source.join("providers/custom.lua");
+    let cases = [
+        (
+            "missing",
+            "local p=require('wombat.provider') return p.define({resolve=function(c) return p.binding({identity=c.name,prerequisites={'absent'},data={}}) end,plan=function() return {} end,check=function() return p.satisfied() end,reconcile=function() end})",
+            "references absent prerequisite `absent`",
+        ),
+        (
+            "unreferenced",
+            "local p=require('wombat.provider') return p.define({resolve=function(c) return p.binding({identity=c.name,data={}}) end,plan=function() return {p.prerequisite({identity='unused',description='Unused',data={}})} end,check_prerequisite=function() return p.satisfied() end,reconcile_prerequisite=function() end,check=function() return p.satisfied() end,reconcile=function() end})",
+            "planned unreferenced prerequisite `unused`",
+        ),
+        (
+            "callbacks",
+            "local p=require('wombat.provider') return p.define({resolve=function(c) return p.binding({identity=c.name,prerequisites={'catalog'},data={}}) end,plan=function() return {p.prerequisite({identity='catalog',description='Catalog',data={}})} end,check=function() return p.satisfied() end,reconcile=function() end})",
+            "require check_prerequisite()",
+        ),
+    ];
+    for (name, provider, expected) in cases {
+        fs::write(&provider_path, provider).unwrap();
+        let error = wombat::build(wombat::BuildOptions::new(
+            &source,
+            temporary.path().join(name),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+}
+
+#[test]
+fn prerequisite_checks_are_bypassed_by_skip_requirements_and_compile_only() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    fs::create_dir_all(source.join("providers")).unwrap();
+    fs::write(
+        source.join("wombat.lua"),
+        "local w=require('wombat')\nw.providers({'custom'})\nw.need.package('tool',{provider='custom'})\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("providers/custom.lua"),
+        r#"local p=require('wombat.provider')
+return p.define({
+  resolve=function(c) return p.binding({identity=c.name,prerequisites={'catalog'},data={}}) end,
+  plan=function() return {p.prerequisite({identity='catalog',description='Catalog',data={}})} end,
+  check_prerequisite=function() error('prerequisite check must be skipped') end,
+  reconcile_prerequisite=function() error('prerequisite reconcile must be skipped') end,
+  check=function() error('requirement check must be skipped') end,
+  reconcile=function() error('requirement reconcile must be skipped') end,
+})
+"#,
+    )
+    .unwrap();
+
+    let skipped = wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("skipped"))
+            .with_provider_reconciliation(true)
+            .with_check_requirements(false),
+    )
+    .unwrap();
+    assert_eq!(skipped.manifest.prerequisites.len(), 1);
+    let journal = wombat::ladder::read(&skipped.build_dir).unwrap();
+    assert!(journal.actions.iter().any(|action| {
+        action.identity == "requirements:check"
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+    }));
+    assert!(journal.actions.iter().any(|action| {
+        action.identity == "prerequisite:custom:catalog"
+            && action.status == wombat::ladder::ExecutionStatus::Skipped
+    }));
+
+    wombat::build(
+        wombat::BuildOptions::new(&source, temporary.path().join("compile-only"))
+            .with_provider_reconciliation(true)
+            .with_compile_only(true),
+    )
+    .unwrap();
 }
 
 #[test]

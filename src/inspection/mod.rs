@@ -73,7 +73,7 @@ pub fn inspect(build_dir: &Path, section: InspectSection) -> Result<String> {
 pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
     match section {
         PlanInspectSection::Overview => format!(
-            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  helpers: {}\n  providers: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
+            "Build plan {}\n  format: v{}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  modules: {}\n  helpers: {}\n  providers: {}\n  prerequisites: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  declared artifacts: {}\n",
             plan.plan_id,
             plan.format_version,
             plan.wombat_version,
@@ -83,6 +83,7 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
             plan.modules.len(),
             plan.template_helpers.len(),
             plan.providers.len(),
+            plan.prerequisites.len(),
             plan.requirements.len(),
             plan.tasks.len(),
             plan.artifact_selections.len(),
@@ -91,6 +92,10 @@ pub fn inspect_plan(plan: &BuildPlan, section: PlanInspectSection) -> String {
         PlanInspectSection::Helpers => render_helpers(&plan.template_helpers),
         PlanInspectSection::Providers => {
             let mut output = render_list("Providers", plan.providers.iter().map(render_provider));
+            output.push_str(&render_list(
+                "Prerequisites",
+                plan.prerequisites.iter().map(render_prerequisite),
+            ));
             output.push_str(&render_list(
                 "Preparations",
                 plan.preparations.iter().map(render_preparation),
@@ -268,6 +273,18 @@ fn render_preparation(operation: &crate::model::manifest::ProviderPreparation) -
     )
 }
 
+fn render_prerequisite(prerequisite: &crate::model::manifest::ProviderPrerequisite) -> String {
+    format!(
+        "{}:{}\n  description: {}\n  deadline: {}\n  elevated: {}\n  data: {}",
+        prerequisite.provider,
+        prerequisite.identity,
+        prerequisite.description,
+        prerequisite.when,
+        prerequisite.elevated,
+        json(&prerequisite.data)
+    )
+}
+
 pub fn explain(
     build_dir: &Path,
     selector: &str,
@@ -330,6 +347,23 @@ pub fn explain(
             provider.declared_at
         );
         output.push_str(&render_list(
+            "Prerequisites",
+            product
+                .manifest
+                .prerequisites
+                .iter()
+                .filter(|prerequisite| prerequisite.provider == provider.name)
+                .map(|prerequisite| {
+                    format!(
+                        "{}: {} (deadline={}, elevated={})",
+                        prerequisite.identity,
+                        prerequisite.description,
+                        prerequisite.when,
+                        prerequisite.elevated
+                    )
+                }),
+        ));
+        output.push_str(&render_list(
             "Preparations",
             product
                 .manifest
@@ -344,6 +378,31 @@ pub fn explain(
                 }),
         ));
         return Ok(output);
+    }
+    if let Some(identity) = selector.strip_prefix("prerequisite:") {
+        let prerequisite = product
+            .manifest
+            .prerequisites
+            .iter()
+            .find(|prerequisite| {
+                format!("{}:{}", prerequisite.provider, prerequisite.identity) == identity
+            })
+            .ok_or_else(|| {
+                WombatError::configuration(format!(
+                    "no prerequisite in build `{}` matches `{selector}`",
+                    product.manifest.build_id
+                ))
+            })?;
+        return Ok(format!(
+            "Prerequisite {}:{}\n  build: {}\n  description: {}\n  deadline: {}\n  elevated: {}\n  data: {}\n",
+            prerequisite.provider,
+            prerequisite.identity,
+            product.manifest.build_id,
+            prerequisite.description,
+            prerequisite.when,
+            prerequisite.elevated,
+            json(&prerequisite.data)
+        ));
     }
     if let Some(identity) = selector.strip_prefix("preparation:") {
         let operation = product
@@ -440,7 +499,7 @@ fn render_section(
 ) -> String {
     match section {
         InspectSection::Overview => format!(
-            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  helpers: {}\n  providers: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
+            "Build {}\n  manifest: v{}\n  plan: {}\n  wombat: {}\n  target: {}/{}\n  sources: {}\n  inputs: {}\n  modules: {}\n  dependencies: {}\n  helpers: {}\n  providers: {}\n  prerequisites: {}\n  preparations: {}\n  requirements: {}\n  tasks: {}\n  artifact selections: {}\n  artifacts: {}\n",
             manifest.build_id,
             manifest.format_version,
             manifest.plan_id,
@@ -453,6 +512,7 @@ fn render_section(
             manifest.dependencies.len(),
             manifest.template_helpers.len(),
             manifest.providers.len(),
+            manifest.prerequisites.len(),
             manifest.preparations.len(),
             manifest.requirements.len(),
             manifest.tasks.len(),
@@ -541,6 +601,10 @@ fn render_section(
                     )
                 }),
             );
+            output.push_str(&render_list(
+                "Prerequisites",
+                manifest.prerequisites.iter().map(render_prerequisite),
+            ));
             output.push_str(&render_list(
                 "Preparations",
                 manifest.preparations.iter().map(|operation| {

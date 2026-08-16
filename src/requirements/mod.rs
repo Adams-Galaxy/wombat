@@ -1,13 +1,15 @@
-//! Requirement checking, authorization, and provider reconciliation.
+//! Requirement and provider-prerequisite checking, authorization, and
+//! reconciliation.
 //!
 //! Modules declare products — a command or a package — and root configuration
 //! chooses which providers may satisfy them. Nothing here embeds a
 //! package-manager invocation in a module, which is what lets one repository
 //! serve macOS and Linux.
 //!
-//! Requirements carry a rung deadline, so they are satisfied at the point they
-//! are actually needed rather than all at the start. That decides how early a
-//! build fails: a tool only a task needs should not block everything before it.
+//! Requirements carry a rung deadline, and provider prerequisites inherit the
+//! earliest deadline of their dependents. That keeps managed provider state in
+//! the same complete authorization boundary without configuring it earlier than
+//! anything needs it.
 //!
 //! This module never prompts and never prints. It emits typed events and returns
 //! an authorization the CLI is responsible for obtaining, which is what keeps
@@ -26,7 +28,7 @@ use crate::model::context::HostContext;
 use crate::model::frozen::FrozenValue;
 use crate::model::manifest::{
     BuildPlan, Manifest, Provider, ProviderBinding, ProviderOrigin, ProviderPreparation,
-    Requirement, RequirementCandidate, RequirementKind,
+    ProviderPrerequisite, Requirement, RequirementCandidate, RequirementKind,
 };
 use crate::{Result, WombatError};
 
@@ -41,12 +43,24 @@ use providers::*;
 const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 type ProcessSpec = (String, Vec<String>, BTreeMap<String, String>, bool);
 
+pub(crate) fn validate_provider_contracts(
+    requirements: &[Requirement],
+    prerequisites: &[ProviderPrerequisite],
+    preparations: &[ProviderPreparation],
+) -> Result<()> {
+    providers::validate_builtin_contracts(requirements, prerequisites, preparations)
+}
+
 struct RequirementContext<'a> {
     id: &'a str,
     providers: &'a [Provider],
     requirements: &'a [Requirement],
+    prerequisites: &'a [ProviderPrerequisite],
     preparations: &'a [ProviderPreparation],
     payload_root: PathBuf,
+    // Apt paths are rooted here so reconciliation tests cannot touch the host's
+    // `/etc`; production constructors deliberately use the real root.
+    system_root: PathBuf,
 }
 
 impl<'a> RequirementContext<'a> {
@@ -59,8 +73,10 @@ impl<'a> RequirementContext<'a> {
             id: &manifest.build_id,
             providers: &manifest.providers,
             requirements: &manifest.requirements,
+            prerequisites: &manifest.prerequisites,
             preparations: &manifest.preparations,
             payload_root: product_dir.join("providers"),
+            system_root: PathBuf::from("/"),
         }
     }
 
@@ -69,8 +85,10 @@ impl<'a> RequirementContext<'a> {
             id: &plan.plan_id,
             providers: &plan.providers,
             requirements: &plan.requirements,
+            prerequisites: &plan.prerequisites,
             preparations: &plan.preparations,
             payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
+            system_root: PathBuf::from("/"),
         }
     }
 
@@ -79,8 +97,10 @@ impl<'a> RequirementContext<'a> {
             id: &plan.plan_id,
             providers: &plan.providers,
             requirements: &plan.requirements,
+            prerequisites: &plan.prerequisites,
             preparations: &plan.preparations,
             payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
+            system_root: PathBuf::from("/"),
         }
     }
 }
@@ -91,6 +111,12 @@ pub enum CheckStatus {
     Missing,
     Outdated,
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckSubject {
+    Requirement,
+    Prerequisite,
 }
 
 impl CheckStatus {
@@ -106,7 +132,8 @@ impl CheckStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckItem {
-    pub requirement: String,
+    pub subject: CheckSubject,
+    pub identity: String,
     pub provider: String,
     pub status: CheckStatus,
     pub detail: String,
@@ -133,12 +160,12 @@ impl CheckOutcome {
     }
 
     pub fn display(&self) -> String {
-        let mut output = format!("requirements for {}\n", self.build_id);
+        let mut output = format!("provider checks for {}\n", self.build_id);
         for item in &self.items {
             output.push_str(&format!(
                 "  {:<11} {} via {} — {} ({}ms)\n",
                 item.status.as_str(),
-                item.requirement,
+                item.identity,
                 item.provider,
                 item.detail,
                 item.duration_ms
@@ -161,7 +188,7 @@ pub struct BootstrapOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequirementAuthorization {
     approved: BTreeSet<String>,
-    prepared_providers: BTreeSet<String>,
+    prepared_operations: BTreeSet<String>,
 }
 
 impl BootstrapOutcome {
@@ -228,77 +255,11 @@ pub fn authorize_target_plan_until(
     eligible
         .requirements
         .retain(|requirement| plan.ladder.before_or_at(&requirement.when, boundary));
-    let context = RequirementContext::target_plan(&eligible, build_dir);
-    let initial = check_context(&context)?;
-    if initial.operational_failure() {
-        return Err(WombatError::configuration(initial.display()));
-    }
-    let pending = initial
-        .items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.status != CheckStatus::Satisfied)
-        .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return Ok(RequirementAuthorization {
-            approved: BTreeSet::new(),
-            prepared_providers: BTreeSet::new(),
-        });
-    }
-    let pending_providers = pending
-        .iter()
-        .map(|(_, item)| item.provider.as_str())
-        .collect::<BTreeSet<_>>();
-    let preparations = context
-        .preparations
-        .iter()
-        .filter(|operation| pending_providers.contains(operation.provider.as_str()))
-        .collect::<Vec<_>>();
-    preflight(&context, &preparations, &pending)?;
-    emit_progress("materialise will reconcile:");
-    let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
-    for (_, item) in &pending {
-        grouped.entry(&item.provider).or_default().push(item);
-    }
-    for (provider, items) in grouped {
-        emit_progress(format!("  {provider}"));
-        for operation in preparations
-            .iter()
-            .filter(|operation| operation.provider == provider)
-        {
-            emit_progress(format!(
-                "    prepare {}{}",
-                operation.description,
-                if operation.elevated {
-                    " (elevated)"
-                } else {
-                    ""
-                }
-            ));
-        }
-        for item in items {
-            emit_progress(format!(
-                "    {} ({})",
-                item.requirement,
-                item.status.as_str()
-            ));
-        }
-    }
-    confirm("materialise", yes)?;
-    let requires_elevation = preparations.iter().any(|operation| operation.elevated)
-        || pending
-            .iter()
-            .any(|(index, _)| context.requirements[*index].binding.provider == "apt");
-    if requires_elevation {
-        authorize_elevation(yes)?;
-    }
-    Ok(RequirementAuthorization {
-        approved: pending
-            .into_iter()
-            .map(|(_, item)| item.requirement.clone())
-            .collect(),
-        prepared_providers: BTreeSet::new(),
-    })
+    authorize_context(
+        RequirementContext::target_plan(&eligible, build_dir),
+        yes,
+        "materialise",
+    )
 }
 
 pub fn authorize_product_deploy(build_dir: &Path, yes: bool) -> Result<RequirementAuthorization> {
@@ -369,11 +330,11 @@ pub(crate) fn prepare_product_deploy_at_authorized(
         .items
         .iter()
         .filter(|item| item.status != CheckStatus::Satisfied)
-        .find(|item| !authorization.approved.contains(&item.requirement))
+        .find(|item| !authorization.approved.contains(&item.identity))
     {
         return Err(WombatError::configuration(format!(
             "{} became pending after deploy preflight; start a new invocation to approve it",
-            item.requirement
+            item.identity
         )));
     }
     reconcile_context_authorized(&context, authorization, "deploy")
@@ -391,49 +352,104 @@ fn authorize_context(
     let pending = initial
         .items
         .iter()
-        .enumerate()
-        .filter(|(_, item)| item.status != CheckStatus::Satisfied)
+        .filter(|item| item.status != CheckStatus::Satisfied)
         .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return Ok(RequirementAuthorization {
-            approved: BTreeSet::new(),
-            prepared_providers: BTreeSet::new(),
-        });
-    }
     let pending_providers = pending
         .iter()
-        .map(|(_, item)| item.provider.as_str())
+        .map(|item| item.provider.as_str())
         .collect::<BTreeSet<_>>();
-    let preparations = context
-        .preparations
-        .iter()
-        .filter(|operation| pending_providers.contains(operation.provider.as_str()))
-        .collect::<Vec<_>>();
+    let preparations = required_preparations(&context, &pending_providers);
+    if pending.is_empty() && preparations.is_empty() {
+        return Ok(RequirementAuthorization {
+            approved: BTreeSet::new(),
+            prepared_operations: BTreeSet::new(),
+        });
+    }
     preflight(&context, &preparations, &pending)?;
     emit_progress(format!("{operation_name} will reconcile:"));
-    for (_, item) in &pending {
-        emit_progress(format!(
-            "  {} via {} ({})",
-            item.requirement,
-            item.provider,
-            item.status.as_str()
-        ));
+    let providers = pending
+        .iter()
+        .map(|item| item.provider.as_str())
+        .chain(
+            preparations
+                .iter()
+                .map(|operation| operation.provider.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    for provider in providers {
+        emit_progress(format!("  {provider}"));
+        for operation in preparations
+            .iter()
+            .filter(|operation| operation.provider == provider)
+        {
+            emit_progress(format!(
+                "    prepare {}{}",
+                operation.description,
+                if operation.elevated {
+                    " (elevated)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        for item in pending.iter().filter(|item| item.provider == provider) {
+            emit_progress(format!("    {} ({})", item.identity, item.status.as_str()));
+        }
     }
     confirm(operation_name, yes)?;
     if preparations.iter().any(|operation| operation.elevated)
-        || pending
-            .iter()
-            .any(|(index, _)| context.requirements[*index].binding.provider == "apt")
+        || pending.iter().any(|item| {
+            item.subject == CheckSubject::Prerequisite
+                && prerequisite_for_item(&context, item).is_ok_and(|value| value.elevated)
+                || item.subject == CheckSubject::Requirement && item.provider == "apt"
+        })
     {
         authorize_elevation(yes)?;
     }
     Ok(RequirementAuthorization {
         approved: pending
             .into_iter()
-            .map(|(_, item)| item.requirement.clone())
+            .map(|item| item.identity.clone())
+            .chain(
+                preparations
+                    .iter()
+                    .map(|operation| preparation_identity(operation)),
+            )
             .collect(),
-        prepared_providers: BTreeSet::new(),
+        prepared_operations: BTreeSet::new(),
     })
+}
+
+fn preparation_identity(operation: &ProviderPreparation) -> String {
+    format!("prepare:{}:{}", operation.provider, operation.identity)
+}
+
+fn apt_update_forced(operation: &ProviderPreparation) -> bool {
+    operation.provider == "apt"
+        && operation.identity == "update-index"
+        && matches!(
+            &operation.data,
+            FrozenValue::Map(data)
+                if matches!(data.get("forced"), Some(FrozenValue::Boolean(true)))
+        )
+}
+
+fn required_preparations<'a>(
+    context: &'a RequirementContext<'_>,
+    pending_providers: &BTreeSet<&str>,
+) -> Vec<&'a ProviderPreparation> {
+    context
+        .preparations
+        .iter()
+        .filter(|operation| {
+            pending_providers.contains(operation.provider.as_str())
+                || apt_update_forced(operation)
+                    && context
+                        .requirements
+                        .iter()
+                        .any(|requirement| requirement.binding.provider == operation.provider)
+        })
+        .collect()
 }
 
 pub fn prepare_target_plan_until_authorized(
@@ -481,11 +497,11 @@ pub(crate) fn prepare_target_plan_at_authorized(
         .items
         .iter()
         .filter(|item| item.status != CheckStatus::Satisfied)
-        .find(|item| !authorization.approved.contains(&item.requirement));
+        .find(|item| !authorization.approved.contains(&item.identity));
     if let Some(item) = newly_pending {
         return Err(WombatError::configuration(format!(
             "{} became pending after materialise preflight; start a new invocation to approve it",
-            item.requirement
+            item.identity
         )));
     }
     reconcile_context_authorized(&context, authorization, "materialise")
@@ -512,43 +528,54 @@ fn reconcile_context_inner(
     let pending = initial
         .items
         .iter()
-        .enumerate()
-        .filter(|(_, item)| item.status != CheckStatus::Satisfied)
+        .filter(|item| item.status != CheckStatus::Satisfied)
         .collect::<Vec<_>>();
-    if pending.is_empty() {
+    let pending_providers = pending
+        .iter()
+        .map(|item| item.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    let pending_apt_prerequisite = pending
+        .iter()
+        .any(|item| item.subject == CheckSubject::Prerequisite && item.provider == "apt");
+    let preparations = required_preparations(context, &pending_providers)
+        .into_iter()
+        .filter(|operation| {
+            if pending_apt_prerequisite
+                && operation.provider == "apt"
+                && operation.identity == "update-index"
+            {
+                return true;
+            }
+            authorization.as_ref().is_none_or(|authorization| {
+                !authorization
+                    .prepared_operations
+                    .contains(&preparation_identity(operation))
+            })
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() && preparations.is_empty() {
         return Ok(BootstrapOutcome {
             build_id: context.id.to_string(),
             completed: Vec::new(),
             already_satisfied: initial
                 .items
                 .iter()
-                .map(|item| item.requirement.clone())
+                .map(|item| item.identity.clone())
                 .collect(),
         });
     }
-    let pending_providers = pending
-        .iter()
-        .map(|(_, item)| item.provider.as_str())
-        .collect::<BTreeSet<_>>();
-    let preparations = context
-        .preparations
-        .iter()
-        .filter(|operation| pending_providers.contains(operation.provider.as_str()))
-        .filter(|operation| {
-            authorization.as_ref().is_none_or(|authorization| {
-                !authorization
-                    .prepared_providers
-                    .contains(&operation.provider)
-            })
-        })
-        .collect::<Vec<_>>();
     preflight(context, &preparations, &pending)?;
     emit_progress(format!("{operation_name} will reconcile:"));
-    let mut grouped = BTreeMap::<&str, Vec<&CheckItem>>::new();
-    for (_, item) in &pending {
-        grouped.entry(&item.provider).or_default().push(item);
-    }
-    for (provider, items) in grouped {
+    let providers = pending
+        .iter()
+        .map(|item| item.provider.as_str())
+        .chain(
+            preparations
+                .iter()
+                .map(|operation| operation.provider.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    for provider in providers {
         emit_progress(format!("  {provider}"));
         for operation in preparations
             .iter()
@@ -564,12 +591,8 @@ fn reconcile_context_inner(
                 }
             ));
         }
-        for item in items {
-            emit_progress(format!(
-                "    {} ({})",
-                item.requirement,
-                item.status.as_str()
-            ));
+        for item in pending.iter().filter(|item| item.provider == provider) {
+            emit_progress(format!("    {} ({})", item.identity, item.status.as_str()));
         }
     }
     if authorization.is_none() {
@@ -577,20 +600,76 @@ fn reconcile_context_inner(
     }
 
     let requires_elevation = preparations.iter().any(|operation| operation.elevated)
-        || pending
-            .iter()
-            .any(|(index, _)| context.requirements[*index].binding.provider == "apt");
+        || pending.iter().any(|item| {
+            item.subject == CheckSubject::Prerequisite
+                && prerequisite_for_item(context, item).is_ok_and(|value| value.elevated)
+                || item.subject == CheckSubject::Requirement && item.provider == "apt"
+        });
     if requires_elevation {
         authorize_elevation(yes)?;
     }
 
     let mut completed = Vec::new();
+    let pending_prerequisites = pending
+        .iter()
+        .copied()
+        .filter(|item| item.subject == CheckSubject::Prerequisite)
+        .collect::<Vec<_>>();
+    for (pending_index, item) in pending_prerequisites.iter().enumerate() {
+        let prerequisite = prerequisite_for_item(context, item)?;
+        if let Err(error) = reconcile_prerequisite(context, prerequisite, item, yes) {
+            let remaining = pending_prerequisites[pending_index..]
+                .iter()
+                .map(|item| item.identity.as_str())
+                .chain(
+                    preparations
+                        .iter()
+                        .map(|operation| operation.identity.as_str()),
+                )
+                .chain(
+                    pending
+                        .iter()
+                        .filter(|item| item.subject == CheckSubject::Requirement)
+                        .map(|item| item.identity.as_str()),
+                )
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(error.with_note(format!(
+                "completed: {}; remaining: {remaining}; no rollback was attempted",
+                if completed.is_empty() {
+                    "none".to_string()
+                } else {
+                    completed.join(", ")
+                }
+            )));
+        }
+        let post = check_prerequisite(context, prerequisite)?;
+        if post.status != CheckStatus::Satisfied {
+            return Err(WombatError::configuration(format!(
+                "{operation_name} reconciled `{}` but post-check reported {}: {}; completed: {}",
+                item.identity,
+                post.status.as_str(),
+                post.detail,
+                if completed.is_empty() {
+                    "none".to_string()
+                } else {
+                    completed.join(", ")
+                }
+            )));
+        }
+        completed.push(item.identity.clone());
+    }
     for (index, operation) in preparations.iter().enumerate() {
         if let Err(error) = prepare_provider(context, operation, yes) {
             let remaining = preparations[index..]
                 .iter()
                 .map(|operation| format!("prepare:{}:{}", operation.provider, operation.identity))
-                .chain(pending.iter().map(|(_, item)| item.requirement.clone()))
+                .chain(
+                    pending
+                        .iter()
+                        .filter(|item| item.subject == CheckSubject::Requirement)
+                        .map(|item| item.identity.clone()),
+                )
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(error.with_note(format!(
@@ -608,16 +687,24 @@ fn reconcile_context_inner(
         ));
         if let Some(authorization) = authorization.as_deref_mut() {
             authorization
-                .prepared_providers
-                .insert(operation.provider.clone());
+                .prepared_operations
+                .insert(preparation_identity(operation));
         }
     }
-    for (pending_index, (index, item)) in pending.iter().enumerate() {
-        let requirement = &context.requirements[*index];
+    let pending_requirements = pending
+        .iter()
+        .copied()
+        .filter(|item| item.subject == CheckSubject::Requirement)
+        .collect::<Vec<_>>();
+    for (pending_index, item) in pending_requirements.iter().enumerate() {
+        let requirement = requirement_for_item(context, item)?;
+        if requirement.binding.provider == "apt" && !requirement.binding.prerequisites.is_empty() {
+            preflight_apt_requirement(context, requirement)?;
+        }
         if let Err(error) = reconcile_requirement(context, requirement, item.status, yes) {
-            let remaining = pending[pending_index..]
+            let remaining = pending_requirements[pending_index..]
                 .iter()
-                .map(|(_, item)| item.requirement.as_str())
+                .map(|item| item.identity.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(error.with_note(format!(
@@ -633,7 +720,7 @@ fn reconcile_context_inner(
         if post.status != CheckStatus::Satisfied {
             return Err(WombatError::configuration(format!(
                 "{operation_name} reconciled `{}` but post-check reported {}: {}; completed: {}",
-                item.requirement,
+                item.identity,
                 post.status.as_str(),
                 post.detail,
                 if completed.is_empty() {
@@ -643,7 +730,7 @@ fn reconcile_context_inner(
                 }
             )));
         }
-        completed.push(item.requirement.clone());
+        completed.push(item.identity.clone());
     }
     Ok(BootstrapOutcome {
         build_id: context.id.to_string(),
@@ -652,7 +739,7 @@ fn reconcile_context_inner(
             .items
             .iter()
             .filter(|item| item.status == CheckStatus::Satisfied)
-            .map(|item| item.requirement.clone())
+            .map(|item| item.identity.clone())
             .collect(),
     })
 }

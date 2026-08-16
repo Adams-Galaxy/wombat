@@ -91,12 +91,30 @@ fn execute_inner(
     journal_skips.dedup();
     journal.configure(opened.manifest.execution_mode, journal_skips);
     if !manual_requirement_skips.is_empty() {
+        let reason = "provider checks skipped by --skip-requirements";
         journal.record_action(
             "requirements:check",
             &CoreRung::DeployBefore.into(),
             ExecutionStatus::Skipped,
-            "requirement checking skipped by --skip-requirements",
+            reason,
         );
+        for prerequisite in &opened.manifest.prerequisites {
+            if opened
+                .manifest
+                .ladder
+                .at_or_after(&prerequisite.when, CoreRung::DeployBefore)
+            {
+                journal.record_action(
+                    format!(
+                        "prerequisite:{}:{}",
+                        prerequisite.provider, prerequisite.identity
+                    ),
+                    &prerequisite.when,
+                    ExecutionStatus::Skipped,
+                    reason,
+                );
+            }
+        }
     }
     let deploy_apply: crate::execution::ladder::RungId = CoreRung::DeployApply.into();
     let conflicts = plan
@@ -126,11 +144,19 @@ fn execute_inner(
         false,
     )? {
         if let Some(authorization) = &mut requirement_authorization {
-            crate::requirements::prepare_product_deploy_at_authorized(
+            let outcome = crate::requirements::prepare_product_deploy_at_authorized(
                 &opened.requested_build_dir,
                 &rung,
                 authorization,
             )?;
+            for identity in outcome.completed {
+                journal.record_action(
+                    identity,
+                    &rung,
+                    ExecutionStatus::Succeeded,
+                    "provider action reconciled",
+                );
+            }
         }
         // Recorded as Running before the work starts. If the process dies here,
         // reopening the journal sees Running and reports Interrupted rather than
@@ -171,11 +197,19 @@ fn execute_inner(
     crate::execution::ladder::write_at(&journal_path, &journal)?;
 
     if let Some(authorization) = &mut requirement_authorization {
-        crate::requirements::prepare_product_deploy_at_authorized(
+        let outcome = crate::requirements::prepare_product_deploy_at_authorized(
             &opened.requested_build_dir,
             &deploy_apply,
             authorization,
         )?;
+        for identity in outcome.completed {
+            journal.record_action(
+                identity,
+                &deploy_apply,
+                ExecutionStatus::Succeeded,
+                "provider action reconciled",
+            );
+        }
     }
 
     for outcome in crate::execution::script::execute_at(
@@ -341,11 +375,19 @@ fn execute_inner(
         true,
     )? {
         if let Some(authorization) = &mut requirement_authorization {
-            crate::requirements::prepare_product_deploy_at_authorized(
+            let outcome = crate::requirements::prepare_product_deploy_at_authorized(
                 &opened.requested_build_dir,
                 &rung,
                 authorization,
             )?;
+            for identity in outcome.completed {
+                journal.record_action(
+                    identity,
+                    &rung,
+                    ExecutionStatus::Succeeded,
+                    "provider action reconciled",
+                );
+            }
         }
         journal.set_id(&rung, ExecutionStatus::Running);
         crate::execution::ladder::write_at(&journal_path, &journal)?;

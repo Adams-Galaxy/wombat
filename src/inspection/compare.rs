@@ -105,6 +105,16 @@ pub(super) fn render_comparison(left: &Manifest, right: &Manifest) -> String {
     );
     compare_map(
         &mut output,
+        "Prerequisites",
+        keyed(&left.prerequisites, |prerequisite| {
+            format!("{}:{}", prerequisite.provider, prerequisite.identity)
+        }),
+        keyed(&right.prerequisites, |prerequisite| {
+            format!("{}:{}", prerequisite.provider, prerequisite.identity)
+        }),
+    );
+    compare_map(
+        &mut output,
         "Preparations",
         keyed(&left.preparations, |operation| {
             format!("{}:{}", operation.provider, operation.identity)

@@ -27,14 +27,14 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 19;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 10;
+pub const MANIFEST_FORMAT_VERSION: u32 = 20;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 11;
 
 /// Bump whenever construction can produce different output for unchanged
 /// configuration. Products built under a different value are rejected and
 /// identities computed under it differ; the release version deliberately does
 /// not, so publishing Wombat does not invalidate every product.
-pub const CONSTRUCTION_VERSION: u32 = 1;
+pub const CONSTRUCTION_VERSION: u32 = 2;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -104,6 +104,7 @@ pub struct Manifest {
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
+    pub prerequisites: Vec<ProviderPrerequisite>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
     pub scripts: Vec<Script>,
@@ -146,6 +147,7 @@ pub struct BuildPlan {
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
+    pub prerequisites: Vec<ProviderPrerequisite>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<Task>,
     pub scripts: Vec<Script>,
@@ -360,6 +362,18 @@ pub struct ProviderBinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     pub publications: Publications,
+    pub prerequisites: Vec<String>,
+    pub data: FrozenValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPrerequisite {
+    pub provider: String,
+    pub identity: String,
+    pub description: String,
+    pub when: RungId,
+    pub elevated: bool,
     pub data: FrozenValue,
 }
 
@@ -831,6 +845,7 @@ pub(crate) struct EvaluatedManifest {
     pub ladder: ExecutionLadder,
     pub providers: Vec<Provider>,
     pub requirements: Vec<Requirement>,
+    pub prerequisites: Vec<ProviderPrerequisite>,
     pub preparations: Vec<ProviderPreparation>,
     pub tasks: Vec<EvaluatedTask>,
     pub scripts: Vec<Script>,

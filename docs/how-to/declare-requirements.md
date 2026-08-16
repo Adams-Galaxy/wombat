@@ -120,6 +120,53 @@ idempotent rather than claiming package-manager rollback.
 Nothing is installed until every decision, including deployment conflicts, has
 been made. Declining leaves the machine untouched.
 
+## Add a third-party Apt source
+
+Declare a named source once in root provider policy, then reference it from the
+packages that need it. Unreferenced sources are inert. This is the managed form
+of Yazi's published Apt setup:
+
+```lua
+w.providers({
+    {
+        name = "apt",
+        with = {
+            sources = {
+                yazi = {
+                    uri = "https://yazi-rs.github.io/builds/",
+                    suite = "stable",
+                    components = { "main" },
+                    key = {
+                        url = "https://yazi-rs.github.io/builds/yazi-keyring.gpg",
+                        format = "gpg",
+                    },
+                },
+            },
+        },
+    },
+})
+
+w.need.package("yazi", {
+    provider = "apt",
+    publishes = { commands = { "yazi" } },
+    with = { source = "yazi" },
+    when = "deploy.before",
+})
+```
+
+Wombat checks the key and source file as a prerequisite even if `yazi` is
+already installed. It writes Deb822 under `/etc/apt/sources.list.d/`, keeps
+keys under `/etc/apt/keyrings/`, refreshes the index once when needed, and only
+then simulates and installs the package. These locations follow
+[Apt's current source-file guidance](https://manpages.debian.org/testing/apt/sources.list.5.en.html);
+[Yazi documents the equivalent one-line setup](https://yazi-rs.github.io/docs/installation/).
+
+Existing differing files that Wombat does not own are a hard preflight conflict.
+Use `replace = true` only when you intend Wombat to adopt its fixed path. An
+unpinned key must use HTTPS; supply `key.sha256` to permit HTTP and to pin the
+downloaded bytes. Removing the source from configuration does not prune files
+from `/etc`.
+
 ## Building for another machine
 
 Package reconciliation only makes sense when you're building for the machine

@@ -412,6 +412,57 @@ fail, because there'd be no policy to resolve them against.
 w.providers({ "brew" })
 ```
 
+### `apt`
+
+The Apt provider accepts `with.update`, command aliases, and reusable named
+third-party sources. Sources are inert until a selected Apt package names one;
+Wombat then freezes one checked prerequisite shared by every dependent package.
+
+```lua
+w.providers({
+    {
+        name = "apt",
+        with = {
+            sources = {
+                yazi = {
+                    uri = "https://yazi-rs.github.io/builds/",
+                    suite = "stable",
+                    components = { "main" },
+                    architectures = { "amd64", "arm64" }, -- optional
+                    key = {
+                        url = "https://yazi-rs.github.io/builds/yazi-keyring.gpg",
+                        format = "gpg", -- `gpg` (default) or `asc`
+                        sha256 = "...", -- optional, 64 hexadecimal digits
+                    },
+                    replace = false,
+                },
+            },
+        },
+    },
+})
+
+w.need.package("yazi", {
+    provider = "apt",
+    publishes = { commands = { "yazi" } },
+    with = { source = "yazi" },
+    when = "deploy.before",
+})
+```
+
+Wombat writes canonical Deb822 to
+`/etc/apt/sources.list.d/wombat-<name>.sources` and the key to
+`/etc/apt/keyrings/wombat-<name>.gpg` (or `.asc`), both mode `0644`. An
+unpinned key URL must use HTTPS; HTTP is accepted only with `sha256`. Existing
+differing files without Wombat's ownership marker fail before authorization.
+Set `replace = true` to authorize adopting those exact derived paths. Removing
+a declaration does not remove source or key files.
+
+Source prerequisites are checked independently of package status. When a
+source changes, when a source-bound package is missing, or when
+`with.update = true`, Apt refreshes its index once before simulating and
+installing packages. The complete source, preparation, package, path, and
+elevation set is shown before mutation.
+
 ### `git`
 
 For a package that lives in a repository rather than a package manager — a
@@ -437,6 +488,51 @@ An existing `with.to` is reused only when its `origin` remote already matches
 since it isn't `git`'s to overwrite. Checking is local — a pinned `ref` is
 compared against what the last `reconcile` fetched, not against the network —
 so a satisfied `git` package never makes a connection.
+
+### Custom provider prerequisites
+
+A custom provider's `plan(bindings, target, config)` may return both
+`provider.operation({...})` values for transient shared preparation and
+`provider.prerequisite({...})` values for independently checkable managed
+state. A binding references prerequisite identities explicitly:
+
+```lua
+local provider = require("wombat.provider")
+
+return provider.define({
+    resolve = function(candidate)
+        return provider.binding({
+            identity = candidate.name,
+            prerequisites = { "catalog" },
+            data = {},
+        })
+    end,
+    plan = function()
+        return {
+            provider.prerequisite({
+                identity = "catalog",
+                description = "Configure the package catalog",
+                elevated = true,
+                data = {},
+            }),
+        }
+    end,
+    check_prerequisite = function(ctx, prerequisite)
+        -- Return provider.satisfied/missing/outdated/unavailable(...).
+    end,
+    reconcile_prerequisite = function(ctx, prerequisite, observation)
+        -- `ctx:mutate(...)` is available; elevation is limited by the declaration.
+    end,
+})
+```
+
+Prerequisites must be referenced by at least one binding, belong to the same
+provider, and have unique identities. Their persisted deadline is the earliest
+dependent requirement. Wombat checks all prerequisites and requirements before
+authorization, then reconciles prerequisites in frozen provider-plan order,
+runs preparation, and finally reconciles packages, post-checking each managed
+item. A pending prerequisite activates its provider even when every dependent
+package is already installed.
 
 ## Tasks and scripts
 

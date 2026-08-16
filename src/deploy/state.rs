@@ -360,6 +360,7 @@ fn validate_state_artifacts(artifacts: &[AppliedArtifact]) -> Result<()> {
         ladder: crate::execution::ladder::ExecutionLadder::default(),
         providers: Vec::new(),
         requirements: Vec::new(),
+        prerequisites: Vec::new(),
         preparations: Vec::new(),
         tasks,
         scripts: Vec::new(),

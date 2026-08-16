@@ -115,10 +115,10 @@ switches branches, changes remotes, or cleans your working tree.
 
 ### `check`
 
-Read-only. Reports whether this environment satisfies a completed product:
-satisfied, missing, outdated, unavailable, or error. Exits `0` when satisfied,
-`1` when not, `2` on an operational failure. `--compile-only` disables provider
-gates.
+Read-only. Reports checked provider prerequisites followed by whether this
+environment satisfies each requirement: satisfied, missing, outdated,
+unavailable, or error. Exits `0` when satisfied, `1` when not, `2` on an
+operational failure. `--compile-only` disables provider gates.
 
 ### `diff`
 

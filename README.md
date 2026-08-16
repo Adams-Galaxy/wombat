@@ -113,6 +113,9 @@ but the Lua API, the Rust library, and the persisted formats all still change
 between releases. When a format moves, Wombat tells you to rebuild rather than
 migrating quietly.
 
+Local bring-up supports Homebrew, Apt (including checked, managed third-party
+Deb822 sources), and Git packages behind one frozen provider plan.
+
 Not implemented, deliberately: whole-deployment rollback, remote deployment,
 encrypted secrets, symlink artifacts, and Windows.
 

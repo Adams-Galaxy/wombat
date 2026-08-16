@@ -267,7 +267,9 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     validate_provider_scope(
         &manifest.providers,
         &manifest.requirements,
+        &manifest.prerequisites,
         &manifest.preparations,
+        &manifest.ladder,
         &source_paths,
         "target",
     )?;
@@ -727,10 +729,12 @@ fn validate_tasks(
     Ok(())
 }
 
-fn validate_provider_scope(
+pub(crate) fn validate_provider_scope(
     providers: &[crate::model::manifest::Provider],
     requirements: &[crate::model::manifest::Requirement],
+    prerequisites: &[crate::model::manifest::ProviderPrerequisite],
     preparations: &[crate::model::manifest::ProviderPreparation],
+    ladder: &crate::execution::ladder::ExecutionLadder,
     source_paths: &std::collections::BTreeSet<&str>,
     scope: &str,
 ) -> Result<()> {
@@ -761,9 +765,11 @@ fn validate_provider_scope(
         )?;
         match &provider.origin {
             crate::model::manifest::ProviderOrigin::Builtin { contract_version } => {
-                if !matches!(provider.name.as_str(), "brew" | "apt" | "git")
-                    || *contract_version != 1
-                {
+                let supported = matches!(
+                    (provider.name.as_str(), *contract_version),
+                    ("brew" | "git", 1) | ("apt", 2)
+                );
+                if !supported {
                     return Err(WombatError::configuration(format!(
                         "unsupported built-in provider contract `{}-v{contract_version}`",
                         provider.name
@@ -879,6 +885,11 @@ fn validate_provider_scope(
         validate_publications(&requirement.binding.publications)?;
         if !provider_names.contains(requirement.binding.provider.as_str())
             || requirement.binding.identity.trim().is_empty()
+            || !requirement
+                .binding
+                .prerequisites
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
             || !matches!(
                 requirement.binding.data,
                 crate::model::frozen::FrozenValue::Map(_)
@@ -964,6 +975,66 @@ fn validate_provider_scope(
             ));
         }
     }
+    let mut prerequisite_identities = BTreeSet::new();
+    let mut previous_priority = None;
+    for prerequisite in prerequisites {
+        let priority = providers
+            .iter()
+            .find(|provider| provider.name == prerequisite.provider)
+            .map(|provider| provider.priority)
+            .ok_or_else(|| {
+                WombatError::configuration("manifest prerequisite references an absent provider")
+            })?;
+        if previous_priority.is_some_and(|previous| priority < previous) {
+            return Err(WombatError::configuration(
+                "manifest prerequisites do not follow provider priority",
+            ));
+        }
+        previous_priority = Some(priority);
+        let expected_when = requirements
+            .iter()
+            .filter(|requirement| {
+                requirement.binding.provider == prerequisite.provider
+                    && requirement
+                        .binding
+                        .prerequisites
+                        .contains(&prerequisite.identity)
+            })
+            .min_by_key(|requirement| ladder.position(&requirement.when))
+            .map(|requirement| &requirement.when);
+        if prerequisite.identity.trim().is_empty()
+            || prerequisite.description.trim().is_empty()
+            || expected_when != Some(&prerequisite.when)
+            || !matches!(prerequisite.data, crate::model::frozen::FrozenValue::Map(_))
+            || !prerequisite_identities.insert((
+                prerequisite.provider.as_str(),
+                prerequisite.identity.as_str(),
+            ))
+        {
+            return Err(WombatError::configuration(
+                "manifest contains an invalid or duplicate provider prerequisite",
+            ));
+        }
+    }
+    let mut referenced_prerequisites = BTreeSet::new();
+    for requirement in requirements {
+        for identity in &requirement.binding.prerequisites {
+            let reference = (requirement.binding.provider.as_str(), identity.as_str());
+            if !prerequisite_identities.contains(&reference) {
+                return Err(WombatError::configuration(format!(
+                    "manifest binding references absent prerequisite `{}:{identity}`",
+                    requirement.binding.provider
+                )));
+            }
+            referenced_prerequisites.insert(reference);
+        }
+    }
+    if referenced_prerequisites != prerequisite_identities {
+        return Err(WombatError::configuration(
+            "manifest contains an unreferenced provider prerequisite",
+        ));
+    }
+    crate::requirements::validate_provider_contracts(requirements, prerequisites, preparations)?;
     let mut preparation_identities = BTreeSet::new();
     let mut previous_priority = None;
     for preparation in preparations {

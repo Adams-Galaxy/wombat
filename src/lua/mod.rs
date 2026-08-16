@@ -37,9 +37,9 @@ use crate::model::manifest::{
     EvaluatedDirectory, EvaluatedManifest, EvaluatedProduction, EvaluatedTask, InterpreterFamily,
     MAX_SOURCE_TRACE_FRAMES, ManifestModule, ModuleSourceBase, Observation, ObservationSubject,
     ProcessEnvironmentChange, ProcessInvocation, ProcessObservation, Provider, ProviderBinding,
-    ProviderOrigin, ProviderPreparation, Publications, Requirement, RequirementCandidate,
-    RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome, Script,
-    ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
+    ProviderOrigin, ProviderPreparation, ProviderPrerequisite, Publications, Requirement,
+    RequirementCandidate, RequirementChoice, RequirementKind, ResolutionAttempt, ResolutionOutcome,
+    Script, ScriptPayload, ScriptSchedule, ScriptScope, SourceFile, SourceLocation, SourceOrigin,
     SourceTrace, Task, TaskCachePolicy, TaskLogPolicy, TaskRunner, TaskTargetRoot,
     TemplateHelperPack,
 };
@@ -373,11 +373,12 @@ pub(crate) fn evaluate_with(root: &Path, options: EvaluationOptions) -> Result<E
     validate_dependency_cycles(&state.borrow())?;
     validate_artifact_conflicts(&state.borrow().artifacts)?;
     let template_helpers = template_helpers::finalize(&state)?;
-    let preparations = plan_provider_preparations(&state)?;
+    let (prerequisites, preparations) = plan_provider_actions(&state)?;
 
     Ok(EvaluationOutcome::Manifest(Box::new(build_manifest(
         &state.borrow(),
         template_helpers,
+        prerequisites,
         preparations,
     )?)))
 }

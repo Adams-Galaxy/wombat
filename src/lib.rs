@@ -101,6 +101,6 @@ pub use model::context::{
 pub use model::manifest::Manifest;
 pub use presentation::{ColorPolicy, LogLevel, Presenter, Role};
 pub use requirements::{
-    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, authorize_target_plan, check,
-    check_plan, check_target_plan, prepare_target_plan_until_authorized,
+    BootstrapOutcome, CheckItem, CheckOutcome, CheckStatus, CheckSubject, authorize_target_plan,
+    check, check_plan, check_target_plan, prepare_target_plan_until_authorized,
 };

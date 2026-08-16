@@ -15,6 +15,11 @@ The shell module snapshots `w.os` and `w.paths` through
 `w.template.context()`, keeping lazy construction views out of the persisted
 template payload.
 
+For a managed third-party Apt repository, declare a named source and bind only
+the packages that need it. The complete Yazi example is in
+[`declare requirements`](../../docs/how-to/declare-requirements.md#add-a-third-party-apt-source);
+an unreferenced source remains inert.
+
 Module files are deliberately flat and organized as code; their physical
 location has no relationship to deployed paths. Each module establishes any
 source base it needs with `w.module.from()`, and template installs use target
