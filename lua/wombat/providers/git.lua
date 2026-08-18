@@ -31,6 +31,7 @@ return provider.define({
         local commands = candidate.publications.commands or {}
         return provider.binding({
             identity = "git:" .. options.to,
+            elevated = false,
             publications = { commands = commands },
             data = { repository = options.repository, to = options.to, ref = options.ref },
         })

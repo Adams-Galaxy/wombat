@@ -95,3 +95,67 @@ fn noninteractive_installer_refuses_undeclared_prerequisite_mutation() {
         "{stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn fedora_installer_uses_dnf_for_the_complete_prerequisite_layer() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let bin = temporary.path().join("bin");
+    let home = temporary.path().join("home");
+    let install_root = temporary.path().join("install");
+    let dnf_args = temporary.path().join("dnf-args");
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&home).unwrap();
+
+    for command in ["sh", "mktemp", "rm", "mkdir", "chmod"] {
+        let output = Command::new("sh")
+            .args(["-c", "command -v \"$1\"", "wombat-installer-test", command])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let path = Path::new(std::str::from_utf8(&output.stdout).unwrap().trim());
+        symlink(path, bin.join(command)).unwrap();
+    }
+    executable(&bin.join("uname"), "#!/bin/sh\nprintf 'Linux\\n'\n");
+    executable(&bin.join("id"), "#!/bin/sh\nprintf '0\\n'\n");
+    executable(&bin.join("git"), "#!/bin/sh\nexit 0\n");
+    executable(&bin.join("cc"), "#!/bin/sh\nexit 0\n");
+    executable(
+        &bin.join("dnf"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WOMBAT_TEST_DNF_ARGS\"\n",
+    );
+    executable(
+        &bin.join("curl"),
+        r##"#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out=$2; shift 2; else shift; fi
+done
+printf '%s\n' '#!/bin/sh' \
+  'mkdir -p "$HOME/.cargo/bin"' \
+  'printf '\''%s\n'\'' '\''#!/bin/sh'\'' '\''root='\'' '\''while [ "$#" -gt 0 ]; do if [ "$1" = "--root" ]; then root=$2; break; fi; shift; done'\'' '\''mkdir -p "$root/bin"'\'' '\''printf "#!/bin/sh\\nexit 0\\n" > "$root/bin/wombat"'\'' '\''chmod +x "$root/bin/wombat"'\'' > "$HOME/.cargo/bin/cargo"' \
+  'chmod +x "$HOME/.cargo/bin/cargo"' > "$out"
+"##,
+    );
+
+    let output = Command::new("sh")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+        .args(["--install-prerequisites", "setup", "Adams-Galaxy", "--yes"])
+        .env("PATH", &bin)
+        .env("HOME", &home)
+        .env("WOMBAT_INSTALL_ROOT", &install_root)
+        .env("WOMBAT_TEST_DNF_ARGS", &dnf_args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dnf_args).unwrap(),
+        "install\n--assumeyes\nca-certificates\ncurl\ngit\ngcc\nmake\n"
+    );
+}

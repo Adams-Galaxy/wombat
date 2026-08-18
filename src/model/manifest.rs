@@ -27,14 +27,14 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 20;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 11;
+pub const MANIFEST_FORMAT_VERSION: u32 = 21;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 12;
 
 /// Bump whenever construction can produce different output for unchanged
 /// configuration. Products built under a different value are rejected and
 /// identities computed under it differ; the release version deliberately does
 /// not, so publishing Wombat does not invalidate every product.
-pub const CONSTRUCTION_VERSION: u32 = 2;
+pub const CONSTRUCTION_VERSION: u32 = 3;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -359,6 +359,7 @@ pub enum RequirementChoice {
 pub struct ProviderBinding {
     pub provider: String,
     pub identity: String,
+    pub elevated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     pub publications: Publications,

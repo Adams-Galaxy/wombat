@@ -120,6 +120,13 @@ environment satisfies each requirement: satisfied, missing, outdated,
 unavailable, or error. Exits `0` when satisfied, `1` when not, `2` on an
 operational failure. `--compile-only` disables provider gates.
 
+Provider checks include independently managed prerequisites such as Apt
+sources, RPM Fusion release packages, and scope-specific Flathub remotes.
+Authorisation summaries expose whether each frozen provider binding may
+elevate. Repository-dependent availability checks run after their prerequisite
+has been reconciled and post-checked, without weakening the single complete
+authorization boundary.
+
 ### `diff`
 
 Read-only comparison of a product against a target root. `--patch` includes

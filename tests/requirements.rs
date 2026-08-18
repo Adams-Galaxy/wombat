@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(target_os = "macos")]
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tempfile::TempDir;
 
@@ -65,7 +66,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 20);
+    assert_eq!(outcome.manifest.format_version, 21);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -96,7 +97,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 20);
+    assert_eq!(outcome.manifest.format_version, 21);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -161,7 +162,7 @@ w.need.package("yazi", {
     )
     .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 20);
+    assert_eq!(outcome.manifest.format_version, 21);
     assert_eq!(outcome.manifest.prerequisites.len(), 1);
     let prerequisite = &outcome.manifest.prerequisites[0];
     assert_eq!(prerequisite.provider, "apt");
@@ -356,7 +357,7 @@ fn custom_provider_planning_requires_and_packages_prepare() {
         r#"local provider = require("wombat.provider")
 return provider.define({
   resolve = function(candidate)
-    return provider.binding({ identity = candidate.name, package = candidate.name, data = {} })
+    return provider.binding({ identity = candidate.name, package = candidate.name, elevated = true, data = {} })
   end,
   plan = function(bindings)
     return { provider.operation({ identity = "catalog", description = "Prepare catalog", data = { count = #bindings } }) }
@@ -379,6 +380,7 @@ return provider.define({
     .unwrap();
     assert_eq!(outcome.manifest.preparations.len(), 1);
     assert_eq!(outcome.manifest.preparations[0].identity, "catalog");
+    assert!(outcome.manifest.requirements[0].binding.elevated);
     fs::write(
         source.join("providers/custom.lua"),
         "local p=require('wombat.provider') return p.define({ resolve=function(c) return p.binding({identity=c.name,data={}}) end, plan=function() return {p.operation({identity='catalog',description='Catalog',data={}})} end, check=function() return p.satisfied() end, reconcile=function() end })",
@@ -455,19 +457,27 @@ return p.define({{
     )
     .unwrap();
 
-    let outcome = wombat::build(
-        wombat::BuildOptions::new(&source, temporary.path().join("build"))
-            .with_provider_reconciliation(true)
-            .with_yes(true),
-    )
-    .unwrap();
-    assert!(state.is_file());
-    assert_eq!(outcome.manifest.prerequisites.len(), 1);
-    assert_eq!(
-        outcome.manifest.prerequisites[0].when.id(),
-        "materialise.before"
+    let build_dir = temporary.path().join("build");
+    let output = Command::new(env!("CARGO_BIN_EXE_wombat"))
+        .args(["--color", "never", "--source"])
+        .arg(&source)
+        .args(["build", "--build-dir"])
+        .arg(&build_dir)
+        .arg("--yes")
+        .env("XDG_STATE_HOME", temporary.path().join("state"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let journal = wombat::ladder::read(&outcome.build_dir).unwrap();
+    let manifest: wombat::Manifest =
+        serde_json::from_slice(&fs::read(build_dir.join("manifest.json")).unwrap()).unwrap();
+    assert!(state.is_file());
+    assert_eq!(manifest.prerequisites.len(), 1);
+    assert_eq!(manifest.prerequisites[0].when.id(), "materialise.before");
+    let journal = wombat::ladder::read(&build_dir).unwrap();
     assert!(journal.actions.iter().any(|action| {
         action.identity == "prerequisite:custom:catalog"
             && action.status == wombat::ladder::ExecutionStatus::Succeeded
@@ -939,6 +949,12 @@ fn skip_requirements_avoids_the_package_check_and_still_reuses_a_fresh_product()
     let log = temporary.path().join("provider-calls.log");
     fs::create_dir(&source).unwrap();
     fs::create_dir(&bin).unwrap();
+    let fedora = cfg!(target_os = "linux")
+        && fs::read_to_string("/etc/os-release").is_ok_and(|release| {
+            release
+                .lines()
+                .any(|line| matches!(line.trim(), "ID=fedora" | "ID=\"fedora\""))
+        });
     let (provider, executable, script) = if cfg!(target_os = "macos") {
         (
             "brew",
@@ -950,6 +966,15 @@ if [ "$1" = "info" ]; then
   exit 0
 fi
 exit 9
+"#,
+        )
+    } else if fedora {
+        (
+            "dnf",
+            "rpm",
+            r#"#!/bin/sh
+echo "$@" >> "$PROVIDER_CALL_LOG"
+printf '1.0.0\n'
 "#,
         )
     } else {
@@ -970,8 +995,10 @@ printf 'install ok installed\t1.0.0'
     )
     .unwrap();
     let checker = bin.join(executable);
-    fs::write(&checker, script).unwrap();
-    fs::set_permissions(&checker, fs::Permissions::from_mode(0o755)).unwrap();
+    let staged_checker = bin.join(format!(".{executable}.wombat-test-staged"));
+    fs::write(&staged_checker, script).unwrap();
+    fs::set_permissions(&staged_checker, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(staged_checker, checker).unwrap();
     let build_dir = temporary.path().join("build");
 
     let run = |args: &[&str]| {

@@ -67,16 +67,22 @@ system_name=$(uname -s)
 if [ -n "$missing" ] && [ "$install_prerequisites" = true ]; then
     case "$system_name" in
         Linux)
-            if ! have apt-get; then
-                printf '%s\n' "Automatic prerequisite installation currently supports Debian-family Linux only." >&2
+            if have apt-get; then
+                packages="ca-certificates curl"
+                have git || packages="$packages git"
+                have cc || packages="$packages build-essential"
+                elevated apt-get update
+                # shellcheck disable=SC2086 # Every word is selected from the fixed package list above.
+                elevated env DEBIAN_FRONTEND=noninteractive apt-get install --yes $packages
+            elif have dnf; then
+                # Fedora's split build tool packages are cheap and deterministic;
+                # installing the complete prerequisite layer avoids a half-ready
+                # Rust build environment after this explicit authorization.
+                elevated dnf install --assumeyes ca-certificates curl git gcc make
+            else
+                printf '%s\n' "Automatic prerequisite installation supports Debian-family and Fedora Linux." >&2
                 exit 1
             fi
-            packages="ca-certificates curl"
-            have git || packages="$packages git"
-            have cc || packages="$packages build-essential"
-            elevated apt-get update
-            # shellcheck disable=SC2086 # Every word is selected from the fixed package list above.
-            elevated env DEBIAN_FRONTEND=noninteractive apt-get install --yes $packages
             ;;
         Darwin)
             if ! have git || ! have cc; then

@@ -34,10 +34,11 @@ use crate::{Result, WombatError};
 
 mod check;
 mod environment;
-mod providers;
+pub(crate) mod providers;
 
 use check::*;
 use environment::EnvironmentLock;
+use providers::builtin::BuiltinProvider;
 use providers::*;
 
 const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
@@ -51,16 +52,20 @@ pub(crate) fn validate_provider_contracts(
     providers::validate_builtin_contracts(requirements, prerequisites, preparations)
 }
 
-struct RequirementContext<'a> {
+pub(crate) struct RequirementContext<'a> {
     id: &'a str,
     providers: &'a [Provider],
     requirements: &'a [Requirement],
     prerequisites: &'a [ProviderPrerequisite],
     preparations: &'a [ProviderPreparation],
+    ladder: crate::execution::ladder::ExecutionLadder,
     payload_root: PathBuf,
     // Apt paths are rooted here so reconciliation tests cannot touch the host's
     // `/etc`; production constructors deliberately use the real root.
     system_root: PathBuf,
+    // Tests inject exact provider executables without changing process-wide
+    // PATH; production always resolves through the observed environment.
+    command_root: Option<PathBuf>,
 }
 
 impl<'a> RequirementContext<'a> {
@@ -75,8 +80,10 @@ impl<'a> RequirementContext<'a> {
             requirements: &manifest.requirements,
             prerequisites: &manifest.prerequisites,
             preparations: &manifest.preparations,
+            ladder: manifest.ladder.clone(),
             payload_root: product_dir.join("providers"),
             system_root: PathBuf::from("/"),
+            command_root: None,
         }
     }
 
@@ -87,8 +94,10 @@ impl<'a> RequirementContext<'a> {
             requirements: &plan.requirements,
             prerequisites: &plan.prerequisites,
             preparations: &plan.preparations,
+            ladder: plan.ladder.clone(),
             payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
             system_root: PathBuf::from("/"),
+            command_root: None,
         }
     }
 
@@ -99,9 +108,24 @@ impl<'a> RequirementContext<'a> {
             requirements: &plan.requirements,
             prerequisites: &plan.prerequisites,
             preparations: &plan.preparations,
+            ladder: plan.ladder.clone(),
             payload_root: build_dir.join(".wombat/plan/payloads/providers/providers"),
             system_root: PathBuf::from("/"),
+            command_root: None,
         }
+    }
+
+    fn command(&self, name: &str) -> Option<PathBuf> {
+        if let Some(root) = &self.command_root {
+            return Some(root.join(name)).filter(|path| is_executable_file(path));
+        }
+        if name == BuiltinProvider::Dnf.name() {
+            let canonical = PathBuf::from("/usr/bin/dnf");
+            if is_executable_file(&canonical) {
+                return Some(canonical);
+            }
+        }
+        which(name)
     }
 }
 
@@ -393,7 +417,16 @@ fn authorize_context(
             ));
         }
         for item in pending.iter().filter(|item| item.provider == provider) {
-            emit_progress(format!("    {} ({})", item.identity, item.status.as_str()));
+            emit_progress(format!(
+                "    {} ({}){}",
+                item.identity,
+                item.status.as_str(),
+                if check_item_elevated(&context, item) {
+                    " (elevated)"
+                } else {
+                    ""
+                }
+            ));
         }
     }
     confirm(operation_name, yes)?;
@@ -401,7 +434,9 @@ fn authorize_context(
         || pending.iter().any(|item| {
             item.subject == CheckSubject::Prerequisite
                 && prerequisite_for_item(&context, item).is_ok_and(|value| value.elevated)
-                || item.subject == CheckSubject::Requirement && item.provider == "apt"
+                || item.subject == CheckSubject::Requirement
+                    && requirement_for_item(&context, item)
+                        .is_ok_and(|value| value.binding.elevated)
         })
     {
         authorize_elevation(yes)?;
@@ -425,7 +460,7 @@ fn preparation_identity(operation: &ProviderPreparation) -> String {
 }
 
 fn apt_update_forced(operation: &ProviderPreparation) -> bool {
-    operation.provider == "apt"
+    operation.provider == BuiltinProvider::Apt.name()
         && operation.identity == "update-index"
         && matches!(
             &operation.data,
@@ -534,14 +569,14 @@ fn reconcile_context_inner(
         .iter()
         .map(|item| item.provider.as_str())
         .collect::<BTreeSet<_>>();
-    let pending_apt_prerequisite = pending
-        .iter()
-        .any(|item| item.subject == CheckSubject::Prerequisite && item.provider == "apt");
+    let pending_apt_prerequisite = pending.iter().any(|item| {
+        item.subject == CheckSubject::Prerequisite && item.provider == BuiltinProvider::Apt.name()
+    });
     let preparations = required_preparations(context, &pending_providers)
         .into_iter()
         .filter(|operation| {
             if pending_apt_prerequisite
-                && operation.provider == "apt"
+                && operation.provider == BuiltinProvider::Apt.name()
                 && operation.identity == "update-index"
             {
                 return true;
@@ -592,7 +627,16 @@ fn reconcile_context_inner(
             ));
         }
         for item in pending.iter().filter(|item| item.provider == provider) {
-            emit_progress(format!("    {} ({})", item.identity, item.status.as_str()));
+            emit_progress(format!(
+                "    {} ({}){}",
+                item.identity,
+                item.status.as_str(),
+                if check_item_elevated(context, item) {
+                    " (elevated)"
+                } else {
+                    ""
+                }
+            ));
         }
     }
     if authorization.is_none() {
@@ -603,7 +647,8 @@ fn reconcile_context_inner(
         || pending.iter().any(|item| {
             item.subject == CheckSubject::Prerequisite
                 && prerequisite_for_item(context, item).is_ok_and(|value| value.elevated)
-                || item.subject == CheckSubject::Requirement && item.provider == "apt"
+                || item.subject == CheckSubject::Requirement
+                    && requirement_for_item(context, item).is_ok_and(|value| value.binding.elevated)
         });
     if requires_elevation {
         authorize_elevation(yes)?;
@@ -698,8 +743,8 @@ fn reconcile_context_inner(
         .collect::<Vec<_>>();
     for (pending_index, item) in pending_requirements.iter().enumerate() {
         let requirement = requirement_for_item(context, item)?;
-        if requirement.binding.provider == "apt" && !requirement.binding.prerequisites.is_empty() {
-            preflight_apt_requirement(context, requirement)?;
+        if !requirement.binding.prerequisites.is_empty() {
+            preflight_deferred_requirement(context, requirement)?;
         }
         if let Err(error) = reconcile_requirement(context, requirement, item.status, yes) {
             let remaining = pending_requirements[pending_index..]
@@ -749,6 +794,17 @@ fn confirm(operation_name: &str, yes: bool) -> Result<()> {
         return Ok(());
     }
     crate::presentation::confirm("continue? [y/N] ", operation_name)
+}
+
+fn check_item_elevated(context: &RequirementContext<'_>, item: &CheckItem) -> bool {
+    match item.subject {
+        CheckSubject::Prerequisite => {
+            prerequisite_for_item(context, item).is_ok_and(|value| value.elevated)
+        }
+        CheckSubject::Requirement => {
+            requirement_for_item(context, item).is_ok_and(|value| value.binding.elevated)
+        }
+    }
 }
 
 fn emit_progress(message: impl Into<String>) {

@@ -748,7 +748,7 @@ fn duration_label(duration_ms: Option<u64>) -> String {
 fn render_requirement(requirement: &crate::model::manifest::Requirement) -> String {
     let selected = &requirement.candidates[requirement.selected as usize];
     format!(
-        "{}:{}\n  owner: {}\n  choice: {:?}\n  when: {}\n  provider: {}\n  binding: {}\n  candidates: {}\n  declared at: {}",
+        "{}:{}\n  owner: {}\n  choice: {:?}\n  when: {}\n  provider: {}\n  binding: {}\n  elevated: {}\n  candidates: {}\n  declared at: {}",
         match requirement.kind {
             crate::model::manifest::RequirementKind::Command => "command",
             crate::model::manifest::RequirementKind::Package => "package",
@@ -759,6 +759,7 @@ fn render_requirement(requirement: &crate::model::manifest::Requirement) -> Stri
         requirement.when.id(),
         requirement.binding.provider,
         requirement.binding.identity,
+        requirement.binding.elevated,
         requirement.candidates.len(),
         requirement.declared_at
     )

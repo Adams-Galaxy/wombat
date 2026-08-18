@@ -344,7 +344,6 @@ fn repository_artifact_policy_is_strict_tracked_and_identity_bearing() {
 #[test]
 fn recursive_module_discovery_rejects_symlinks_and_special_entries() {
     use std::os::unix::fs::symlink;
-    use std::os::unix::net::UnixListener;
 
     let linked = tempfile::tempdir().unwrap();
     write(
@@ -370,7 +369,9 @@ fn recursive_module_discovery_rejects_symlinks_and_special_entries() {
         "local w = require('wombat')\nw.use('missing')\n",
     );
     fs::create_dir(special.path().join("modules")).unwrap();
-    let _listener = UnixListener::bind(special.path().join("modules/agent.socket")).unwrap();
+    let fifo = special.path().join("modules/agent.pipe");
+    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success(), "mkfifo failed for {}", fifo.display());
     let error = build(BuildOptions::new(
         special.path(),
         special.path().join("build"),

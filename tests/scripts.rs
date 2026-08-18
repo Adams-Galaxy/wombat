@@ -60,7 +60,7 @@ printf '%s\n' "$params" >> "$cache/marker"
     let (temporary, root) = repository(lua, shell);
     let state = temporary.path().join("state");
     let planned = plan(BuildOptions::new(&root, "build")).unwrap();
-    assert_eq!(planned.plan.format_version, 11);
+    assert_eq!(planned.plan.format_version, 12);
     assert!(
         planned
             .plan
@@ -69,7 +69,7 @@ printf '%s\n' "$params" >> "$cache/marker"
     );
     assert_eq!(planned.plan.scripts.len(), 2);
     let built = build(BuildOptions::new(&root, "build").with_script_state_root(&state)).unwrap();
-    assert_eq!(built.manifest.format_version, 20);
+    assert_eq!(built.manifest.format_version, 21);
     let journal = wombat::ladder::read(&built.build_dir).unwrap();
     assert_eq!(
         journal

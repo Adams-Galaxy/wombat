@@ -23,9 +23,10 @@ it doesn't install packages, run your tasks, or write to your home directory.
 
 `plan materialise` executes that exact plan, and does not run your configuration
 Lua again. It checks and reconciles provider prerequisites before their dependent
-requirements, reconciles requirements at their declared deadlines, runs tasks to
-generate content, renders templates, and assembles a complete tree of the files
-that would be deployed.
+requirements, performs repository-dependent availability checks only after the
+prerequisite passes its post-check, reconciles requirements at their declared
+deadlines, runs tasks to generate content, renders templates, and assembles a
+complete tree of the files that would be deployed.
 
 The output is a *product*: a `manifest.json` describing everything, plus a
 `tree/` holding the bytes. It's staged, verified, and only then published, so an

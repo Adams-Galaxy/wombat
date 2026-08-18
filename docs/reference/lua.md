@@ -401,8 +401,8 @@ w.prefer.command("rg", { accept = { "grep" } })
 
 Root-only — calling it from a module fails. Selects the ordered providers
 permitted to satisfy requirements. Built-ins are `brew` (macOS), `apt`
-(Debian-family Linux), and `git` (any target); custom providers are ordinary
-tracked Lua.
+(Debian-family Linux), `dnf` (mutable Fedora), `flatpak` (Linux), and `git`
+(any target); custom providers are ordinary tracked Lua.
 
 A provider that doesn't suit the target refuses it, so listing several and
 letting the target decide is normal. Requirements declared before this call
@@ -463,6 +463,62 @@ source changes, when a source-bound package is missing, or when
 installing packages. The complete source, preparation, package, path, and
 elevation set is shown before mutation.
 
+### `dnf`
+
+The DNF provider supports mutable Fedora systems. It resolves ordinary package
+names, the built-in command aliases `rg -> ripgrep` and `nvim -> neovim`, and
+optional aliases configured under `with.aliases`.
+
+```lua
+w.providers({ "dnf" })
+w.need.command("rg")
+w.need.package("ffmpeg", {
+    provider = "dnf",
+    with = { rpmfusion = "free" },
+})
+```
+
+Set `with.rpmfusion` to `free` or `nonfree` only for packages that need RPM
+Fusion. Wombat freezes the official Fedora-major-specific release-package URL
+as a checked prerequisite; nonfree also brings in free. It checks availability
+with DNF after the repository has been reconciled, then installs with explicit
+authorization. Arbitrary repositories, COPR, groups, and package URLs are not
+accepted by this provider.
+
+DNF mutation is deliberately unsupported on Fedora Atomic systems. Wombat
+detects `/run/ostree-booted` and fails before invoking DNF; use Flatpak where it
+fits, or manage the host image outside Wombat.
+
+### `flatpak`
+
+Flatpak is an explicit package provider on Linux. It supports the built-in
+Flathub remote, `app` or `runtime` refs, `system` (default) or `user` scope, and
+an optional branch. It does not resolve command requirements.
+
+```lua
+w.providers({ "dnf", "flatpak" })
+
+w.need.package("flatpak", {
+    provider = "dnf",
+    publishes = { commands = { "flatpak" } },
+    when = w.rungs.materialise.before,
+})
+
+w.need.package("org.gnome.Calculator", {
+    provider = "flatpak",
+    when = w.rungs.deploy.before,
+})
+```
+
+Schedule and publish the Flatpak executable through the native provider before
+any Flatpak requirement. That publication lets full-workflow authorization
+defer executable-dependent checks until the earlier rung has completed; a
+same-rung or later declaration still fails before mutation. Wombat checks and,
+when authorized, configures one Flathub
+prerequisite per scope before querying or installing the exact ref. A conflicting
+remote URL or disabled GPG verification is refused rather than silently
+repointed. Removing a requirement never removes a remote or installed ref.
+
 ### `git`
 
 For a package that lives in a repository rather than a package manager — a
@@ -489,42 +545,121 @@ since it isn't `git`'s to overwrite. Checking is local — a pinned `ref` is
 compared against what the last `reconcile` fetched, not against the network —
 so a satisfied `git` package never makes a connection.
 
-### Custom provider prerequisites
+### Custom providers
 
-A custom provider's `plan(bindings, target, config)` may return both
-`provider.operation({...})` values for transient shared preparation and
-`provider.prerequisite({...})` values for independently checkable managed
-state. A binding references prerequisite identities explicitly:
+Put a provider named `company` at `providers/company.lua`. Select it by name in
+root configuration; its `with` table becomes provider-wide `config` for
+resolution and planning. Helper modules live below `providers/company/`, so
+`require("naming")` resolves only packaged files such as
+`providers/company/naming.lua` from the exact materialised product.
+
+```lua
+w.providers({
+    { name = "company", with = { channel = "stable" } },
+})
+
+w.need.package("editor", {
+    provider = "company",
+    publishes = { commands = { "editor" } },
+})
+```
+
+Every provider defines `resolve`, `check`, and `reconcile`. `plan` is optional;
+it may return `provider.operation({...})` values for transient shared work and
+`provider.prerequisite({...})` values for independently checked managed state.
+When prerequisites are returned, `check_prerequisite` and
+`reconcile_prerequisite` are required too. This is a complete provider shape:
 
 ```lua
 local provider = require("wombat.provider")
+local naming = require("naming")
 
 return provider.define({
-    resolve = function(candidate)
+    resolve = function(candidate, target, config)
+        if candidate.kind ~= "package" or candidate.provider ~= "company" then
+            return provider.unsupported("company resolves explicit packages only")
+        end
+        local package = naming.package(candidate.name, config.channel)
         return provider.binding({
-            identity = candidate.name,
+            identity = "company:" .. package,
+            package = package,
+            publications = candidate.publications,
+            elevated = true,
             prerequisites = { "catalog" },
-            data = {},
+            data = { package = package, platform = target.platform.os.name },
         })
     end,
-    plan = function()
+
+    plan = function(bindings, target, config)
         return {
             provider.prerequisite({
                 identity = "catalog",
                 description = "Configure the package catalog",
                 elevated = true,
-                data = {},
+                data = { channel = config.channel },
+            }),
+            provider.operation({
+                identity = "refresh-catalog",
+                description = "Refresh the package catalog",
+                elevated = true,
+                data = { platform = target.platform.os.name, count = #bindings },
             }),
         }
     end,
-    check_prerequisite = function(ctx, prerequisite)
-        -- Return provider.satisfied/missing/outdated/unavailable(...).
+
+    check = function(ctx, binding)
+        if ctx:which(binding.package) then
+            return provider.satisfied("published command is available")
+        end
+        return provider.missing("published command is absent")
     end,
+
+    reconcile = function(ctx, binding, observation)
+        local result = ctx:mutate({
+            program = "/usr/bin/company-pkg",
+            args = { "install", binding.package },
+            elevated = true,
+        })
+        if not result.success then error("package installation failed") end
+    end,
+
+    check_prerequisite = function(ctx, prerequisite)
+        local result = ctx:observe({
+            program = "/usr/bin/company-pkg",
+            args = { "catalog", "status", prerequisite.data.channel },
+        })
+        if result.success then return provider.satisfied("catalog is current") end
+        return provider.missing("catalog is not configured")
+    end,
+
     reconcile_prerequisite = function(ctx, prerequisite, observation)
-        -- `ctx:mutate(...)` is available; elevation is limited by the declaration.
+        local result = ctx:mutate({
+            program = "/usr/bin/company-pkg",
+            args = { "catalog", "add", prerequisite.data.channel },
+            elevated = true,
+        })
+        if not result.success then error("catalog configuration failed") end
+    end,
+
+    prepare = function(ctx, operation)
+        local result = ctx:mutate({
+            program = "/usr/bin/company-pkg",
+            args = { "catalog", "refresh" },
+            elevated = true,
+        })
+        if not result.success then error("catalog refresh failed") end
     end,
 })
 ```
+
+Runtime callbacks receive a constrained context. `ctx:which(command)` resolves
+an executable; `ctx:observe({ program, args?, env? })` captures bounded
+`success`, `code`, `stdout`, and `stderr`; `ctx:json_decode(text)` decodes JSON;
+and `ctx:version_at_least(observed, minimum)` compares versions.
+`ctx:mutate({...})` exists only in reconciliation and preparation callbacks and
+returns `success` and `code`. Observations can never elevate. Mutations may set
+`elevated = true` only when the frozen binding, prerequisite, or operation
+declared elevation before authorization.
 
 Prerequisites must be referenced by at least one binding, belong to the same
 provider, and have unique identities. Their persisted deadline is the earliest
@@ -533,6 +668,13 @@ authorization, then reconciles prerequisites in frozen provider-plan order,
 runs preparation, and finally reconciles packages, post-checking each managed
 item. A pending prerequisite activates its provider even when every dependent
 package is already installed.
+
+Provider entrypoints and helper files are tracked, hashed, copied into the
+product, and loaded from that exact payload. They do not have `io`, `os`,
+`package`, `debug`, `dofile`, `load`, or `loadfile`; process effects must cross
+the runtime context above. Status callbacks return
+`provider.satisfied/missing/outdated/unavailable(detail)`. `resolve` may return
+`provider.unsupported(reason)` so ordered provider selection can continue.
 
 ## Tasks and scripts
 

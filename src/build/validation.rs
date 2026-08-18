@@ -765,10 +765,11 @@ pub(crate) fn validate_provider_scope(
         )?;
         match &provider.origin {
             crate::model::manifest::ProviderOrigin::Builtin { contract_version } => {
-                let supported = matches!(
-                    (provider.name.as_str(), *contract_version),
-                    ("brew" | "git", 1) | ("apt", 2)
-                );
+                let supported =
+                    crate::requirements::providers::builtin::BuiltinProvider::from_name(
+                        &provider.name,
+                    )
+                    .is_some_and(|builtin| builtin.contract_version() == *contract_version);
                 if !supported {
                     return Err(WombatError::configuration(format!(
                         "unsupported built-in provider contract `{}-v{contract_version}`",

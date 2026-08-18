@@ -35,13 +35,28 @@ w.ladder("example", {
     w.rungs.deploy.after,
 })
 
+local fedora = w.linux and w.os.distribution ~= nil and w.os.distribution.id == "fedora"
+
 if w.macos then
     w.providers({ "brew" })
+elseif fedora then
+    w.providers({ "dnf", "flatpak" })
 else
     w.providers({ { name = "apt", with = { update = true } } })
 end
 
 w.need.command("git")
+if fedora then
+    w.need.package("flatpak", {
+        provider = "dnf",
+        publishes = { commands = { "flatpak" } },
+        when = w.rungs.materialise.before,
+    })
+    w.need.package("org.gnome.Calculator", {
+        provider = "flatpak",
+        when = w.rungs.deploy.before,
+    })
+end
 local search = w.prefer.command("rg", {
     accept = { { name = "grep" } },
 })

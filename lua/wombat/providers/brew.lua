@@ -39,6 +39,7 @@ return provider.define({
         end
         return provider.binding({
             identity = package_kind .. ":" .. package,
+            elevated = false,
             package = package,
             publications = { commands = commands },
             data = { kind = package_kind, name = package },

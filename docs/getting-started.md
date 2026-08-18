@@ -21,6 +21,11 @@ Or, from a clone, `cargo build --release` and use `./target/release/wombat`.
 There's also an installer that can fetch Wombat and run a setup in one go, which
 is covered under [fresh machines](#a-fresh-machine) below.
 
+On Fedora the installer bootstraps its build prerequisites with DNF. Wombat's
+DNF provider can then manage packages on mutable Fedora installations; Flatpak
+and Flathub support is also available for Linux applications. Fedora Atomic
+hosts may use Flatpak, but Wombat refuses direct DNF mutation there.
+
 ## Create a repository
 
 Wombat never guesses which repository you mean from your current directory —

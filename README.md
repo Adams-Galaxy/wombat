@@ -119,7 +119,10 @@ between releases. When a format moves, Wombat tells you to rebuild rather than
 migrating quietly.
 
 Local bring-up supports Homebrew, Apt (including checked, managed third-party
-Deb822 sources), and Git packages behind one frozen provider plan.
+Deb822 sources), DNF with explicit RPM Fusion prerequisites, Flatpak with a
+checked Flathub remote, and Git packages behind one frozen provider plan.
+DNF bring-up targets mutable Fedora systems; Fedora Atomic variants are
+detected and refused before package mutation, while Flatpak remains usable.
 
 Not implemented, deliberately: whole-deployment rollback, remote deployment,
 encrypted secrets, symlink artifacts, and Windows.

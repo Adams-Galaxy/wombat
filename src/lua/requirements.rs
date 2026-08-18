@@ -1,6 +1,7 @@
 //! Provider loading, requirement resolution, and frozen provider plans.
 
 use super::*;
+use crate::requirements::providers::builtin::BuiltinProvider;
 
 pub(super) fn configure_providers(
     state: &Rc<RefCell<RuntimeState>>,
@@ -80,7 +81,7 @@ pub(super) fn configure_providers(
                 "provider `{name}` is configured more than once"
             )));
         }
-        let origin = if matches!(name.as_str(), "brew" | "apt" | "git") {
+        let origin = if let Some(builtin) = BuiltinProvider::from_name(&name) {
             let conflicting = root.join("providers").join(format!("{name}.lua"));
             if conflicting.exists() {
                 return Err(WombatError::configuration(format!(
@@ -88,7 +89,7 @@ pub(super) fn configure_providers(
                 )));
             }
             ProviderOrigin::Builtin {
-                contract_version: if name == "apt" { 2 } else { 1 },
+                contract_version: builtin.contract_version(),
             }
         } else {
             let entrypoint = root.join("providers").join(format!("{name}.lua"));
@@ -469,7 +470,9 @@ pub(super) fn resolve_provider_requirement(
     }
     let api = provider_api(&lua)?;
     let source = match &provider.origin {
-        ProviderOrigin::Builtin { .. } => builtin_provider_source(&provider.name)?.to_string(),
+        ProviderOrigin::Builtin { .. } => {
+            builtin_provider(&provider.name)?.lua_source().to_string()
+        }
         ProviderOrigin::Custom { entrypoint, .. } => {
             install_provider_require(&lua, state.clone(), &provider.name, api.clone())?;
             let path = state.borrow().root.join("providers").join(entrypoint);
@@ -512,19 +515,9 @@ pub(super) fn resolve_provider_requirement(
     parse_provider_resolution(&provider.name, frozen)
 }
 
-const BREW_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/brew.lua");
-const APT_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/apt.lua");
-const GIT_PROVIDER_LUA: &str = include_str!("../../lua/wombat/providers/git.lua");
-
-pub(super) fn builtin_provider_source(name: &str) -> Result<&'static str> {
-    match name {
-        "brew" => Ok(BREW_PROVIDER_LUA),
-        "apt" => Ok(APT_PROVIDER_LUA),
-        "git" => Ok(GIT_PROVIDER_LUA),
-        _ => Err(WombatError::configuration(format!(
-            "unknown built-in provider `{name}`"
-        ))),
-    }
+fn builtin_provider(name: &str) -> Result<BuiltinProvider> {
+    BuiltinProvider::from_name(name)
+        .ok_or_else(|| WombatError::configuration(format!("unknown built-in provider `{name}`")))
 }
 
 pub(super) fn provider_api(lua: &Lua) -> Result<Table> {
@@ -623,7 +616,9 @@ pub(super) fn plan_provider_actions(
         }
         let api = provider_api(&lua)?;
         let source = match &provider.origin {
-            ProviderOrigin::Builtin { .. } => builtin_provider_source(&provider.name)?.to_string(),
+            ProviderOrigin::Builtin { .. } => {
+                builtin_provider(&provider.name)?.lua_source().to_string()
+            }
             ProviderOrigin::Custom { entrypoint, .. } => {
                 install_provider_require(&lua, Rc::clone(state), &provider.name, api.clone())?;
                 let path = state.borrow().root.join("providers").join(entrypoint);
@@ -1022,6 +1017,15 @@ pub(super) fn parse_provider_resolution(
         )));
     }
     let identity = take_string(&mut values, "identity", "provider binding")?;
+    let elevated = match values.remove("elevated") {
+        None => false,
+        Some(FrozenValue::Boolean(value)) => value,
+        Some(_) => {
+            return Err(WombatError::configuration(
+                "provider binding `elevated` must be boolean",
+            ));
+        }
+    };
     let package = take_optional_string(&mut values, "package", "provider binding")?;
     let publications = values
         .remove("publications")
@@ -1064,6 +1068,7 @@ pub(super) fn parse_provider_resolution(
     Ok(Ok(ProviderBinding {
         provider: provider.to_string(),
         identity,
+        elevated,
         package,
         publications,
         prerequisites,

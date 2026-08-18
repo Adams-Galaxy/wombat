@@ -181,6 +181,7 @@ return provider.define({
         end
         return provider.binding({
             identity = "package:" .. package,
+            elevated = true,
             package = package,
             publications = { commands = commands },
             prerequisites = candidate.kind == "package" and candidate.with.source ~= nil

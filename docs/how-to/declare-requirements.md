@@ -46,8 +46,9 @@ Only root configuration selects providers, in priority order:
 w.providers({ "brew" })
 ```
 
-Wombat ships Homebrew for macOS, Apt for Debian-family Linux, and Git for
-anything installed by cloning it — a tmux/vim plugin, a version manager. A
+Wombat ships Homebrew for macOS, Apt for Debian-family Linux, DNF for mutable
+Fedora, Flatpak for Linux applications and runtimes, and Git for anything
+installed by cloning it — a tmux/vim plugin, a version manager. A
 provider that doesn't suit the target refuses it — Homebrew won't resolve for a
 Linux target — so selecting several and letting the target decide is normal.
 Custom providers are ordinary tracked Lua.
@@ -166,6 +167,58 @@ Use `replace = true` only when you intend Wombat to adopt its fixed path. An
 unpinned key must use HTTPS; supply `key.sha256` to permit HTTP and to pin the
 downloaded bytes. Removing the source from configuration does not prune files
 from `/etc`.
+
+## Use DNF and RPM Fusion on Fedora
+
+Ordinary Fedora packages need only the DNF provider. Packages from RPM Fusion
+name that prerequisite explicitly:
+
+```lua
+w.providers({ "dnf" })
+
+w.need.command("rg") -- resolves to Fedora's `ripgrep` package
+w.need.package("ffmpeg", {
+    provider = "dnf",
+    with = { rpmfusion = "free" },
+})
+```
+
+Wombat derives the official RPM Fusion release package from the observed Fedora
+major version, checks it independently, and only queries the dependent package
+after the repository is ready. Use `rpmfusion = "nonfree"` for nonfree packages;
+that prerequisite includes the free repository as RPM Fusion recommends.
+
+This path is for mutable Fedora installations. On an Atomic variant, Wombat
+refuses DNF mutation before it starts. Flatpak remains available independently.
+
+## Install Flatpaks from Flathub
+
+Make the executable available at an earlier rung, then schedule Flatpak refs:
+
+```lua
+w.providers({ "dnf", "flatpak" })
+
+w.need.package("flatpak", {
+    provider = "dnf",
+    publishes = { commands = { "flatpak" } },
+    when = w.rungs.materialise.before,
+})
+
+w.need.package("com.spotify.Client", {
+    provider = "flatpak",
+    when = w.rungs.deploy.before,
+})
+```
+
+The explicit publication is what lets Wombat authorize the whole workflow while
+deferring Flatpak's executable-dependent checks until that earlier rung has
+completed. A same-rung or later executable declaration is rejected before any
+mutation. The default is a system-scoped Flathub application. Use
+`with = { scope = "user" }` for a user install, or set `kind = "runtime"` and
+an explicit `branch` for a runtime. Wombat verifies Flathub's URL, enabled
+state, GPG verification, and filter state before querying the ref. It will add
+or safely repair the official remote, but never silently repoint a conflicting
+remote and never removes remotes or refs when declarations disappear.
 
 ## Building for another machine
 

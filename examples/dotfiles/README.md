@@ -1,7 +1,8 @@
 # Wombat Example Dotfiles
 
 This is a small but complete Wombat source repository. It selects Homebrew on
-macOS and Apt on Debian-family Linux, declares portable command products, and
+macOS, Apt on Debian-family Linux, and DNF plus Flatpak on Fedora. It declares
+portable command products and
 builds a harmless shell, Git, prompt, editor, and local-tool configuration. It
 also demonstrates binary-safe Lua generation, a cached Python generator with a
 companion module, an uncached outputless validation task, a custom execution
@@ -19,6 +20,12 @@ For a managed third-party Apt repository, declare a named source and bind only
 the packages that need it. The complete Yazi example is in
 [`declare requirements`](../../docs/how-to/declare-requirements.md#add-a-third-party-apt-source);
 an unreferenced source remains inert.
+
+On Fedora the example deliberately schedules and publishes the `flatpak` DNF
+package during `materialise.before`, then the `org.gnome.Calculator` Flatpak
+during `deploy.before`. That explicit product edge demonstrates the rule that a
+provider executable needed by later bring-up must itself be available at an
+earlier rung.
 
 Module files are deliberately flat and organized as code; their physical
 location has no relationship to deployed paths. Each module establishes any
