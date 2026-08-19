@@ -241,7 +241,7 @@ fn execute_inner(
     }
 
     for item in &plan.items {
-        let current = inspect_actual(&plan.target_root, &item.path)?;
+        let current = inspect_actual(&item.anchor, &item.path)?;
         if current != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed after deployment planning; no files were modified",
@@ -270,7 +270,7 @@ fn execute_inner(
             skipped.push(item.target.clone());
             continue;
         }
-        let current = inspect_actual(&plan.target_root, &item.path)?;
+        let current = inspect_actual(&item.anchor, &item.path)?;
         if current != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed during deployment",
@@ -284,7 +284,7 @@ fn execute_inner(
             ReconciliationAction::Create => {
                 write_desired(
                     &opened,
-                    &plan.target_root,
+                    &item.anchor,
                     desired_artifact(item)?,
                     &item.path,
                     false,
@@ -299,7 +299,7 @@ fn execute_inner(
             ReconciliationAction::Update => {
                 write_desired(
                     &opened,
-                    &plan.target_root,
+                    &item.anchor,
                     desired_artifact(item)?,
                     &item.path,
                     true,
@@ -312,7 +312,7 @@ fn execute_inner(
             }
             ReconciliationAction::Conflict if overwrite => {
                 if let Some(desired) = &item.desired {
-                    write_desired(&opened, &plan.target_root, desired, &item.path, true)?;
+                    write_desired(&opened, &item.anchor, desired, &item.path, true)?;
                     if matches!(item.actual, ActualArtifact::Absent) {
                         created += 1;
                     } else {
@@ -461,7 +461,7 @@ fn write_desired(
     replace: bool,
 ) -> Result<()> {
     let parent = target.parent().expect("artifact targets have a parent");
-    ensure_safe_parents(parent)?;
+    ensure_safe_parents(target_root, parent)?;
     let source = product_path(opened, artifact);
     let mut input = File::open(&source).map_err(|error| WombatError::io(&source, error))?;
     let mut temporary =
@@ -540,15 +540,30 @@ fn remove_target(target: &Path) -> Result<()> {
     sync_directory(target.parent().expect("target files have parents"))
 }
 
-fn ensure_safe_parents(parent: &Path) -> Result<()> {
+fn ensure_safe_parents(anchor: &Path, parent: &Path) -> Result<()> {
+    if !parent.starts_with(anchor) {
+        return Err(WombatError::invariant(format!(
+            "target parent `{}` escaped trusted deployment anchor `{}`",
+            parent.display(),
+            anchor.display()
+        )));
+    }
     let mut missing = Vec::new();
     let mut current = parent;
     loop {
         match fs::symlink_metadata(current) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                if current != anchor
+                    && (metadata.file_type().is_symlink() || !metadata.file_type().is_dir())
+                {
                     return Err(WombatError::configuration(format!(
                         "target parent `{}` must be a non-symlink directory",
+                        current.display()
+                    )));
+                }
+                if current == anchor && !metadata.file_type().is_dir() {
+                    return Err(WombatError::configuration(format!(
+                        "deployment anchor `{}` must be a directory",
                         current.display()
                     )));
                 }
@@ -559,6 +574,13 @@ fn ensure_safe_parents(parent: &Path) -> Result<()> {
                 current = current.parent().ok_or_else(|| {
                     WombatError::configuration("cannot create target parent above filesystem root")
                 })?;
+                if !current.starts_with(anchor) {
+                    return Err(WombatError::invariant(format!(
+                        "target parent `{}` escaped trusted deployment anchor `{}`",
+                        parent.display(),
+                        anchor.display()
+                    )));
+                }
             }
             Err(error) => return Err(WombatError::io(current, error)),
         }
@@ -581,7 +603,10 @@ fn ensure_safe_parents(parent: &Path) -> Result<()> {
 }
 
 pub(super) fn product_path(opened: &OpenedBuild, artifact: &Artifact) -> PathBuf {
-    opened.product_dir.join("tree").join(&artifact.target.path)
+    opened
+        .product_dir
+        .join("tree")
+        .join(artifact.target.payload_path())
 }
 
 fn set_mode(file: &File, path: &Path, artifact: &Artifact) -> Result<()> {

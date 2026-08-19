@@ -165,7 +165,7 @@ pub(super) fn register_artifact(
         ));
     }
     let explicit_root = explicit_target
-        .map(parse_explicit_target_root)
+        .map(crate::model::path::parse_install_target_root)
         .transpose()?;
     let selection_root = if selector.glob {
         selector.static_root.trim_end_matches('/').to_string()
@@ -265,6 +265,7 @@ pub(super) fn register_artifact(
         } else if let Some(root) = &explicit_root {
             crate::model::manifest::TargetPath {
                 path: target_path,
+                scope: root.scope,
                 origin: crate::model::manifest::TargetOrigin::DirectoryExplicit {
                     declared: root.path.clone(),
                     relative: projected_relative,

@@ -96,7 +96,10 @@ w.module.from("@staging", { to = ".config" })  -- source only; target is .config
 Declares one or more artifacts. This is the call you'll use most.
 
 - `source` — an exact name, a directory, a glob, or a `w.hidden()` value.
-- `options.to` — explicit target path, overriding inference.
+- `options.to` — explicit target path, overriding inference. For one direct
+  file it is the exact final filename, so it can rename the file. For a
+  directory or glob it is a destination root and each selected leaf keeps its
+  relative path.
 - `options.with` — template context. Supplying it makes the source a template.
 - `options.exclude` — a glob string or array of globs to skip.
 - `options.allow_empty` — boolean, default `false`. Permits a selector that
@@ -117,7 +120,15 @@ w.install("nvim")
 w.install("*.toml", { exclude = { "draft.toml" } })
 w.install("themes/**", { allow_empty = true })
 w.install("starship.toml", { with = { colors = theme.colors } })
+w.install("starship.toml", { to = ".config/starship-nightly.toml" })
 ```
+
+Relative destinations remain relative to the deployment root. A POSIX absolute
+destination is an explicit external target: it is not rebased by
+`--target-root`, but it is still owned, diffed, and three-way reconciled by the
+deployment selected through that root. External destinations reject `~`, Windows
+`%VARIABLE%` syntax, backslashes, and traversal; resolve a platform path in Lua
+first rather than asking Wombat to expand shell syntax.
 
 ### `w.install.file(source, options?)`
 
@@ -325,6 +336,19 @@ p.cache       -- $XDG_CACHE_HOME or $HOME/.cache
 syntax. The repository path is independent of target selection. Other paths
 require an absolute home or XDG value and obey the common-local compatibility
 rule.
+
+Inside WSL, `p.windows.home` resolves the actual Windows user profile to its
+Linux-visible absolute path through Windows interop and `wslpath`:
+
+```lua
+if w.wsl then
+    w.install(".wezterm.lua", { to = p.windows.home .. "/.wezterm.lua" })
+end
+```
+
+It is unavailable outside WSL and Wombat deliberately does not expand Windows
+shell syntax such as `%USERPROFILE%`. That keeps Windows-owned deployment an
+explicit local opt-in instead of claiming general Windows support.
 
 ## Advanced host and target context
 

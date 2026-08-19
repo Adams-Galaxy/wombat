@@ -311,7 +311,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         pair[0]
             .target
             .key()
-            .cmp(pair[1].target.key())
+            .cmp(&pair[1].target.key())
             .then_with(|| pair[0].owner.cmp(&pair[1].owner))
             .then_with(|| pair[0].source.cmp(&pair[1].source))
             .then_with(|| pair[0].declared_at.cmp(&pair[1].declared_at))
@@ -322,13 +322,28 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         ));
     }
     for artifact in &manifest.artifacts {
+        if manifest.execution_mode == crate::model::manifest::ExecutionMode::CompileOnly
+            && artifact.target.scope == crate::model::manifest::TargetScope::Absolute
+        {
+            return Err(WombatError::configuration(format!(
+                "compile-only products cannot contain external target `{}`; deploy external paths only on their local machine",
+                artifact.target.path
+            )));
+        }
         validate_relative_path(&artifact.source, "manifest artifact source")?;
         validate_source_trace(
             &artifact.declared_at,
             &source_paths,
             "manifest artifact declaration",
         )?;
-        validate_relative_path(&artifact.target.path, "manifest target path")?;
+        match artifact.target.scope {
+            crate::model::manifest::TargetScope::DeploymentRoot => {
+                validate_relative_path(&artifact.target.path, "manifest target path")?;
+            }
+            crate::model::manifest::TargetScope::Absolute => {
+                crate::model::path::validate_absolute_target(&artifact.target.path)?;
+            }
+        }
         if let Some(projection) = &artifact.source_projection {
             if projection.physical != artifact.source {
                 return Err(WombatError::configuration(
@@ -496,7 +511,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         match &artifact.target.origin {
             TargetOrigin::Explicit { declared } => {
                 let parsed = parse_explicit_target(declared)?;
-                if parsed.path != artifact.target.path {
+                if parsed.path != artifact.target.path || parsed.scope != artifact.target.scope {
                     return Err(WombatError::configuration(format!(
                         "manifest explicit target `{declared}` does not match its resolved target"
                     )));
@@ -510,9 +525,9 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 }
             }
             TargetOrigin::DirectoryExplicit { declared, relative } => {
-                let root = parse_explicit_target_root(declared)?;
+                let root = crate::model::path::parse_install_target_root(declared)?;
                 let parsed = expand_target_root(&root, relative)?;
-                if parsed.path != artifact.target.path {
+                if parsed.path != artifact.target.path || parsed.scope != artifact.target.scope {
                     return Err(WombatError::configuration(format!(
                         "manifest directory target `{declared}` plus `{relative}` does not match its resolved target"
                     )));
@@ -553,7 +568,7 @@ pub(crate) fn validate_artifact_metadata(
             parse_explicit_target_root(target)?;
         }
         if let Some(target) = &selection.explicit_target {
-            parse_explicit_target_root(target)?;
+            crate::model::path::parse_install_target_root(target)?;
         }
         let compiled =
             crate::model::selection::compile_selector(&selection.declared, selection.hidden)?;

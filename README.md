@@ -36,6 +36,19 @@ w.module.from(".config")
 w.install("starship.toml", { with = { colors = theme.colors } })
 ```
 
+Direct installs can rename a file, and an explicit POSIX absolute destination
+remains fully guarded by Wombat's normal deployment state. This is useful for
+the narrow WSL case where a Windows application owns its configuration:
+
+```lua
+if w.wsl then
+    w.install(".wezterm.lua", { to = p.windows.home .. "/.wezterm.lua" })
+end
+```
+
+Wombat does not expand `%USERPROFILE%`, `~`, or Windows path syntax; use the
+resolved `p.windows.home` value when that particular integration is intended.
+
 ```sh
 wombat plan construct   # freeze what will happen
 wombat plan inspect     # read it

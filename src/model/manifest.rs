@@ -27,14 +27,14 @@ use crate::model::frozen::FrozenValue;
 
 use crate::model::source::{DirectoryLeaf, SourceFingerprint};
 
-pub const MANIFEST_FORMAT_VERSION: u32 = 21;
-pub const BUILD_PLAN_FORMAT_VERSION: u32 = 12;
+pub const MANIFEST_FORMAT_VERSION: u32 = 22;
+pub const BUILD_PLAN_FORMAT_VERSION: u32 = 13;
 
 /// Bump whenever construction can produce different output for unchanged
 /// configuration. Products built under a different value are rejected and
 /// identities computed under it differ; the release version deliberately does
 /// not, so publishing Wombat does not invalidate every product.
-pub const CONSTRUCTION_VERSION: u32 = 3;
+pub const CONSTRUCTION_VERSION: u32 = 4;
 
 pub const MAX_SOURCE_TRACE_FRAMES: usize = 8;
 
@@ -917,6 +917,7 @@ pub(crate) struct EvaluatedDirectory {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EvaluatedTargetRoot {
     pub path: String,
+    pub scope: TargetScope,
     pub origin: EvaluatedTargetOrigin,
 }
 
@@ -987,12 +988,45 @@ pub enum SourceAttribute {
 #[serde(deny_unknown_fields)]
 pub struct TargetPath {
     pub path: String,
+    pub scope: TargetScope,
     pub origin: TargetOrigin,
 }
 
 impl TargetPath {
-    pub(crate) fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> String {
+        format!("{}:{}", self.scope.key_prefix(), self.path)
+    }
+
+    pub(crate) fn display(&self) -> &str {
         &self.path
+    }
+
+    /// Keeps absolute destinations out of the product's ordinary tree. A raw
+    /// absolute path here would let a malformed product escape its workspace.
+    pub(crate) fn payload_path(&self) -> String {
+        match self.scope {
+            TargetScope::DeploymentRoot => self.path.clone(),
+            TargetScope::Absolute => format!(
+                "external/{}",
+                crate::storage::digest::hex_sha256(self.key().as_bytes())
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetScope {
+    DeploymentRoot,
+    Absolute,
+}
+
+impl TargetScope {
+    pub(crate) const fn key_prefix(self) -> &'static str {
+        match self {
+            Self::DeploymentRoot => "root",
+            Self::Absolute => "absolute",
+        }
     }
 }
 

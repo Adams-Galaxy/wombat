@@ -165,6 +165,9 @@ pub(super) fn render_comparison(left: &Manifest, right: &Manifest) -> String {
     compare_map(
         &mut output,
         "Artifacts",
+        // Target scopes have disjoint textual grammars, so their displayed
+        // paths remain unambiguous here. Keeping the internal scoped key out
+        // of human comparison preserves the familiar artifact vocabulary.
         keyed(&left.artifacts, |artifact| artifact.target.path.clone()),
         keyed(&right.artifacts, |artifact| artifact.target.path.clone()),
     );

@@ -251,7 +251,7 @@ pub(super) fn build_manifest(
     artifacts.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(right.target.key())
+            .cmp(&right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_at.cmp(&right.declared_at))
@@ -458,7 +458,7 @@ pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Re
     ordered.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(right.target.key())
+            .cmp(&right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
     });
@@ -484,7 +484,10 @@ pub(crate) fn validate_artifact_conflicts(artifacts: &[EvaluatedArtifact]) -> Re
         let descendants = ordered
             .iter()
             .skip(index + 1)
-            .filter(|descendant| is_path_ancestor(&artifact.target.path, &descendant.target.path))
+            .filter(|descendant| {
+                descendant.target.scope == artifact.target.scope
+                    && is_path_ancestor(&artifact.target.path, &descendant.target.path)
+            })
             .copied()
             .collect::<Vec<_>>();
         if !descendants.is_empty() {

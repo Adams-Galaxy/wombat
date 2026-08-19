@@ -407,7 +407,44 @@ pub(super) fn create_paths_proxy(
         "__index",
         lua.create_function(move |lua, (_table, key): (Table, String)| {
             let location = caller_location(lua, &index_state);
-            path_value(&index_state, &key, &location)
+            if key == "windows" {
+                windows_paths_available(&index_state, &location)
+                    .and_then(|()| {
+                        create_windows_paths_proxy(lua, Rc::clone(&index_state))
+                            .map_err(WombatError::from)
+                    })
+                    .map(Value::Table)
+                    .map_err(mlua::Error::external)
+            } else {
+                path_value(&index_state, &key, &location)
+                    .and_then(|value| value.to_lua(lua).map_err(WombatError::from))
+                    .map_err(mlua::Error::external)
+            }
+        })?,
+    )?;
+    metatable.set(
+        "__newindex",
+        lua.create_function(|_, (_table, key, _value): (Table, Value, Value)| {
+            Err::<(), _>(mlua::Error::external(WombatError::configuration(format!(
+                "w.paths is immutable; cannot assign `{key:?}`"
+            ))))
+        })?,
+    )?;
+    metatable.set("__metatable", false)?;
+    proxy.set_metatable(Some(metatable))?;
+    Ok(proxy)
+}
+
+fn create_windows_paths_proxy(lua: &Lua, state: Rc<RefCell<RuntimeState>>) -> mlua::Result<Table> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    mark_native_proxy(&metatable, "windows_paths", None)?;
+    let index_state = Rc::clone(&state);
+    metatable.set(
+        "__index",
+        lua.create_function(move |lua, (_table, key): (Table, String)| {
+            let location = caller_location(lua, &index_state);
+            windows_path_value(&index_state, &key, &location)
                 .and_then(|value| value.to_lua(lua).map_err(WombatError::from))
                 .map_err(mlua::Error::external)
         })?,
@@ -416,7 +453,7 @@ pub(super) fn create_paths_proxy(
         "__newindex",
         lua.create_function(|_, (_table, key, _value): (Table, Value, Value)| {
             Err::<(), _>(mlua::Error::external(WombatError::configuration(format!(
-                "w.paths is immutable; cannot assign `{key:?}`"
+                "w.paths.windows is immutable; cannot assign `{key:?}`"
             ))))
         })?,
     )?;
@@ -467,6 +504,114 @@ fn path_value(
     let value = FrozenValue::String(path.to_string_lossy().into_owned());
     record_host_observation(&mut state, observation, value.clone());
     Ok(value)
+}
+
+fn windows_paths_available(state: &Rc<RefCell<RuntimeState>>, location: &Location) -> Result<()> {
+    let mut state = state.borrow_mut();
+    require_local_context(&mut state, location)?;
+    if !state.host.wsl {
+        return Err(WombatError::configuration(
+            "w.paths.windows is available only inside WSL",
+        ));
+    }
+    record_host_observation(&mut state, "wsl", FrozenValue::Boolean(true));
+    Ok(())
+}
+
+fn windows_path_value(
+    state: &Rc<RefCell<RuntimeState>>,
+    key: &str,
+    location: &Location,
+) -> Result<FrozenValue> {
+    if key != "home" {
+        return Err(WombatError::configuration(format!(
+            "unknown w.paths.windows key `{key}`"
+        )));
+    }
+    windows_paths_available(state, location)?;
+    let path = match state.borrow().host.paths.windows_home.clone() {
+        Some(path) => path,
+        None => {
+            let path = observe_windows_home()?;
+            state.borrow_mut().host.paths.windows_home = Some(path.clone());
+            path
+        }
+    };
+    let mut state = state.borrow_mut();
+    if !path.is_absolute() {
+        return Err(WombatError::configuration(format!(
+            "w.paths.windows.home must resolve to an absolute WSL path, got `{}`",
+            path.display()
+        )));
+    }
+    let value = FrozenValue::String(path.to_string_lossy().into_owned());
+    record_host_observation(&mut state, "paths.windows.home", value.clone());
+    Ok(value)
+}
+
+fn observe_windows_home() -> Result<std::path::PathBuf> {
+    use std::process::Command;
+    use std::time::Duration;
+
+    let mut profile_command = Command::new("cmd.exe");
+    profile_command.args(["/d", "/s", "/c", "echo %USERPROFILE%"]);
+    let profile = crate::execution::process::run(
+        &mut profile_command,
+        "Windows profile lookup",
+        Some(Duration::from_secs(5)),
+        16 * 1024,
+        None,
+        crate::execution::process::Forwarding::Retained,
+    )
+    .map_err(|error| {
+        WombatError::configuration(format!(
+            "cannot resolve Windows home: cmd.exe is unavailable through WSL interop: {error}"
+        ))
+    })?;
+    if !profile.success || profile.stdout.truncated {
+        return Err(WombatError::configuration(format!(
+            "cannot resolve Windows home: cmd.exe did not return a complete profile path ({})",
+            profile.status
+        )));
+    }
+    let profile = String::from_utf8(profile.stdout.bytes).map_err(|_| {
+        WombatError::configuration("cannot resolve Windows home: cmd.exe returned non-UTF-8 output")
+    })?;
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return Err(WombatError::configuration(
+            "cannot resolve Windows home: USERPROFILE is empty in Windows interop",
+        ));
+    }
+    let mut translation_command = Command::new("wslpath");
+    translation_command.args(["-u", profile]);
+    let translated = crate::execution::process::run(
+        &mut translation_command,
+        "Windows profile translation",
+        Some(Duration::from_secs(5)),
+        16 * 1024,
+        None,
+        crate::execution::process::Forwarding::Retained,
+    )
+    .map_err(|error| {
+        WombatError::configuration(format!(
+            "cannot translate Windows home: wslpath is unavailable: {error}"
+        ))
+    })?;
+    if !translated.success || translated.stdout.truncated {
+        return Err(WombatError::configuration(format!(
+            "cannot translate Windows home with wslpath: {}",
+            translated.status
+        )));
+    }
+    let path = String::from_utf8(translated.stdout.bytes).map_err(|_| {
+        WombatError::configuration(
+            "cannot translate Windows home: wslpath returned non-UTF-8 output",
+        )
+    })?;
+    let path = path.trim();
+    crate::model::path::validate_absolute_target(path)?;
+    Ok(std::path::PathBuf::from(path))
 }
 
 fn require_local_context(state: &mut RuntimeState, location: &Location) -> Result<()> {
@@ -551,6 +696,7 @@ fn resolve_lazy_proxy(
         "target" => snapshot_explicit_context(state, ObservationSubject::Target, &path, location),
         "common" => snapshot_common_context(state, &path, location),
         "paths" => snapshot_paths(state, location),
+        "windows_paths" => snapshot_windows_paths(state, location),
         _ => Err(WombatError::invariant(format!(
             "unknown native lazy proxy kind `{kind}`"
         ))),
@@ -602,7 +748,23 @@ fn snapshot_paths(state: &Rc<RefCell<RuntimeState>>, location: &Location) -> Res
     ] {
         paths.insert(key.to_string(), path_value(state, key, location)?);
     }
+    if state.borrow().host.wsl {
+        paths.insert(
+            "windows".to_string(),
+            snapshot_windows_paths(state, location)?,
+        );
+    }
     Ok(FrozenValue::Map(paths))
+}
+
+fn snapshot_windows_paths(
+    state: &Rc<RefCell<RuntimeState>>,
+    location: &Location,
+) -> Result<FrozenValue> {
+    Ok(FrozenValue::Map(BTreeMap::from([(
+        "home".to_string(),
+        windows_path_value(state, "home", location)?,
+    )])))
 }
 
 fn snapshot_at_path(root: &FrozenValue, path: &str) -> Result<FrozenValue> {

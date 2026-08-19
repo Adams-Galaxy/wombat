@@ -35,6 +35,12 @@ The root declaration also installs `.wombat-example`, demonstrating that
 arbitrary leading-dot targets use the same generic convention as every other
 path.
 
+For a WSL-specific Windows-owned configuration, bind `p = w.paths` and declare
+an explicit external destination only inside `if w.wsl then`: for example,
+`w.install(".wezterm.lua", { to = p.windows.home .. "/.wezterm.lua" })`.
+It remains Wombat-managed by the normal deployment state; `%USERPROFILE%` is
+intentionally not expanded.
+
 ```sh
 wombat -S examples/dotfiles build -- \
   --name "Example User" --email example@example.invalid

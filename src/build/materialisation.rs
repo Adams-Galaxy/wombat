@@ -218,7 +218,7 @@ fn materialise_artifact(
     cache: Option<&crate::build::cache::BuildCache>,
 ) -> Result<Artifact> {
     let source_path = source_root.join(&artifact.source);
-    let destination = tree.join(&artifact.target.path);
+    let destination = tree.join(artifact.target.payload_path());
     let parent = crate::storage::path::parent(&destination)?;
     fs::create_dir_all(parent).map_err(|error| WombatError::io(parent, error))?;
     let (production, content) = match &artifact.production {

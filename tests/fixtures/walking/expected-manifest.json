@@ -1,10 +1,10 @@
 {
-  "format_version": 21,
-  "construction_version": 3,
+  "format_version": 22,
+  "construction_version": 4,
   "wombat_version": "0.1.0",
   "project": null,
-  "build_id": "sha256:2ee518564a2559d8be17c025ad6008afd9d96fb46046ab4decdd8b2bd677d277",
-  "plan_id": "sha256:c8299214f3fed3794bdbeada843b58bdca008ef79432f1220aa1fa28af275478",
+  "build_id": "sha256:6d0b7ca7c75362e19ce029e579643e3184ac8a6bb8653ad87a6ffd7e8970f2e9",
+  "plan_id": "sha256:39bff87f211a70eed4c4d76adf9727d2fe685b8486025f40088fcb78e9343345",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -211,6 +211,7 @@
       },
       "target": {
         "path": ".config/starship.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/starship.toml"

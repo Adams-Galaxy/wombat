@@ -283,6 +283,9 @@ pub struct HostPaths {
     pub state: Option<PathBuf>,
     /// XDG cache root, including its conventional fallback.
     pub cache: Option<PathBuf>,
+    /// Lazily resolved Windows user-profile path, translated into WSL syntax.
+    /// Fixtures may supply it to prove the boundary without Win32 interop.
+    pub windows_home: Option<PathBuf>,
 }
 
 impl HostContext {
@@ -372,6 +375,7 @@ impl HostPaths {
             data: Some(home.join(".local/share")),
             state: Some(home.join(".local/state")),
             cache: Some(home.join(".cache")),
+            windows_home: None,
         }
     }
 
@@ -381,6 +385,7 @@ impl HostPaths {
             data: observed_path("XDG_DATA_HOME", home.map(|home| home.join(".local/share"))),
             state: observed_path("XDG_STATE_HOME", home.map(|home| home.join(".local/state"))),
             cache: observed_path("XDG_CACHE_HOME", home.map(|home| home.join(".cache"))),
+            windows_home: None,
         }
     }
 }

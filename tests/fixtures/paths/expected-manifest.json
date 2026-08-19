@@ -1,10 +1,10 @@
 {
-  "format_version": 21,
-  "construction_version": 3,
+  "format_version": 22,
+  "construction_version": 4,
   "wombat_version": "0.1.0",
   "project": null,
-  "build_id": "sha256:d2e4bfdc5e3670e1e8a9ed4e433767ca4f155d890c19a36a11df80b733593ca9",
-  "plan_id": "sha256:ff8dd5ebbd84d90418d451f16126cc96833e2f40e6da151c1ad8756e9ca47e97",
+  "build_id": "sha256:ee32a3ae853ec9b9411888eb0dacb227891f51adff4222b4f35bdab0b7192372",
+  "plan_id": "sha256:ccbc572e3136cd569e7e578db1ff21f4cf54e1cc0e41201b4c6203fc1029a65c",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -402,6 +402,7 @@
       },
       "target": {
         "path": ".config/auto.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/auto.toml"
@@ -447,6 +448,7 @@
       },
       "target": {
         "path": ".config/starship-alt.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "explicit",
           "declared": ".config/starship-alt.toml"
@@ -492,6 +494,7 @@
       },
       "target": {
         "path": ".config/starship.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/starship.toml"
@@ -539,6 +542,7 @@
       },
       "target": {
         "path": ".profile",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_profile"
@@ -586,6 +590,7 @@
       },
       "target": {
         "path": ".zshrc",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_zshrc"

@@ -179,7 +179,7 @@ fn defaults_are_contextual_frozen_and_manifested_without_unused_host_facts() {
         .build("build/default", &[], mac_host("wombat-mac"))
         .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 21);
+    assert_eq!(outcome.manifest.format_version, 22);
     assert_eq!(outcome.manifest.target.origin, TargetOrigin::RootOverride);
     assert_eq!(
         outcome
@@ -329,6 +329,7 @@ w.generate('context', {
         data: Some(PathBuf::from("/xdg/data")),
         state: Some(PathBuf::from("/xdg/state")),
         cache: Some(PathBuf::from("/xdg/cache")),
+        windows_home: None,
     };
     let outcome = repository.build("build", &[], host).unwrap();
     assert_eq!(
@@ -538,6 +539,62 @@ fn wsl_is_a_linux_specialization_without_kernel_identity_leakage() {
 }
 
 #[test]
+fn windows_home_is_a_lazy_wsl_path_and_external_artifact_destination() {
+    let repository = Repository::new(
+        "local w = require('wombat')\nlocal p = w.paths\nassert(w.wsl)\nw.install('wezterm.lua', { to = p.windows.home .. '/.wezterm.lua' })\n",
+    );
+    repository.write("src/wezterm.lua", "return {}\n");
+    let mut host = linux_host();
+    host.wsl = true;
+    host.paths.windows_home = Some(PathBuf::from("/custom-mount/Users/WindowsUser"));
+    let outcome = repository.build("build", &[], host).unwrap();
+    let artifact = &outcome.manifest.artifacts[0];
+    assert_eq!(
+        artifact.target.path,
+        "/custom-mount/Users/WindowsUser/.wezterm.lua"
+    );
+    assert_eq!(
+        artifact.target.scope,
+        wombat::manifest::TargetScope::Absolute
+    );
+    assert!(outcome.manifest.observations.iter().any(|observation| {
+        observation.subject == ObservationSubject::Host && observation.path == "paths.windows.home"
+    }));
+    assert!(outcome.manifest.observations.iter().any(|observation| {
+        observation.subject == ObservationSubject::Host && observation.path == "wsl"
+    }));
+}
+
+#[test]
+fn windows_paths_are_wsl_only_and_snapshot_as_plain_template_data() {
+    let non_wsl = Repository::new("local p = require('wombat').paths\nlocal _ = p.windows.home\n");
+    let error = non_wsl
+        .build("build", &[], linux_host())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("available only inside WSL"), "{error}");
+
+    let repository = Repository::new(
+        "local w = require('wombat')\nlocal p = w.paths\nw.install('value.tmpl', { to = p.windows.home .. '/template.txt', with = w.template.context({ windows = p.windows }) })\n",
+    );
+    repository.write("src/value.tmpl", "{{windows.home}}\n");
+    let mut host = linux_host();
+    host.wsl = true;
+    host.paths.windows_home = Some(PathBuf::from("/mnt/windows/Users/Fixture"));
+    repository.build("build", &[], host).unwrap();
+    let payload = fs::read_dir(repository.root.join("build/tree/external"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::read_to_string(payload).unwrap(),
+        "/mnt/windows/Users/Fixture\n"
+    );
+}
+
+#[test]
 fn unused_common_context_does_not_change_identity_or_observations() {
     let repository = Repository::new(
         "local w = require('wombat')\nw.generate('same', { to = 'same', content = 'same' })\n",
@@ -625,6 +682,7 @@ fn common_paths_validate_availability_absolute_values_and_immutability() {
         data: None,
         state: None,
         cache: None,
+        windows_home: None,
     };
     let missing = Repository::new("local p = require('wombat').paths\nlocal _ = p.home\n");
     let error = missing

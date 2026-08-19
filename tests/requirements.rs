@@ -66,7 +66,7 @@ fn build_fixture(name: &str) -> (TempDir, wombat::BuildOutcome) {
 fn built_in_provider_resolves_commands_alternatives_formulae_and_casks() {
     let (_temporary, outcome) = build_fixture("requirements");
 
-    assert_eq!(outcome.manifest.format_version, 21);
+    assert_eq!(outcome.manifest.format_version, 22);
     assert_eq!(outcome.manifest.providers.len(), 1);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     let search = &outcome.manifest.requirements[0];
@@ -97,7 +97,7 @@ assert(search.package == "ripgrep")
         wombat::BuildOptions::new(&source, temporary.path().join("build")).with_host(debian_host()),
     )
     .unwrap();
-    assert_eq!(outcome.manifest.format_version, 21);
+    assert_eq!(outcome.manifest.format_version, 22);
     assert_eq!(outcome.manifest.requirements.len(), 2);
     assert_eq!(
         outcome.manifest.requirements[0].binding.package.as_deref(),
@@ -162,7 +162,7 @@ w.need.package("yazi", {
     )
     .unwrap();
 
-    assert_eq!(outcome.manifest.format_version, 21);
+    assert_eq!(outcome.manifest.format_version, 22);
     assert_eq!(outcome.manifest.prerequisites.len(), 1);
     let prerequisite = &outcome.manifest.prerequisites[0];
     assert_eq!(prerequisite.provider, "apt");

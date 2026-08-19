@@ -72,8 +72,8 @@ w.need.package("steam", { provider = "dnf", with = { rpmfusion = "nonfree" }, wh
 "#,
     );
 
-    assert_eq!(outcome.manifest.format_version, 21);
-    assert_eq!(outcome.manifest.construction_version, 3);
+    assert_eq!(outcome.manifest.format_version, 22);
+    assert_eq!(outcome.manifest.construction_version, 4);
     assert_eq!(outcome.manifest.providers[0].name, "dnf");
     assert_eq!(
         serde_json::to_value(&outcome.manifest.providers[0].origin).unwrap(),

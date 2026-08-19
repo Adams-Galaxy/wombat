@@ -1,10 +1,10 @@
 {
-  "format_version": 21,
-  "construction_version": 3,
+  "format_version": 22,
+  "construction_version": 4,
   "wombat_version": "0.1.0",
   "project": null,
-  "build_id": "sha256:6d7715e7fe25b0faffd8a177f471e40392715556d291ef7560c6e3ea5c35452e",
-  "plan_id": "sha256:9b152692b37c444b63b8a416d647bd322f2f605fccce56f3bea033ad925c7173",
+  "build_id": "sha256:87b4f7523791f62035ae27632f9f483c24926f5aea651f174c9eef9185081aee",
+  "plan_id": "sha256:9f19bc2de4bb909c4fdf7d009e8f29180feb4ed8ce2149ebcc2ed3a7ab6f8030",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -324,6 +324,7 @@
       },
       "target": {
         "path": ".config/starship.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/starship.toml.tmpl"
@@ -385,6 +386,7 @@
       },
       "target": {
         "path": ".config/wezterm.lua",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/wezterm.lua.tmpl"

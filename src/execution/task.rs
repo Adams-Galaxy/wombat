@@ -220,6 +220,7 @@ fn execute_tasks_selected(
             let target = expand_target_root(
                 &EvaluatedTargetRoot {
                     path: target_root.path.clone(),
+                    scope: crate::model::manifest::TargetScope::DeploymentRoot,
                     origin: target_root.origin.clone(),
                 },
                 &cached.relative,
@@ -269,7 +270,7 @@ fn execute_tasks_selected(
     desired.artifacts.sort_by(|left, right| {
         left.target
             .key()
-            .cmp(right.target.key())
+            .cmp(&right.target.key())
             .then_with(|| left.owner.cmp(&right.owner))
             .then_with(|| left.source.cmp(&right.source))
             .then_with(|| left.declared_at.cmp(&right.declared_at))

@@ -9,17 +9,17 @@ telling you to rebuild. There are no migrations — see
 
 | Format | Version | Location |
 | --- | --- | --- |
-| Manifest | 21 | `<build>/manifest.json` |
-| Build plan | 12 | `<build>/.wombat/plan/plan.json` |
+| Manifest | 22 | `<build>/manifest.json` |
+| Build plan | 13 | `<build>/.wombat/plan/plan.json` |
 | Execution journal | 4 | `<build>/.wombat/execution-journal.json`, and per target |
-| Target state | 3 | `$XDG_STATE_HOME/wombat/targets/<target>/state.json` |
+| Target state | 4 | `$XDG_STATE_HOME/wombat/targets/<target>/state.json` |
 | Script state | 1 | `$XDG_STATE_HOME/wombat/scripts/materialise/<project>/…/state.json` |
 | Workspace marker | 1 | `<build>/.wombat/workspace.json` |
 | Derivation cache | 1 | `<build>/.wombat/cache/` |
 | Repository config | 3 | `<repository>/wombat.toml` |
 | User config | 2 | `$XDG_CONFIG_HOME/wombat/config.toml` |
 
-Alongside these, `construction_version` is currently **3**. It gates product
+Alongside these, `construction_version` is currently **4**. It gates product
 compatibility and moves only when construction can produce different output for
 unchanged configuration — unlike the release version, which changes whenever
 Wombat is released and does not invalidate products.

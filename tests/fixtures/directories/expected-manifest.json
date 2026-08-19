@@ -1,10 +1,10 @@
 {
-  "format_version": 21,
-  "construction_version": 3,
+  "format_version": 22,
+  "construction_version": 4,
   "wombat_version": "0.1.0",
   "project": null,
-  "build_id": "sha256:4c070f9194aa6b933a6803567445ac87c5b63e32b9761711ed38e13e370c9d43",
-  "plan_id": "sha256:0d416631bf2454ae8b2e4fa312f2b21854ac5dd3b455850c61234eb147d42cd0",
+  "build_id": "sha256:eea8b1f7d2e77afe6692c65e73ffbb32bd898a940f1753f4aee31e1ed7c6282d",
+  "plan_id": "sha256:ed814b42cc3f258e0dbc520f017c7b3e8bd261a482b55afe4ace5cdd52576d57",
   "execution_mode": "normal",
   "skipped_requirement_gates": [],
   "sources": [
@@ -278,6 +278,7 @@
       },
       "target": {
         "path": ".config/app/.hidden",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/app/dot_hidden"
@@ -337,6 +338,7 @@
       },
       "target": {
         "path": ".config/app/nested/settings.toml",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_config/app/nested/settings.toml"
@@ -391,6 +393,7 @@
       },
       "target": {
         "path": ".local/bin/tool",
+        "scope": "deployment_root",
         "origin": {
           "kind": "inferred",
           "source": "src/dot_local/bin/tool"

@@ -77,6 +77,14 @@ A manifest path like `.config/app.toml` always means literally
 `<target-root>/.config/app.toml`. It does not consult `XDG_CONFIG_HOME` on the
 deploying machine, because the product has to mean the same thing everywhere.
 
+An explicitly absolute POSIX `w.install(..., { to = "/path/file" })` is the
+exception: it is a declared external endpoint and is used unchanged rather than
+rebased below `<target-root>`. It remains in that deployment's state record and
+receives the same adoption, drift, removal, and atomic-write protections as a
+root-relative artifact. Wombat rejects shell expansion and Windows path syntax;
+from WSL, use the resolved `p.windows.home` path for the narrow Windows-home
+case.
+
 Deploying implicitly to your own home refuses a product whose target OS doesn't
 match the machine you're on. Passing `--target-root` explicitly is the deliberate
 way out, which is what makes testing into a scratch directory easy:

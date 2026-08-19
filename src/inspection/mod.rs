@@ -940,7 +940,9 @@ fn artifact_aliases(artifact: &Artifact, home: Option<&Path>) -> BTreeSet<String
     ]);
     let logical = artifact.target.path.clone();
     aliases.insert(logical.clone());
-    if let Some(home) = home {
+    if artifact.target.scope == crate::model::manifest::TargetScope::DeploymentRoot
+        && let Some(home) = home
+    {
         aliases.insert(home.join(logical).to_string_lossy().into_owned());
     }
     aliases

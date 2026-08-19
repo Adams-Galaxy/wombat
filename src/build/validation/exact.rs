@@ -8,7 +8,7 @@ pub(super) fn verify_tree(tree: &Path, manifest: &Manifest) -> Result<()> {
     let mut expected_files = BTreeMap::new();
     let mut expected_dirs = BTreeSet::new();
     for artifact in &manifest.artifacts {
-        let relative = artifact.target.path.clone();
+        let relative = artifact.target.payload_path();
         if expected_files.insert(relative.clone(), artifact).is_some() {
             return Err(WombatError::configuration(format!(
                 "manifest contains duplicate tree path `{relative}`"

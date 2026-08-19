@@ -168,6 +168,73 @@ fn diff_apply_update_and_unchanged_form_a_complete_workflow() {
 }
 
 #[test]
+fn external_targets_are_reconciled_and_removed_with_primary_target_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("repository");
+    let build_dir = root.join("build");
+    let home = temporary.path().join("home");
+    let state = temporary.path().join("state");
+    let external = temporary.path().join("windows-home/.wezterm.lua");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        root.join("wombat.lua"),
+        format!(
+            "local w = require('wombat')\nw.install('wezterm.lua', {{ to = {:?} }})\n",
+            external
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("src/wezterm.lua"), "first\n").unwrap();
+    let options = || DeploymentOptions::new(&build_dir, &home).with_state_root(&state);
+
+    build(BuildOptions::new(&root, &build_dir)).unwrap();
+    apply(&options(), ConflictPolicy::Fail).unwrap();
+    assert_eq!(fs::read_to_string(&external).unwrap(), "first\n");
+
+    fs::write(root.join("src/wezterm.lua"), "second\n").unwrap();
+    build(BuildOptions::new(&root, &build_dir)).unwrap();
+    apply(&options(), ConflictPolicy::Fail).unwrap();
+    assert_eq!(fs::read_to_string(&external).unwrap(), "second\n");
+
+    fs::write(root.join("wombat.lua"), "local _ = require('wombat')\n").unwrap();
+    build(BuildOptions::new(&root, &build_dir)).unwrap();
+    apply(&options(), ConflictPolicy::Fail).unwrap();
+    assert!(!external.exists());
+}
+
+#[test]
+fn external_and_root_relative_targets_that_resolve_equally_fail_before_mutation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("repository");
+    let build_dir = root.join("build");
+    let home = temporary.path().join("home");
+    let state = temporary.path().join("state");
+    fs::create_dir_all(root.join("src/dot_config")).unwrap();
+    fs::create_dir(&home).unwrap();
+    let external = home.join(".config/app.toml");
+    fs::write(
+        root.join("wombat.lua"),
+        format!(
+            "local w = require('wombat')\nw.install('.config/app.toml')\nw.install('external', {{ to = {:?} }})\n",
+            external
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("src/dot_config/app.toml"), "root\n").unwrap();
+    fs::write(root.join("src/external"), "external\n").unwrap();
+    build(BuildOptions::new(&root, &build_dir)).unwrap();
+    let error = diff(&DeploymentOptions::new(&build_dir, &home).with_state_root(&state))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("resolve to the same filesystem path"),
+        "{error}"
+    );
+    assert!(!external.exists());
+}
+
+#[test]
 fn source_only_identity_changes_advance_complete_state_without_rewriting_targets() {
     let repository = Repository::new("theme = 'dark'\n");
     let first = repository.build();
@@ -1096,7 +1163,7 @@ fn unsupported_target_state_versions_are_rejected() {
     fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let error = diff(&repository.options()).unwrap_err().to_string();
     assert!(
-        error.contains("unsupported target state format version 2") && error.contains("expected 3"),
+        error.contains("unsupported target state format version 2") && error.contains("expected 4"),
         "{error}"
     );
 }

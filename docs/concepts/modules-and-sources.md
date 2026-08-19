@@ -81,6 +81,22 @@ w.install("*.toml", { exclude = { "draft.toml" } })
 w.install("themes/**", { allow_empty = true })
 ```
 
+For a direct file, `to` is its exact final path, so it also provides ordinary
+rename semantics. For a directory or glob, `to` is a destination root and
+Wombat preserves the selected leaves beneath it:
+
+```lua
+w.install("starship.toml", { to = ".config/starship-nightly.toml" })
+w.install("nvim", { to = ".config/nvim-nightly" })
+```
+
+Relative destinations land beneath the deployment root. An explicit POSIX
+absolute destination is an external artifact endpoint; it is still declared and
+managed by the selected deployment, but is never rebased by `--target-root`.
+Use it deliberately for a local integration such as a Windows-owned file from
+WSL. Shell expansion (`~`, `%USERPROFILE%`) and Windows path syntax are not
+part of Wombat's target grammar.
+
 Directories expand recursively into their regular file leaves, in deterministic
 order. Symlinks and special files are refused rather than silently skipped. Globs
 are deterministic and support `exclude`; set-style selectors accept

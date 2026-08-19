@@ -21,7 +21,7 @@ use crate::model::manifest::{
 use crate::storage::{atomic, digest, locking, permissions};
 use crate::{Result, WombatError};
 
-pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 3;
+pub(crate) const TARGET_STATE_FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -207,7 +207,7 @@ impl TargetStateGuard {
         if !state
             .artifacts
             .windows(2)
-            .all(|pair| pair[0].target.key().cmp(pair[1].target.key()).is_lt())
+            .all(|pair| pair[0].target.key().cmp(&pair[1].target.key()).is_lt())
         {
             return Err(WombatError::corrupt_state(format!(
                 "target state artifacts in `{}` are not uniquely sorted",

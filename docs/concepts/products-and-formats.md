@@ -6,7 +6,7 @@ describing exactly what should be deployed.
 ```text
 build/
 ├── manifest.json     the typed description of everything
-├── tree/             the exact bytes to deploy
+├── tree/             the exact bytes to deploy, including encoded external targets
 └── .wombat/          plan, locks, caches, staging, recovery state
 ```
 
@@ -14,6 +14,11 @@ build/
 never travels with it. Once published, the manifest and tree are sealed —
 operational results like "this script ran" live in execution journals under
 locked state, not written back into the product.
+
+Root-relative payloads retain their target path below `tree/`. Explicit external
+destinations use an encoded private namespace instead, so a destination such as
+`/mnt/c/Users/Ada/.wezterm.lua` can never be interpreted as a path that escapes
+the verified product tree.
 
 That seal is what makes a product trustworthy. If it could be edited after
 publication, inspecting one would tell you what it says about itself rather than

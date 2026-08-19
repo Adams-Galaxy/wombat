@@ -46,6 +46,7 @@ impl ReconciliationAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReconciliationItem {
     pub target: String,
+    pub anchor: PathBuf,
     pub path: PathBuf,
     pub action: ReconciliationAction,
     pub reason: Option<String>,
@@ -112,17 +113,27 @@ pub(crate) fn plan_reconciliation(
         .collect::<BTreeSet<_>>();
     let mut items = Vec::with_capacity(keys.len());
 
+    let mut resolved = BTreeMap::new();
     for key in keys {
         let desired_artifact = desired_by_target.get(&key).copied();
         let previous_artifact = previous_by_target.get(&key).copied();
         let representative = desired_artifact
             .or(previous_artifact)
             .expect("reconciliation keys have an artifact");
-        let path = target_path(&target_root, representative);
-        let actual = inspect_actual(&target_root, &path)?;
+        let (anchor, path) = resolve_target(&target_root, representative)?;
+        if let Some(previous) = resolved.insert(path.clone(), key.clone())
+            && previous != key
+        {
+            return Err(WombatError::configuration(format!(
+                "artifact targets `{previous}` and `{key}` resolve to the same filesystem path `{}`",
+                path.display()
+            )));
+        }
+        let actual = inspect_actual(&anchor, &path)?;
         let (action, reason) = classify(desired_artifact, previous_artifact, &actual);
         items.push(ReconciliationItem {
-            target: representative.target.path.clone(),
+            target: representative.target.display().to_string(),
+            anchor,
             path,
             action,
             reason,
@@ -289,12 +300,66 @@ fn read_actual_file(path: &Path, before: &fs::Metadata) -> Result<ActualArtifact
     })
 }
 
-pub(crate) fn target_path(target_root: &Path, artifact: &Artifact) -> PathBuf {
-    target_root.join(&artifact.target.path)
+pub(crate) fn resolve_target(
+    target_root: &Path,
+    artifact: &Artifact,
+) -> Result<(PathBuf, PathBuf)> {
+    match artifact.target.scope {
+        crate::model::manifest::TargetScope::DeploymentRoot => Ok((
+            target_root.to_path_buf(),
+            target_root.join(&artifact.target.path),
+        )),
+        crate::model::manifest::TargetScope::Absolute => external_target(&artifact.target.path),
+    }
 }
 
 pub(crate) fn target_key(artifact: &Artifact) -> String {
-    artifact.target.path.clone()
+    artifact.target.key()
+}
+
+fn external_target(path: &str) -> Result<(PathBuf, PathBuf)> {
+    let destination = PathBuf::from(path);
+    let leaf = destination.file_name().ok_or_else(|| {
+        WombatError::configuration(format!("absolute target `{path}` must identify a file"))
+    })?;
+    let mut current = destination.parent().ok_or_else(|| {
+        WombatError::configuration(format!("absolute target `{path}` has no parent"))
+    })?;
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+                    return Err(WombatError::configuration(format!(
+                        "external target parent `{}` is not a directory",
+                        current.display()
+                    )));
+                }
+                let anchor =
+                    fs::canonicalize(current).map_err(|error| WombatError::io(current, error))?;
+                let mut resolved = anchor.clone();
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                resolved.push(leaf);
+                return Ok((anchor, resolved));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = current.file_name().ok_or_else(|| {
+                    WombatError::configuration(format!(
+                        "external target `{path}` has no existing filesystem anchor"
+                    ))
+                })?;
+                missing.push(component.to_os_string());
+                current = current.parent().ok_or_else(|| {
+                    WombatError::configuration(format!(
+                        "external target `{path}` has no existing filesystem anchor"
+                    ))
+                })?;
+            }
+            Err(error) => return Err(WombatError::io(current, error)),
+        }
+    }
 }
 
 pub(crate) fn expected_mode(artifact: &Artifact) -> u32 {
@@ -347,6 +412,7 @@ mod tests {
             production: Production::Static,
             target: TargetPath {
                 path: "app".to_string(),
+                scope: crate::model::manifest::TargetScope::DeploymentRoot,
                 origin: TargetOrigin::Inferred {
                     source: "src/dot_config/app".to_string(),
                 },

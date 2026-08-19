@@ -225,7 +225,15 @@ pub(super) fn declare_generated(
     let (_, _, module_target, _) = state.active_location();
     let owner = state.active_module().unwrap_or(ROOT_MODULE).to_string();
     let target = match explicit_target.as_deref() {
-        Some(target) => parse_explicit_target(target)?,
+        Some(target) => {
+            let target = parse_explicit_target(target)?;
+            if target.scope == crate::model::manifest::TargetScope::Absolute {
+                return Err(WombatError::configuration(
+                    "w.generate() targets must remain deployment-root-relative; use w.install() for an explicit external file",
+                ));
+            }
+            target
+        }
         None => {
             let base = module_target.ok_or_else(|| {
                 WombatError::configuration(format!(

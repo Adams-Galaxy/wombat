@@ -112,12 +112,12 @@ pub(super) fn validate_target_compatibility(
 fn append_content_diff(
     output: &mut String,
     opened: &OpenedBuild,
-    target_root: &Path,
+    _target_root: &Path,
     item: &crate::deploy::reconcile::ReconciliationItem,
 ) -> Result<()> {
     let old = if matches!(item.actual, ActualArtifact::File { .. }) {
         let bytes = fs::read(&item.path).map_err(|error| WombatError::io(&item.path, error))?;
-        let after = inspect_actual(target_root, &item.path)?;
+        let after = inspect_actual(&item.anchor, &item.path)?;
         if after != item.actual {
             return Err(WombatError::configuration(format!(
                 "target `{}` changed while its diff was rendered",
