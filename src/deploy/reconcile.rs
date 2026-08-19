@@ -205,7 +205,13 @@ pub(crate) fn actual_matches(actual: &ActualArtifact, artifact: &Artifact) -> bo
     matches!(
         actual,
         ActualArtifact::File { content, mode }
-            if content == &artifact.content && *mode == expected_mode(artifact)
+            if content == &artifact.content
+                // An explicit external endpoint may be Windows storage seen
+                // through WSL, where POSIX modes are synthetic. Its content
+                // remains guarded, while normal deployment-root artifacts
+                // continue to detect a mode change as downstream drift.
+                && (artifact.target.scope == crate::model::manifest::TargetScope::Absolute
+                    || *mode == expected_mode(artifact))
     )
 }
 
@@ -394,10 +400,10 @@ fn digest_string(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActualArtifact, ReconciliationAction, classify, expected_mode};
+    use super::{ActualArtifact, ReconciliationAction, actual_matches, classify, expected_mode};
     use crate::model::manifest::{
         Artifact, ArtifactKind, FileContent, Production, SourceLocation, SourceOrigin, SourceTrace,
-        TargetOrigin, TargetPath,
+        TargetOrigin, TargetPath, TargetScope,
     };
 
     fn artifact(owner: &str, digest: &str) -> Artifact {
@@ -524,5 +530,19 @@ mod tests {
             classify(Some(&transferred), Some(&previous), &actual(&previous)).0,
             ReconciliationAction::AdvanceState
         );
+    }
+
+    #[test]
+    fn external_artifacts_ignore_synthetic_posix_modes() {
+        let ordinary = artifact("ordinary", "sha256:ordinary");
+        let synthetic_mode = ActualArtifact::File {
+            content: ordinary.content.clone(),
+            mode: 0o777,
+        };
+        assert!(!actual_matches(&synthetic_mode, &ordinary));
+
+        let mut external = ordinary;
+        external.target.scope = TargetScope::Absolute;
+        assert!(actual_matches(&synthetic_mode, &external));
     }
 }
