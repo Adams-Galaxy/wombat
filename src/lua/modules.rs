@@ -562,6 +562,12 @@ fn observe_windows_home() -> Result<std::path::PathBuf> {
     for executable in windows_cmd_candidates() {
         let mut command = Command::new(executable);
         command.args(["/d", "/s", "/c", "echo %USERPROFILE%"]);
+        // cmd.exe reports a UNC-current-directory warning when inherited from
+        // WSL's Linux filesystem. Run from the conventional mounted C: root so
+        // its stdout remains the one path this narrow interop lookup consumes.
+        if std::path::Path::new("/mnt/c").is_dir() {
+            command.current_dir("/mnt/c");
+        }
         match crate::execution::process::run(
             &mut command,
             "Windows profile lookup",
