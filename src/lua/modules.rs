@@ -529,7 +529,11 @@ fn windows_path_value(
         )));
     }
     windows_paths_available(state, location)?;
-    let path = match state.borrow().host.paths.windows_home.clone() {
+    // Release the immutable borrow before Windows interop can cache its
+    // observation; otherwise the first real WSL lookup panics while recording
+    // the resolved profile.
+    let cached_path = { state.borrow().host.paths.windows_home.clone() };
+    let path = match cached_path {
         Some(path) => path,
         None => {
             let path = observe_windows_home()?;
