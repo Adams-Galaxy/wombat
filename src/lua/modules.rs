@@ -553,19 +553,30 @@ fn observe_windows_home() -> Result<std::path::PathBuf> {
     use std::process::Command;
     use std::time::Duration;
 
-    let mut profile_command = Command::new("cmd.exe");
-    profile_command.args(["/d", "/s", "/c", "echo %USERPROFILE%"]);
-    let profile = crate::execution::process::run(
-        &mut profile_command,
-        "Windows profile lookup",
-        Some(Duration::from_secs(5)),
-        16 * 1024,
-        None,
-        crate::execution::process::Forwarding::Retained,
-    )
-    .map_err(|error| {
+    let mut profile = None;
+    let mut failures = Vec::new();
+    for executable in windows_cmd_candidates() {
+        let mut command = Command::new(executable);
+        command.args(["/d", "/s", "/c", "echo %USERPROFILE%"]);
+        match crate::execution::process::run(
+            &mut command,
+            "Windows profile lookup",
+            Some(Duration::from_secs(5)),
+            16 * 1024,
+            None,
+            crate::execution::process::Forwarding::Retained,
+        ) {
+            Ok(outcome) => {
+                profile = Some(outcome);
+                break;
+            }
+            Err(error) => failures.push(format!("`{executable}`: {error}")),
+        }
+    }
+    let profile = profile.ok_or_else(|| {
         WombatError::configuration(format!(
-            "cannot resolve Windows home: cmd.exe is unavailable through WSL interop: {error}"
+            "cannot resolve Windows home: cmd.exe is unavailable through WSL interop ({})",
+            failures.join("; ")
         ))
     })?;
     if !profile.success || profile.stdout.truncated {
@@ -612,6 +623,13 @@ fn observe_windows_home() -> Result<std::path::PathBuf> {
     let path = path.trim();
     crate::model::path::validate_absolute_target(path)?;
     Ok(std::path::PathBuf::from(path))
+}
+
+fn windows_cmd_candidates() -> [&'static str; 2] {
+    // Some WSL installations deliberately omit Windows directories from PATH.
+    // The fixed fallback preserves that shell policy while retaining WSL's
+    // conventional System32 interop route for this one explicit lookup.
+    ["cmd.exe", "/mnt/c/Windows/System32/cmd.exe"]
 }
 
 fn require_local_context(state: &mut RuntimeState, location: &Location) -> Result<()> {
@@ -925,4 +943,17 @@ pub(super) fn frozen_at_path<'a>(root: &'a FrozenValue, path: &str) -> Option<&'
 
 pub(super) fn is_foundational_target(subject: ObservationSubject, path: &str) -> bool {
     subject == ObservationSubject::Target && matches!(path, "os.name" | "arch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_cmd_candidates;
+
+    #[test]
+    fn windows_profile_lookup_keeps_path_first_with_a_narrow_wsl_fallback() {
+        assert_eq!(
+            windows_cmd_candidates(),
+            ["cmd.exe", "/mnt/c/Windows/System32/cmd.exe"]
+        );
+    }
 }
